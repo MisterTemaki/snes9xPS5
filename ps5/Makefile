@@ -72,7 +72,8 @@ PORT_WARN := -Wall -Wextra -Werror -Wno-unused-parameter -Wno-missing-field-init
 # the No-Intro name table built into fe_games.o; stb_image in fe_covers.o has warnings of its own
 GAMEDB_DEFS := -DGAMEDB_TSV='"$(abspath frontend/data/snes-nointro.tsv)"'
 %/port/frontend/fe_games.o: EXTRA_FLAGS = $(GAMEDB_DEFS)
-%/port/frontend/fe_covers.o: EXTRA_FLAGS = -Wno-error -Wno-sign-compare -Wno-unused-but-set-variable -Wno-implicit-fallthrough
+%/port/frontend/fe_covers.o: EXTRA_FLAGS = -Wno-error -Wno-sign-compare -Wno-unused-but-set-variable -Wno-implicit-fallthrough -DCOVER_MANIFEST_TXT='"$(abspath frontend/data/snes-cover-index.txt)"'
+%/port/frontend/fe_covers.o: frontend/data/snes-cover-index.txt
 %/port/frontend/fe_games.o: frontend/data/snes-nointro.tsv
 CHEAT_MANIFEST_DEFS := -DCHEAT_MANIFEST_TXT='"$(abspath frontend/data/snes-cheat-index.txt)"'
 %/port/frontend/fe_cheatdownload.o: EXTRA_FLAGS = $(CHEAT_MANIFEST_DEFS)

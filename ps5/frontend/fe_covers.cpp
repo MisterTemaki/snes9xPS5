@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: MIT
 
 #include "fe_covers.h"
+#include "fe_titlematch.h"
 
 #include "fe_coverworker.h"
 #include "fe_text.h"
@@ -20,6 +21,8 @@
 #include <cstdlib>
 #include <cstring>
 #include <ctime>
+#include <mutex>
+#include <unordered_map>
 
 #define STB_IMAGE_IMPLEMENTATION
 #define STB_IMAGE_STATIC
@@ -35,10 +38,38 @@
 #define STB_IMAGE_RESIZE_STATIC
 #include "third_party/stb_image_resize2.h"
 
+#ifndef COVER_MANIFEST_TXT
+#error COVER_MANIFEST_TXT must name the built-in Libretro box art index
+#endif
+#define S9X_COVER_INCBIN(sym,path) \
+  __asm__(".section .rodata\n.global " #sym "_begin\n.balign 16\n" #sym "_begin:\n" \
+          ".incbin \"" path "\"\n.global " #sym "_end\n" #sym "_end:\n.previous\n"); \
+  extern "C" const char sym##_begin[]; \
+  extern "C" const char sym##_end[];
+S9X_COVER_INCBIN(s9x_cover_index, COVER_MANIFEST_TXT)
+
 namespace fe
 {
 namespace
 {
+const std::vector<std::string>& BoxArtNames()
+{
+    static const std::vector<std::string> names = [] {
+        std::vector<std::string> out;
+        const char* p = s9x_cover_index_begin;
+        const char* const end = s9x_cover_index_end;
+        while (p<end)
+        {
+            const char* nl = static_cast<const char*>(memchr(p,'\n',size_t(end-p)));
+            if (!nl) break;
+            if (*p!='#' && nl>p) out.emplace_back(p,size_t(nl-p));
+            p = nl + 1;
+        }
+        return out;
+    }();
+    return names;
+}
+
 constexpr int kLoadRadius = 12; // textures kept around the selection
 constexpr long kMissingRetrySeconds = 30L * 24 * 3600;
 
@@ -290,6 +321,32 @@ std::shared_ptr<CoverTex> Placeholder(const GameInfo& g)
 }
 } // namespace
 
+std::string CoverNameFor(const GameInfo& game)
+{
+    const std::string requested = game.nointro.empty() ? game.file_base : game.nointro;
+    static std::mutex mutex;
+    static std::unordered_map<std::string,std::string> cache;
+    {
+        std::lock_guard<std::mutex> guard(mutex);
+        const auto it = cache.find(requested);
+        if (it!=cache.end()) return it->second;
+    }
+    // An exact entry may itself be a git symlink pointing at the true box
+    // art. Preserve the name rather than fuzzy-matching to a nearby revision.
+    const auto& names=BoxArtNames();
+    std::string best = std::find(names.begin(),names.end(),requested)!=names.end()
+        ? requested : titles::Best(names, requested);
+    if (best.empty() && !game.nointro.empty())
+        best = titles::Best(BoxArtNames(), game.file_base);
+    if (best.empty()) best = requested; // fallback: title art/screenshot or 404 marker
+    if (best!=requested) OrbisLog("[covers] fuzzy art: %s -> %s", requested.c_str(), best.c_str());
+    {
+        std::lock_guard<std::mutex> guard(mutex);
+        cache.emplace(requested,best);
+    }
+    return best;
+}
+
 std::string ThumbnailName(const std::string& nointro)
 {
 	std::string s = nointro;
@@ -341,7 +398,7 @@ std::vector<WantedCover> MissingCovers(const std::vector<GameInfo>& games)
 	const std::string covers = OrbisDir("covers");
 	for (const GameInfo& g : games)
 	{
-		const std::string name = g.nointro.empty() ? g.file_base : g.nointro;
+		const std::string name = CoverNameFor(g);
 		const std::string file = ThumbnailName(name) + ".png";
 		const std::string cache = covers + "/" + file;
 		if (!Exists(RefetchMarker(cache)) &&
@@ -374,7 +431,7 @@ void WriteWantedList(const std::vector<WantedCover>& wanted)
 std::string CoverService::CachePath(int i) const
 {
 	const GameInfo& g = m_games[size_t(i)];
-	const std::string name = g.nointro.empty() ? g.file_base : g.nointro;
+	const std::string name = CoverNameFor(g);
 	return OrbisDir("covers") + "/" + ThumbnailName(name) + ".png";
 }
 
@@ -488,7 +545,7 @@ bool CoverService::Download(int i)
 	const std::string marker = cache.substr(0, cache.size() - 4) + ".missing";
 	if (m_offline || RecentlyMissing(marker))
 		return false;
-	const std::string url = CoverUrlFor(g.nointro.empty() ? g.file_base : g.nointro);
+	const std::string url = CoverUrlFor(CoverNameFor(g));
 	std::vector<uint8_t> data;
 	S9X_STAGE(Cover, "http get cover");
 	const int status = FetchCoverUrl(m_http, url, ThumbnailName(g.nointro), data);

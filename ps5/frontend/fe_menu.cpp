@@ -681,6 +681,7 @@ void CheatMenu()
 		{
 			Header("Cheats");
 			DrawOptionBox("No cheats found", {{"Download cheats for this game", ""}, {"Back", ""}}, 0, false);
+			DrawText(150, H - 184, FitText(emu::CheatStatus(), 3, W - 300).c_str(), 3, kText);
 			Footer("Cross: Download cheats     Circle: Back");
 		}
 		else
@@ -735,7 +736,6 @@ void CheatDownloadsMenu(const CheatRequestGame& game)
 {
     NavReader nav;
     int sel = 0;
-    bool confirm_all = false;
     for (;;)
     {
         const bool have_game = !game.basename.empty();
@@ -750,25 +750,21 @@ void CheatDownloadsMenu(const CheatRequestGame& game)
         Header(have_game ? game.basename.c_str() : "Cheat downloads");
         DrawOptionBox("Cheat Downloads", rows, sel, false);
         char status[192];
-        if (!p.valid) snprintf(status, sizeof(status), "Idle - %zu source cheat files available", CheatDatabaseCount());
+        if (!p.helper_alive)
+            snprintf(status, sizeof(status), "Helper NOT READY - restart PS5 and reinstall updated ELF");
+        else if (!p.valid)
+            snprintf(status, sizeof(status), "Helper ready - %zu source cheat files", CheatDatabaseCount());
         else snprintf(status, sizeof(status), "%s: %d/%d processed, %d saved, %d failed",
                       p.state.c_str(), p.done, p.total, p.found, p.failed);
         DrawText(125, H - 180, FitText(status, 3, W - 250).c_str(), 3, kText);
-        Footer(confirm_all ? "Download ALL files? Press Cross again to confirm or Circle to cancel"
-                           : "Cross: Download    Circle: Back    Downloads continue in background");
+        Footer("Cross: Start selected download    Circle: Back    Runs in background");
         Present();
         const Nav n = nav.Read();
         if (n.back || n.options) return;
-        if (n.up) { sel = (sel + back_row) % int(rows.size()); confirm_all = false; }
-        if (n.down) { sel = (sel + 1) % int(rows.size()); confirm_all = false; }
+        if (n.up) { sel = (sel + back_row) % int(rows.size()); }
+        if (n.down) { sel = (sel + 1) % int(rows.size()); }
         if (!n.ok) continue;
         if (sel == back_row) return;
-        if (sel == all_row && !confirm_all)
-        {
-            confirm_all = true;
-            continue;
-        }
-        confirm_all = false;
         bool queued = false;
         if (have_game && sel == 0)
             queued = RequestGameCheats(game);
@@ -781,8 +777,19 @@ void CheatDownloadsMenu(const CheatRequestGame& game)
                 collection.push_back({entry.file_base, entry.nointro});
             queued = RequestLibraryCheats(collection);
         }
-        if (!queued)
-            OrbisLog("[cheat-download] request ignored (already queued, empty, or invalid)");
+        if (queued)
+            MessageBox("Cheat download queued",
+                "The helper is downloading in the background. Check this screen for progress.");
+        else if (!CheatDownloadWorkerAlive())
+            MessageBox("Cheat downloader offline",
+                "Restart PS5, send the latest installer ELF, and reopen the app.");
+        else if (have_game && sel == 0 && BestCheatSourceFile(game).empty())
+            MessageBox("No matching cheats",
+                "No safe Libretro title match for this ROM. Try another ROM revision.");
+        else
+            MessageBox("Download not started",
+                "A download is already queued/running, or the cheat folder is not writable.");
+        nav = NavReader();
     }
 }
 

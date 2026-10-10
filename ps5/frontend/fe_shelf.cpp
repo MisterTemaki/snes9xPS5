@@ -582,7 +582,7 @@ int RepairMissingCovers()
 	for (size_t i = 0; i < st.games.size(); ++i)
 	{
 		const GameInfo& game = st.games[i];
-		const std::string name = game.nointro.empty() ? game.file_base : game.nointro;
+		const std::string name = CoverNameFor(game);
 		const std::string cache = OrbisDir("covers") + "/" + ThumbnailName(name) + ".png";
 		if (i < st.slots.size() && st.slots[i] && st.slots[i]->real) continue;
 		if (i < st.slots.size() && !st.slots[i] && OrbisIsFile(cache)) continue;

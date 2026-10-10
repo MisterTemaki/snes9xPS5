@@ -17,6 +17,10 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y python3-pil
           python3 -c "import PIL" || python3 -m pip install --break-system-packages Pillow
+      - name: Test ROM and artwork fuzzy matching
+        run: |
+          c++ -std=c++17 -O2 -Wall -Wextra -pedantic -o /tmp/snes9x-titlematch ps5/tests/test_titlematch.cpp
+          /tmp/snes9x-titlematch
       - name: Test cheat-file matcher
         run: python3 -m unittest discover -s ps5/tests -p 'test_libretro_import.py' -v
       - name: Build and run emulator host tests

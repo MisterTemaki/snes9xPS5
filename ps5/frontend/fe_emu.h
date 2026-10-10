@@ -17,6 +17,7 @@ bool GameLoaded();
 int CheatCount();
 std::string RomBase();
 std::string RomNoIntro();
+std::string CheatStatus(); // Which file was found, or why codes could not be loaded.
 bool ReloadDownloadedCheats();
 std::string CheatName(int index);
 bool CheatEnabled(int index);

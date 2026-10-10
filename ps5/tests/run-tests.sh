@@ -640,6 +640,30 @@ tls_case closing "$C/srv.pem" "$C/srv.key" drop localhost
 D="$T/root/covers"
 expect "[ -f '$D/A.png' ] && [ -f '$D/B.png' ] && [ -f '$D/C.png' ]" "a server that closes kept connections: a new one each time"
 
+
+echo "== 21. manually copied EarthBound (USA).cht loads with EarthBound.zip"
+T=$(newroot t21)
+mkdir -p "$T/root/cheats"
+python3 tests/make_test_rom.py "$T/earthbound.sfc" ntsc >/dev/null
+python3 - "$T/earthbound.sfc" "$T/root/roms/EarthBound.zip" <<'PY'
+import sys,zipfile
+with zipfile.ZipFile(sys.argv[2],"w",zipfile.ZIP_DEFLATED) as z:
+    z.write(sys.argv[1],"EarthBound.sfc")
+PY
+cat > "$T/root/cheats/EarthBound (USA).cht" <<'CHEATS'
+cheats = 2
+cheat0_desc = "Infinite Health"
+cheat0_code = "8251-57D6"
+cheat0_enable = false
+cheat1_desc = "Raw Action Replay"
+cheat1_code = "7E0DBE63"
+cheat1_enable = false
+CHEATS
+rc=$(run "$T" "0:0;100:$L3R3;102:0;110:$UP;112:0;120:$CROSS;122:0" "" "$T/root/roms/EarthBound.zip")
+expect "[ $rc = 0 ]" "EarthBound.zip launched and exited"
+expect "grep -q 'Loaded 2 cheats from EarthBound (USA).cht' '$T/root/logs/boot.log'" "manual EarthBound (USA).cht recognized for EarthBound.zip"
+expect "! grep -q 'no supported codes' '$T/root/logs/boot.log'" "EarthBound sample uses supported SNES codes"
+
 echo
 echo "passed $PASS, failed $FAIL  (work dir $WORK)"
 [ $FAIL = 0 ]

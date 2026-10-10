@@ -13,6 +13,7 @@ struct CheatDownloadStatus {
     int done = 0, total = 0, found = 0, failed = 0;
     std::string state = "idle"; // queued, downloading, completed, offline, failed, idle
     bool valid = false;
+    bool helper_alive = false;
 };
 // Queue work for the background helper. Never call HTTPS from the app after jailbreak.
 bool RequestGameCheats(const CheatRequestGame& game);
@@ -24,6 +25,8 @@ std::string CheatDownloadPath(const std::string& basename);
 bool InstallCachedCheat(const CheatRequestGame& game);
 // A complete manifest of the Libretro SNES .cht repository is embedded in the app and helper.
 size_t CheatDatabaseCount();
+// Worker heartbeat must have been updated by the currently-running helper.
+bool CheatDownloadWorkerAlive();
 std::string BestCheatSourceFile(const CheatRequestGame& game);
 // Called only by the helper process.
 void StartCheatDownloadWorker();

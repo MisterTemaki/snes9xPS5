@@ -39,6 +39,8 @@ std::string ByCrc(uint32_t crc);
 std::string Exact(const std::string& name);
 // Loose: title without tags, any case ("super mario world") -> best regional entry, or "".
 std::string Loose(const std::string& file_base);
+// Conservative fuzzy title rescue when CRC and exact/loose names all miss.
+std::string Fuzzy(const std::string& file_base);
 // "Super Mario World (USA) (Rev 1)" -> "Super Mario World"; "Legend of Zelda, The - ..." -> "The Legend of Zelda - ..."
 std::string Title(const std::string& nointro);
 std::string Region(const std::string& nointro);

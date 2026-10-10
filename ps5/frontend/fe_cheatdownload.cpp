@@ -4,11 +4,13 @@
 #include "fe_coverfetch.h"
 #include "fe_coverworker.h"
 #include "fe_http.h"
+#include "fe_titlematch.h"
 #include "OrbisPaths.h"
 
 #include <algorithm>
 #include <cctype>
 #include <cstdio>
+#include <ctime>
 #include <cstring>
 #include <fcntl.h>
 #include <memory>
@@ -37,6 +39,19 @@ constexpr size_t kMaxCheatFile = 512u << 10;
 constexpr size_t kMaxRequestBytes = 1024u << 10;
 const char* const kRequest = "download-request.txt";
 const char* const kStatus = "download-status.txt";
+const char* const kHeartbeat = "download-worker.ready";
+std::string Path(const char* name); // helper worker stores its heartbeat in the cheat folder
+void TouchHeartbeat()
+{
+    static time_t last_touch = 0; // called only by the single worker thread
+    const time_t now = time(nullptr);
+    if (now - last_touch >= 2)
+    {
+        const char ready[] = "ready\n";
+        WriteFileAtomicTo(Path(kHeartbeat), std::vector<uint8_t>(ready,ready+sizeof(ready)-1));
+        last_touch = now;
+    }
+}
 
 std::string Root() { return OrbisDir("cheats"); }
 std::string Path(const char* name) { return Root() + "/" + name; }
@@ -146,16 +161,41 @@ void Status(int done, int total, int found, int failed, const char* state)
 bool Queue(const std::string& request)
 {
     OrbisMkdirs(Root());
-    if (request.empty() || request.size() > kMaxRequestBytes || NonEmpty(Path(kRequest)))
+    if (request.empty() || request.size() > kMaxRequestBytes) return false;
+    if (!CheatDownloadWorkerAlive())
+    {
+        OrbisLog("[cheat-download] queue rejected: no live helper heartbeat (install/update helper ELF)");
+        return false;
+    }
+    const CheatDownloadStatus progress = ReadCheatDownloadStatus();
+    if (progress.valid && progress.state == "downloading" && progress.done < progress.total)
+    {
+        OrbisLog("[cheat-download] queue busy (%d/%d)", progress.done, progress.total);
+        return false;
+    }
+    const std::string path = Path(kRequest);
+    if (NonEmpty(path))
+    {
+        struct stat st = {};
+        // The queue is normally consumed in under a second; old requests may be
+        // left behind when the installed helper was not upgraded.
+        if (stat(path.c_str(), &st)==0 && time(nullptr)-st.st_mtime>30)
+            unlink(path.c_str());
+        else return false;
+    }
+    if (!WriteFileAtomicTo(path, std::vector<uint8_t>(request.begin(),request.end())))
         return false;
     Status(0, 0, 0, 0, "queued");
-    return WriteFileAtomicTo(Path(kRequest), std::vector<uint8_t>(request.begin(), request.end()));
+    OrbisLog("[cheat-download] queued %zu bytes for helper",request.size());
+    return true;
 }
 bool DownloadSource(HttpClient& http, const std::string& source, const std::string& target)
 {
     if (NonEmpty(target)) return true;
+    TouchHeartbeat();
     std::vector<uint8_t> bytes;
     const int code = http.Get(std::string(kLibretroFolder) + UrlEncode(source), bytes, kMaxCheatFile);
+    TouchHeartbeat();
     if (code != 200 || !PlausibleCheats(bytes))
     {
         OrbisLog("[cheat-download] %s -> %d (%zu bytes)", source.c_str(), code, bytes.size());
@@ -216,8 +256,12 @@ void* DownloadThread(void*)
     OrbisMkdirs(Root() + "/database");
     std::unique_ptr<HttpClient> http = MakeCoverWorkerHttp(); // helper: TlsHttp using own TLS
     OrbisLog("[cheat-download] helper online: %zu Libretro SNES source files", SourceFiles().size());
+    // A previous helper may have quit halfway through a job. Never leave the
+    // persisted "downloading" state blocking all future requests on restart.
+    Status(0, 0, 0, 0, "idle");
     for (;;)
     {
+        TouchHeartbeat();
         std::vector<std::string> lines;
         if (!Consume(lines)) { usleep(500 * 1000); continue; }
         const bool all = lines[0] == "all";
@@ -252,6 +296,13 @@ void* DownloadThread(void*)
 } // namespace
 
 size_t CheatDatabaseCount() { return SourceFiles().size(); }
+bool CheatDownloadWorkerAlive()
+{
+    struct stat st = {};
+    return stat(Path(kHeartbeat).c_str(), &st)==0 && S_ISREG(st.st_mode) &&
+        st.st_size>0 && time(nullptr) >= st.st_mtime &&
+        time(nullptr)-st.st_mtime <= 40;
+}
 std::string CheatDownloadPath(const std::string& basename)
 {
     return SafeStem(basename) ? Root() + "/" + basename + ".cht" : "";
@@ -276,6 +327,8 @@ std::string BestCheatSourceFile(const CheatRequestGame& game)
         if (name.find("(Rev") != std::string::npos) score -= 1;
         if (score > highest) { highest = score; result = name; }
     }
+    if (result.empty())
+        result = titles::Best(SourceFiles(), game.nointro.empty() ? game.basename : game.nointro);
     return result;
 }
 bool InstallCachedCheat(const CheatRequestGame& game)
@@ -288,7 +341,7 @@ bool InstallCachedCheat(const CheatRequestGame& game)
 }
 bool RequestGameCheats(const CheatRequestGame& game)
 {
-    if (!SafeStem(game.basename)) return false;
+    if (!SafeStem(game.basename) || BestCheatSourceFile(game).empty()) return false;
     return Queue("library\n" + game.basename + "\t" + game.nointro + "\n");
 }
 bool RequestLibraryCheats(const std::vector<CheatRequestGame>& games)
@@ -306,6 +359,7 @@ bool RequestAllSnesCheats() { return Queue("all\n"); }
 CheatDownloadStatus ReadCheatDownloadStatus()
 {
     CheatDownloadStatus state;
+    state.helper_alive = CheatDownloadWorkerAlive();
     FILE* f = fopen(Path(kStatus).c_str(), "r");
     if (!f) return state;
     char name[32] = {};

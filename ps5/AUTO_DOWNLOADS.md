@@ -20,7 +20,7 @@ The installer must start the **new helper payload**. If an older Snes9x helper i
 | In a game > pause > Cheat manager | **Options** – open cheat downloads |
 | In the cheat manager with no codes | **Cross** – open cheat downloads |
 
-The cheat download screen shows **queued, downloading, completed and offline** states, with a processed/saved/failed counter. A complete SNES download requires two presses of Cross to confirm: the Libretro index currently contains **2,773** .cht files.
+The cheat download screen shows **queued, downloading, completed and offline** states, with a processed/saved/failed counter. Selecting the full SNES collection and pressing Cross now immediately queues the download and displays a confirmation; the Libretro index currently contains **2,773** .cht files.
 
 ## Destination paths
 
@@ -37,6 +37,12 @@ https://github.com/libretro/libretro-database/tree/master/cht/Nintendo%20-%20Sup
 
 The embedded list is from the upstream directory tree at SHA `6b1f8a463a28d8c3450901844c13112d469e22be`. It has been included locally as `ps5/frontend/data/snes-cheat-index.txt`, and is independent of GitHub API rate limits. Cheat downloads use upstream raw file URLs with encoded filenames. Exact game title/region/revision matches are prioritized, but not every ROM has matching codes or art.
 
+## Fixed downloads and fuzzy title matching
+
+The newer build displays a direct **queued/error** confirmation when pressing Cross in Cheat downloads. Its helper periodically writes `/data/snes9x/cheats/download-worker.ready`. If that heartbeat is missing/stale, the menu reports **Helper NOT READY** and explains that the PS5 must be restarted and the new installer ELF sent again; it will no longer silently accept a request that cannot be processed. Other failures (busy queue, unwritable path, no database match) are also presented on screen.
+
+The emulator now uses a verified snapshot of the **3,689 Libretro SNES box-art filenames** and conservative fuzzy matching (region tags, punctuation, spaces, dashes and small spelling variations), falling back to title/screenshot art as before. Example: `Kidou Butoden G-Gundam.zip` resolves to `Kidou Butouden G Gundam (Japan)`. This corrects common misspellings without changing ROM filenames. Ambiguous or too-dissimilar matches are rejected to avoid showing art from unrelated games.
+
 ## Covers
 
 The normal helper will continue automatically downloading missing box art. **R3** retries missing covers in bulk, including previously unsuccessful downloads, and queues them again. When official `Named_Boxarts` lacks an image, the downloader also tries the official Libretro `Named_Titles` and `Named_Snaps` for that game, in that order. These are fallback pictures, **not guaranteed box-art replacements**.
@@ -45,6 +51,6 @@ A game without a No-Intro match is attempted by its ROM filename as a best effor
 
 ## Limitations
 
-The **full database** mode makes thousands of separate HTTPS requests and may consume significant time. Downloads continue in the helper while you use the console, and do not run as downloads on the UI thread. There is no cancellation control yet; to avoid launching long jobs accidentally, full downloads require confirmation.
+The **full database** mode makes thousands of separate HTTPS requests and may consume significant time. Downloads continue in the helper while you use the console, and do not run as downloads on the UI thread. There is no cancellation control yet; the full download uses the explicit **Download ALL SNES cheats** menu item and starts with one press of Cross.
 
 This is a source update only until CI validates the new helper and installer. Test cheat importing, repeated code toggles, menu controls, and covers on a PS5 before treating it as production-ready.

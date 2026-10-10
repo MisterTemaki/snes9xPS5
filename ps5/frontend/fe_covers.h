@@ -48,6 +48,8 @@ constexpr int kCoverTexH = 512; // level 0 height
 
 // "Super Metroid (Japan, USA) (En,Ja)" -> its file name in libretro-thumbnails (&*/:`<>?\| become _).
 std::string ThumbnailName(const std::string& nointro);
+// Use the closest verified Libretro artwork filename; never guess an unsupported remote file.
+std::string CoverNameFor(const GameInfo& game);
 
 // The download address of a game's box art (the libretro-thumbnails template, SNES9X_COVER_URL on the host).
 std::string CoverUrlFor(const std::string& nointro);

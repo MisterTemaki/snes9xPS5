@@ -14,6 +14,7 @@
 #include "fe_emu.h"
 
 #include "fe_games.h"
+#include "fe_cheatlookup.h"
 #include "fe_cheatdownload.h"
 #include "fe_settings.h"
 #include "fe_shortcuts.h"
@@ -36,6 +37,8 @@
 #include "ppu.h"
 #include "snapshot.h"
 
+#include <dirent.h>
+#include <algorithm>
 #include <fcntl.h>
 #include <sys/stat.h>
 #include <zlib.h>
@@ -95,6 +98,7 @@ struct State
 	// After the game starts or the pause menu closes, player 1's pad reaches the game only once the buttons that
 	// did it (Cross, Circle, L3 + R3) are let go: Resume with Cross must not press B in the game.
 	bool wait_release = true;
+	std::string cheat_status = "No cheat file checked";
 	std::vector<int16_t> mix;
 	// last frame, for the pause menu
 	std::vector<uint16_t> last;
@@ -237,7 +241,111 @@ bool LoadRetroArchCheats(const std::string& file)
 		++added;
 	}
 	OrbisLog("[cheats] imported %d RetroArch cheat groups from %s", added, file.c_str());
-	return true;
+	return added > 0;
+}
+
+// Use the ROM *file* name, not the internal name exposed by a zipped ROM.
+// S9xGetFilename derives its name from Memory.ROMFilename which can differ.
+std::string CheatPathForRom()
+{
+    return OrbisDir("cheats") + "/" + S9xBasenameNoExt(g.rom_path) + ".cht";
+}
+std::string OfficialCheatTitle()
+{
+    if (g.rom_path.empty()) return "";
+    std::string official = fe::gamedb::ByCrc(Memory.ROMCRC32);
+    const std::string base = S9xBasenameNoExt(g.rom_path);
+    if (official.empty()) official = fe::gamedb::Exact(base);
+    if (official.empty()) official = fe::gamedb::Loose(base);
+    if (official.empty()) official = fe::gamedb::Fuzzy(base);
+    return official;
+}
+// Users often copy EarthBound (USA).cht with EarthBound.sfc, or copy
+// the unpacked RetroArch library with filenames nested one level below.
+// Only match .cht files with the same ROM title; don't load other games.
+std::string FindManualCheatFile()
+{
+    if (g.rom_path.empty()) return "";
+    const std::string direct = CheatPathForRom();
+    if (OrbisIsFile(direct)) return direct;
+    std::vector<std::string> choices;
+    const std::string root = OrbisDir("cheats");
+    const char* const subdirs[] = {"", "database", "Nintendo - Super Nintendo Entertainment System"};
+    std::vector<std::string> dirs;
+    for (const char* sub : subdirs)
+        dirs.push_back(*sub ? root + "/" + sub : root);
+    const size_t slash = g.rom_path.find_last_of("/");
+    if (slash!=std::string::npos) dirs.push_back(g.rom_path.substr(0,slash));
+    for (const std::string& dir : dirs)
+    {
+        DIR* d = opendir(dir.c_str());
+        if (!d) continue;
+        while (dirent* e = readdir(d))
+        {
+            const std::string filename=e->d_name;
+            if (!fe::cheatlookup::EndsWithCht(filename)) continue;
+            const std::string full = dir + "/" + filename;
+            struct stat st = {};
+            if (lstat(full.c_str(), &st)==0 && S_ISREG(st.st_mode) && st.st_size>0)
+                choices.push_back(full);
+        }
+        closedir(d);
+    }
+    return fe::cheatlookup::Best(choices, S9xBasenameNoExt(g.rom_path), OfficialCheatTitle());
+}
+bool ImportCheatsFromFile(const std::string& path)
+{
+    std::ifstream in(path, std::ios::binary);
+    if (!in)
+    {
+        g.cheat_status = "Unable to open cheat file";
+        return false;
+    }
+    std::string head(4096, '\0');
+    in.read(&head[0], head.size());
+    head.resize(size_t(in.gcount()));
+    // A RetroArch file can have codes anywhere in its first 4KB.
+    // Never feed that file to the Snes9x *binary* fallback parser: it
+    // previously said success for invalid text while importing zero codes.
+    const bool retro = head.find("cheats =")!=std::string::npos ||
+                       head.find("cheat0_")!=std::string::npos ||
+                       head.find("cheat1_")!=std::string::npos;
+    const bool native = head.find("cheat\n")!=std::string::npos ||
+                        head.rfind("cheat\r\n",0)==0;
+    bool binary = false;
+    if (!retro && !native && head.size()>=28)
+    {
+        binary = head.find('\0')!=std::string::npos;
+        if (binary)
+        {
+            struct stat st = {};
+            binary = stat(path.c_str(),&st)==0 && st.st_size%28==0;
+        }
+    }
+    const int before=int(Cheat.group.size());
+    bool parsed = false;
+    if (retro) parsed = LoadRetroArchCheats(path);
+    else if (native || binary) parsed = S9xLoadCheatFile(path);
+    const int added=int(Cheat.group.size())-before;
+    if (!parsed || added<=0)
+    {
+        g.cheat_status="Found " + S9xBasename(path) + " but no supported codes";
+        OrbisLog("[cheats] %s", g.cheat_status.c_str());
+        return false;
+    }
+    g.cheat_status = "Loaded " + std::to_string(added) + " cheats from " + S9xBasename(path);
+    OrbisLog("[cheats] %s", g.cheat_status.c_str());
+    return true;
+}
+bool LoadManualCheatsForRom()
+{
+    const std::string file = FindManualCheatFile();
+    if (file.empty())
+    {
+        g.cheat_status = "No matching .cht file in /data/snes9x/cheats";
+        return false;
+    }
+    return ImportCheatsFromFile(file);
 }
 
 std::string StatePath(int slot)
@@ -508,17 +616,13 @@ bool LoadGame(const std::string& path)
 	S9xDeleteCheats();
 	S9xCheatsEnable();
 	const std::string base = S9xBasenameNoExt(path);
-	std::string official = fe::gamedb::ByCrc(Memory.ROMCRC32);
-	if (official.empty()) official = fe::gamedb::Exact(base);
-	if (official.empty()) official = fe::gamedb::Loose(base);
-	fe::InstallCachedCheat({base, official});
-	const std::string cht = S9xGetFilename(".cht", CHEAT_DIR);
-	if (OrbisIsFile(cht))
-	{
-		const bool ok = LoadRetroArchCheats(cht) || S9xLoadCheatFile(cht);
-		if (ok) OrbisLog("[emu] cheats from %s (%zu groups)", cht.c_str(), Cheat.group.size());
-	}
-	else if (fe::Config().cheats_auto_download)
+	const std::string official = OfficialCheatTitle();
+	// The user's own EarthBound (USA).cht must take priority over any
+	// automatically cached alternative. Never replace an existing choice.
+	if (FindManualCheatFile().empty())
+		fe::InstallCachedCheat({base, official});
+	const bool found = !FindManualCheatFile().empty();
+	if (!LoadManualCheatsForRom() && !found && fe::Config().cheats_auto_download)
 	{
 		const fe::CheatRequestGame request{base, official};
 		if (!fe::BestCheatSourceFile(request).empty() && fe::RequestGameCheats(request))
@@ -566,18 +670,22 @@ std::string RomBase()
 }
 std::string RomNoIntro()
 {
-	if (!g.loaded) return "";
-	std::string official = fe::gamedb::ByCrc(Memory.ROMCRC32);
-	if (official.empty()) official = fe::gamedb::Exact(RomBase());
-	if (official.empty()) official = fe::gamedb::Loose(RomBase());
-	return official;
+	return g.loaded ? OfficialCheatTitle() : "";
+}
+std::string CheatStatus()
+{
+	return g.cheat_status;
 }
 bool ReloadDownloadedCheats()
 {
 	if (!g.loaded || !Cheat.group.empty()) return false; // never replace user's current cheat selections
-	const std::string filename = S9xGetFilename(".cht", CHEAT_DIR);
-	if (!OrbisIsFile(filename)) return false;
-	return LoadRetroArchCheats(filename) || S9xLoadCheatFile(filename);
+	// CheatMenu is redrawn at 60 Hz; scanning a 2,773-file library
+	// every frame would stall input and waste CPU.
+	static double next_attempt = 0;
+	const double now = Now();
+	if (now < next_attempt) return false;
+	next_attempt = now + 1.0;
+	return LoadManualCheatsForRom();
 }
 
 std::string CheatName(int index)
@@ -595,7 +703,7 @@ bool SaveCheats()
 {
 	if (!g.loaded) return false;
 	if (Cheat.group.empty()) return true;
-	const std::string path = S9xGetFilename(".cht", CHEAT_DIR);
+	const std::string path = CheatPathForRom();
 	const std::string tmp = path + ".part";
 	if (!S9xSaveCheatFile(tmp) || !CommitPart(tmp, path, 0))
 	{
