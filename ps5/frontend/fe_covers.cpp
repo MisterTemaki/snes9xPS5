@@ -47,27 +47,76 @@
   extern "C" const char sym##_begin[]; \
   extern "C" const char sym##_end[];
 S9X_COVER_INCBIN(s9x_cover_index, COVER_MANIFEST_TXT)
+#ifndef TITLE_MANIFEST_TXT
+#error TITLE_MANIFEST_TXT must refer to Libretro title-screen index
+#endif
+#ifndef SNAP_MANIFEST_TXT
+#error SNAP_MANIFEST_TXT must refer to Libretro screenshot index
+#endif
+S9X_COVER_INCBIN(s9x_title_index, TITLE_MANIFEST_TXT)
+S9X_COVER_INCBIN(s9x_snap_index, SNAP_MANIFEST_TXT)
 
 namespace fe
 {
 namespace
 {
+std::vector<std::string> ParseArtIndex(const char* p, const char* end)
+{
+    std::vector<std::string> names;
+    while (p < end)
+    {
+        const char* nl = static_cast<const char*>(memchr(p, '\n', size_t(end - p)));
+        if (!nl) break;
+        if (*p != '#' && nl > p) names.emplace_back(p, size_t(nl - p));
+        p = nl + 1;
+    }
+    return names;
+}
 const std::vector<std::string>& BoxArtNames()
 {
-    static const std::vector<std::string> names = [] {
-        std::vector<std::string> out;
-        const char* p = s9x_cover_index_begin;
-        const char* const end = s9x_cover_index_end;
-        while (p<end)
-        {
-            const char* nl = static_cast<const char*>(memchr(p,'\n',size_t(end-p)));
-            if (!nl) break;
-            if (*p!='#' && nl>p) out.emplace_back(p,size_t(nl-p));
-            p = nl + 1;
-        }
-        return out;
-    }();
+    static const auto names = ParseArtIndex(s9x_cover_index_begin, s9x_cover_index_end);
     return names;
+}
+const std::vector<std::string>& TitleArtNames()
+{
+    static const auto names = ParseArtIndex(s9x_title_index_begin, s9x_title_index_end);
+    return names;
+}
+const std::vector<std::string>& SnapArtNames()
+{
+    static const auto names = ParseArtIndex(s9x_snap_index_begin, s9x_snap_index_end);
+    return names;
+}
+std::string MatchArtName(const std::vector<std::string>& names, const GameInfo& game)
+{
+    const std::string requested = game.nointro.empty() ? game.file_base : game.nointro;
+    auto exact = std::find(names.begin(), names.end(), requested);
+    if (exact != names.end()) return *exact; // preserve revisions and git symlinks
+    std::string result = titles::Best(names, requested);
+    if (result.empty() && !game.nointro.empty())
+        result = titles::Best(names, game.file_base);
+    return result;
+}
+std::string MatchFallbackArt(const std::vector<std::string>& names, const GameInfo& game)
+{
+    const std::string requested = game.nointro.empty() ? game.file_base : game.nointro;
+    static std::mutex match_mutex;
+    static std::unordered_map<std::string, std::string> cache;
+    // The lookup cache is shared safely by the cover thread and the menu.
+    const std::string key = ( &names == &TitleArtNames() ? "T:" : "S:") + requested + "|" + game.file_base;
+    {
+        std::lock_guard<std::mutex> lock(match_mutex);
+        auto it = cache.find(key);
+        if (it != cache.end()) return it->second;
+    }
+    const std::string result = MatchArtName(names, game);
+    {
+        std::lock_guard<std::mutex> lock(match_mutex);
+        cache.emplace(key, result);
+    }
+    if (!result.empty() && result != requested)
+        OrbisLog("[covers] alternative art title: %s -> %s", requested.c_str(), result.c_str());
+    return result;
 }
 
 constexpr int kLoadRadius = 12; // textures kept around the selection
@@ -156,12 +205,23 @@ bool Exists(const std::string& path)
 	return stat(path.c_str(), &st) == 0;
 }
 
-bool RecentlyMissing(const std::string& marker)
+bool RecentlyMissing(const std::string& marker, const std::string& url)
 {
-	struct stat st = {};
-	if (stat(marker.c_str(), &st) != 0)
-		return false;
-	return time(nullptr) - st.st_mtime < kMissingRetrySeconds;
+    struct stat st = {};
+    if (stat(marker.c_str(), &st) != 0 || time(nullptr) - st.st_mtime >= kMissingRetrySeconds)
+        return false;
+    // A 404 from an older artwork index should not suppress a newly found
+    // box/title/screenshot URL for the next 30 days.
+    FILE* f = fopen(marker.c_str(), "r");
+    if (!f) return false;
+    char line[8192] = {};
+    const bool read = fgets(line, sizeof(line), f) != nullptr;
+    fclose(f);
+    if (!read) return false;
+    std::string old(line);
+    while (!old.empty() && (old.back() == '\n' || old.back() == '\r'))
+        old.pop_back();
+    return old == url;
 }
 
 uint32_t Pack(int r, int g, int b)
@@ -331,13 +391,8 @@ std::string CoverNameFor(const GameInfo& game)
         const auto it = cache.find(requested);
         if (it!=cache.end()) return it->second;
     }
-    // An exact entry may itself be a git symlink pointing at the true box
-    // art. Preserve the name rather than fuzzy-matching to a nearby revision.
-    const auto& names=BoxArtNames();
-    std::string best = std::find(names.begin(),names.end(),requested)!=names.end()
-        ? requested : titles::Best(names, requested);
-    if (best.empty() && !game.nointro.empty())
-        best = titles::Best(BoxArtNames(), game.file_base);
+    const std::string best_boxart = MatchArtName(BoxArtNames(), game);
+    std::string best = best_boxart;
     if (best.empty()) best = requested; // fallback: title art/screenshot or 404 marker
     if (best!=requested) OrbisLog("[covers] fuzzy art: %s -> %s", requested.c_str(), best.c_str());
     {
@@ -373,18 +428,37 @@ bool ShelfDownloads()
 
 std::string CoverUrlFor(const std::string& nointro)
 {
-	std::string url = CoverUrlTemplate();
-	const size_t p = url.find("${name}");
-	if (p != std::string::npos)
-		url.replace(p, 7, UrlEncode(ThumbnailName(nointro)));
-	// Respect the host's test/custom URL without generating unintended traffic.
-	if (getenv("SNES9X_COVER_URL")) return url;
-	const std::string encoded = UrlEncode(ThumbnailName(nointro));
-	const std::string root =
-		"https://raw.githubusercontent.com/libretro-thumbnails/Nintendo_-_Super_Nintendo_Entertainment_System/master/";
-	// A missing box art can still get an official title screen or screenshot, not a blank shelf card.
-	return url + "\t" + root + "Named_Titles/" + encoded + ".png\t" +
-		root + "Named_Snaps/" + encoded + ".png";
+    std::string url = CoverUrlTemplate();
+    const size_t p = url.find("${name}");
+    if (p != std::string::npos)
+        url.replace(p, 7, UrlEncode(ThumbnailName(nointro)));
+    if (getenv("SNES9X_COVER_URL")) return url; // host's local fixture
+    const std::string encoded = UrlEncode(ThumbnailName(nointro));
+    const std::string root =
+        "https://raw.githubusercontent.com/libretro-thumbnails/Nintendo_-_Super_Nintendo_Entertainment_System/master/";
+    return url + "\t" + root + "Named_Titles/" + encoded + ".png\t" +
+        root + "Named_Snaps/" + encoded + ".png";
+}
+
+std::string CoverUrlForGame(const GameInfo& game)
+{
+    const std::string box = CoverNameFor(game);
+    const std::string default_url = CoverUrlFor(box);
+    if (getenv("SNES9X_COVER_URL")) return default_url;
+    const std::string root =
+        "https://raw.githubusercontent.com/libretro-thumbnails/Nintendo_-_Super_Nintendo_Entertainment_System/master/";
+    const std::string title = MatchFallbackArt(TitleArtNames(), game);
+    const std::string snap = MatchFallbackArt(SnapArtNames(), game);
+    if (title.empty() && snap.empty()) return default_url;
+    // Use real Libretro filenames independently for all 3 artwork categories.
+    std::string url = CoverUrlTemplate();
+    const size_t p = url.find("${name}");
+    if (p != std::string::npos)
+        url.replace(p, 7, UrlEncode(ThumbnailName(box)));
+    const std::string title_name = title.empty() ? box : title;
+    const std::string snap_name = snap.empty() ? box : snap;
+    return url + "\t" + root + "Named_Titles/" + UrlEncode(ThumbnailName(title_name)) +
+        ".png\t" + root + "Named_Snaps/" + UrlEncode(ThumbnailName(snap_name)) + ".png";
 }
 
 std::string WantedListPath()
@@ -402,7 +476,7 @@ std::vector<WantedCover> MissingCovers(const std::vector<GameInfo>& games)
 		const std::string file = ThumbnailName(name) + ".png";
 		const std::string cache = covers + "/" + file;
 		if (!Exists(RefetchMarker(cache)) &&
-			(NonEmptyFile(cache) || RecentlyMissing(cache.substr(0, cache.size() - 4) + ".missing")))
+			(NonEmptyFile(cache) || RecentlyMissing(cache.substr(0, cache.size() - 4) + ".missing", CoverUrlForGame(g))))
 			continue;
 		const std::string own = FindWithExts(covers + "/" + g.file_base);
 		if (!own.empty() && own != cache)
@@ -414,7 +488,7 @@ std::vector<WantedCover> MissingCovers(const std::vector<GameInfo>& games)
 		for (const WantedCover& w : out)
 			dup = dup || w.file == file;
 		if (!dup)
-			out.push_back({file, CoverUrlFor(name)});
+			out.push_back({file, CoverUrlForGame(g)});
 	}
 	return out;
 }
@@ -449,7 +523,7 @@ bool CoverService::NeedsDownload(int i) const
 		return false; // a picture beside the ROM is used before a download
 	if (Exists(RefetchMarker(cache)))
 		return true; // asked for again (Square)
-	return !NonEmptyFile(cache) && !RecentlyMissing(cache.substr(0, cache.size() - 4) + ".missing");
+	return !NonEmptyFile(cache) && !RecentlyMissing(cache.substr(0, cache.size() - 4) + ".missing", CoverUrlForGame(g));
 }
 
 void CoverService::Start(const std::vector<GameInfo>& games, bool allow_download, bool background)
@@ -543,12 +617,12 @@ bool CoverService::Download(int i)
 	if (cache.empty())
 		return false;
 	const std::string marker = cache.substr(0, cache.size() - 4) + ".missing";
-	if (m_offline || RecentlyMissing(marker))
+	if (m_offline || RecentlyMissing(marker, CoverUrlForGame(g)))
 		return false;
-	const std::string url = CoverUrlFor(CoverNameFor(g));
+	const std::string url = CoverUrlForGame(g);
 	std::vector<uint8_t> data;
 	S9X_STAGE(Cover, "http get cover");
-	const int status = FetchCoverUrl(m_http, url, ThumbnailName(g.nointro), data);
+	const int status = FetchCoverUrl(m_http, url, ThumbnailName(CoverNameFor(g)), data);
 	if (status == 200)
 	{
 		if (WriteFileAtomic(cache, data))
@@ -754,7 +828,8 @@ void CoverService::PollBackground(int focus)
 				const int i = focus + sgn * d;
 				if ((d == 0 && sgn > 0) || i < lo || i > hi || !NeedsDownload(i))
 					continue;
-				text += ThumbnailName(m_games[size_t(i)].nointro) + ".png" + "\t" + CoverUrlFor(m_games[size_t(i)].nointro) + "\n";
+				const GameInfo& game = m_games[size_t(i)];
+                text += ThumbnailName(CoverNameFor(game)) + ".png\t" + CoverUrlForGame(game) + "\n";
 			}
 		if (text != m_last_prio)
 		{

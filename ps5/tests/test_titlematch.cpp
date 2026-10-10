@@ -5,6 +5,8 @@
 #include <string>
 #include <vector>
 #include <iostream>
+#include <fstream>
+#include <algorithm>
 int main()
 {
     using fe::titles::Best;
@@ -48,6 +50,24 @@ int main()
     assert(fe::cheatlookup::Best(local,"Different Game","").empty());
     assert(fe::cheatlookup::Best({local[0],local[2]},"EarthBound","EarthBound (USA)") == local[0] ||
            fe::cheatlookup::Best({local[0],local[2]},"EarthBound","EarthBound (USA)") == local[2]);
+    // A real game may have a title/screenshot but no matching Named_Boxarts.
+    auto index = [](const char* path) {
+        std::ifstream file(path);
+        assert(file.good());
+        std::vector<std::string> entries;
+        std::string name;
+        while (std::getline(file,name)) if (!name.empty() && name[0]!='#') entries.push_back(name);
+        return entries;
+    };
+    const auto boxarts=index("ps5/frontend/data/snes-cover-index.txt");
+    const auto titles=index("ps5/frontend/data/snes-title-index.txt");
+    const auto snaps=index("ps5/frontend/data/snes-snap-index.txt");
+    const std::string missing_box="BASS Masters Classic - Pro Edition (USA)";
+    assert(std::find(boxarts.begin(),boxarts.end(),missing_box)==boxarts.end());
+    assert(std::find(titles.begin(),titles.end(),missing_box)!=titles.end());
+    assert(std::find(snaps.begin(),snaps.end(),missing_box)!=snaps.end());
+    assert(Best(titles,missing_box)==missing_box);
+    assert(Best(snaps,missing_box)==missing_box);
     std::cout << "Title matcher regressions passed\n";
     return 0;
 }

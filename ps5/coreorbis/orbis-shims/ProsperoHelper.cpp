@@ -14,7 +14,6 @@
 
 #include "OrbisPaths.h"
 #include "fe_coverworker.h"
-#include "fe_cheatdownload.h"
 
 #include <arpa/inet.h>
 #include <cerrno>
@@ -246,7 +245,6 @@ bool ServeHelper(void (*on_ready)())
 		on_ready();
 	// the covers the app wants, downloaded while it runs (fe_coverworker.h)
 	fe::StartCoverWorker();
-	fe::StartCheatDownloadWorker();
 	for (;;)
 	{
 		const int c = accept(srv, nullptr, nullptr);

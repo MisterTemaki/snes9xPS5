@@ -4,7 +4,6 @@
 #include "fe_shelf.h"
 
 #include "fe_covers.h"
-#include "fe_cheatdownload.h"
 #include "fe_games.h"
 #include "fe_menu.h"
 #include "fe_prefetch.h"
@@ -691,14 +690,6 @@ std::string Shelf()
 			cfg.Save();
 			return st.games[size_t(sel)].path;
 		}
-		if ((down & SCE_PAD_BUTTON_R2) && n > 0)
-		{
-			const GameInfo& entry = st.games[size_t(sel)];
-			CheatDownloadsMenu({entry.file_base, entry.nointro});
-			ps5input::Poll();
-			prev = ps5input::Pad(0).buttons;
-			dirty = true;
-		}
 		if (down & SCE_PAD_BUTTON_R3)
 		{
 			bulk_covers = RepairMissingCovers();
@@ -905,7 +896,7 @@ std::string Shelf()
 		const std::string hint = n > 0
 			? std::string(icon::Cross) + " Play" + sp + icon::DpadLeftRight + " Browse" + sp + icon::L1 + " " + icon::R1 +
 				" Skip 10" + sp + icon::Triangle + " Settings" + sp + icon::Square + " Get cover" + sp +
-				icon::R2 + " Cheats" + sp + icon::R3 + " Fix Covers" + sp + icon::Options + " Quit"
+				icon::R3 + " Fix Covers" + sp + icon::Options + " Quit"
 			: std::string(icon::Triangle) + " Settings" + sp + icon::Options + " Quit";
 		DrawText((W - TextWidth(hint.c_str(), 2)) / 2, H - 54, hint.c_str(), 2, Rgb(205, 200, 228));
 

@@ -15,8 +15,8 @@ own icon and background. The PS5 layer follows the layout of PS5SX2 (the PCSX2 p
 Everything outside `ps5/` is the original Snes9x source, unchanged, apart from this README (the original one is
 [README-Snes9x.md](README-Snes9x.md)).
 
-> **Status (2.3):** runs on the console: the app opens from its icon, the shelf, the controller, video and sound
-> work, and games play. It builds with the ps5-payload-dev SDK and passes 173 host tests, which run the same code
+> **Status (2.4):** runs on the console: the app opens from its icon, the shelf, the controller, video and sound
+> work, and games play. It builds with the ps5-payload-dev SDK and runs host regression tests, which exercise the same code
 > on Linux with the PS5 calls simulated. If something fails, the logs in `/data/snes9x/logs/` say where.
 
 ## How it works (the PS5SX2 model)
@@ -46,9 +46,16 @@ written to PS5SX2's folders (`/data/PCSX2`, `/data/homebrew/PPSA99203`).
 
 ## Versions
 
-Every release carries its version in the file name: `Snes9xPS5-v2.3.elf` and `snes9x-ps5-v2.3-src.zip`
+Every release carries its version in the file name: `Snes9xPS5-v2.4.elf` and `snes9x-ps5-v2.4-src.zip`
 (`make dist`). When updating, replace the old ELF with the new one in your autoload or Payload Manager. In this
 README, "`Snes9xPS5.elf`" always means the current release's ELF.
+
+**2.4:** **Manual cheat files only, improved artwork recovery.** Removed the nonworking PS5 cheat
+download menus, automatic cheat queue and network helper thread; manually copied .cht files and in-game
+cheat toggles continue working as before. The cover priority queue now uses the matched title, and missing
+box art can fall back to independently matched official title screens or screenshots. Previously cached
+missing-image responses are retried if the source URLs change. Use Square to retry the selected cover
+or R3 to retry missing artwork for the library. Reinstall the updated ELF after restarting the console.
 
 **2.3:** **The helper downloads the covers with its own HTTPS.** In 2.2 the helper got nothing: the console's own
 HTTPS (libSceSsl) fails outside the app's sandbox, and every cover failed in a few milliseconds while the counter
@@ -144,6 +151,8 @@ changed, register it again once:
 
 ## The game shelf and covers
 
+The console downloads **cover artwork only**, not cheat codes. Cheat downloads have been removed; manually copied Libretro or native Snes9x `.cht` files are still recognized by the cheat manager.
+
 The start screen is a 3D shelf of game covers, like PS5SX2's. In the top-left corner, under the wordmark, is the
 author's line with the GitHub mark: **github.com/MisterTemaki** (PS5SX2 shows its author's handles there).
 
@@ -193,7 +202,7 @@ How to use it:
 
 1. Unzip it on the PC.
 2. Copy only the `.png` files inside its **`Named_Boxarts`** folder to the covers folder (over FTP, for example).
-   The zip also has title screens and in-game shots: they are not used. It is large: copying only the covers of
+   The emulator can also use official title screens or in-game screenshots when no box art is available online. It is large: copying only the covers of
    your games saves space.
 3. The names are already right (for example `Super Mario World (USA).png`): don't rename them. Open the app:
    games recognised by name or CRC pick their cover up at once, and nothing is downloaded for them.
@@ -229,7 +238,8 @@ On the test PC a frame takes about 15 ms on 2 cores.
 | L1 / R1 | skip 10 games |
 | Cross | play |
 | Triangle | settings |
-| Square | download this game's cover again (the cover it has stays until the new one has arrived) |
+| Square | retry this game's cover (the existing image remains until a new one arrives) |
+| R3 | retry covers for all games still showing placeholders |
 | OPTIONS | quit Snes9x (asks first) |
 
 **In a game** (buttons by position, as on the SNES pad)

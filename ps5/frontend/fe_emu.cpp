@@ -15,7 +15,6 @@
 
 #include "fe_games.h"
 #include "fe_cheatlookup.h"
-#include "fe_cheatdownload.h"
 #include "fe_settings.h"
 #include "fe_shortcuts.h"
 
@@ -615,19 +614,8 @@ bool LoadGame(const std::string& path)
 
 	S9xDeleteCheats();
 	S9xCheatsEnable();
-	const std::string base = S9xBasenameNoExt(path);
-	const std::string official = OfficialCheatTitle();
-	// The user's own EarthBound (USA).cht must take priority over any
-	// automatically cached alternative. Never replace an existing choice.
-	if (FindManualCheatFile().empty())
-		fe::InstallCachedCheat({base, official});
-	const bool found = !FindManualCheatFile().empty();
-	if (!LoadManualCheatsForRom() && !found && fe::Config().cheats_auto_download)
-	{
-		const fe::CheatRequestGame request{base, official};
-		if (!fe::BestCheatSourceFile(request).empty() && fe::RequestGameCheats(request))
-			OrbisLog("[cheats] queued automatic download for %s", base.c_str());
-	}
+	// Manual .cht files are matched by ROM and official titles. No downloads.
+	LoadManualCheatsForRom();
 
 	g.loaded = true;
 	g.frame = 0;

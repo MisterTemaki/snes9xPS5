@@ -20,7 +20,7 @@ https://github.com/libretro/libretro-database/tree/master/cht/Nintendo%20-%20Sup
 Download the database repository ZIP (GitHub > Code > Download ZIP) and extract it on your PC.
 The directory to use is `libretro-database/cht/Nintendo - Super Nintendo Entertainment System`.
 RetroArch `.cht` syntax is **different** from Snes9x `.cht` syntax; this port detects and imports both.
-You must match the file name to your ROM (without its extension). For a single game:
+The console also recognizes region-tagged and similarly named cheat filenames, so exact renaming is no longer required. For a single game:
 ```
 /data/snes9x/roms/Super Mario World.sfc
 /data/snes9x/cheats/Super Mario World.cht
@@ -37,15 +37,17 @@ python3 ps5/tools/install_libretro_cheats.py \
   --output "./ps5-cheats"
 ```
 Copy the generated `ps5-cheats/*.cht` into your console's `/data/snes9x/cheats/` folder over FTP. Keep file names unchanged.
-Only title matches are copied; match the ROM region for best results. The helper refuses to overwrite existing output files unless `--force` is specified.
+Only title matches are copied; match the ROM region for best results. The PC-side copy tool refuses to overwrite existing output files unless `--force` is specified.
 Code compatibility depends on the exact ROM revision and cheat type.
 
 **No bundled third-party cheat dump:** Codes remain in the original community-maintained Libretro repository, under its own license/attribution. This project provides a match-and-copy helper and a runtime reader.
 
+**Cheat downloading has been removed from the PS5 menus.** Use FTP or the included PC-side match-and-copy tool for any new files; the installed cheat manager does not need network access.
+
 ## Diagnostics
 
 Enable Debug logs in Settings and check `/data/snes9x/logs/boot.log` for
-`[emu] cheats from ...`, `[cheats] imported ...`, `[cheats] saved ...`. A loaded file does not necessarily mean every code is compatible.
+`[cheats] Loaded ...`, `[cheats] imported ...`, `[cheats] saved ...`. A loaded file does not necessarily mean every code is compatible.
 
 ## Developer checks
 

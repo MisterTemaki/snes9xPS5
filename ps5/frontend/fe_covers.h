@@ -53,6 +53,8 @@ std::string CoverNameFor(const GameInfo& game);
 
 // The download address of a game's box art (the libretro-thumbnails template, SNES9X_COVER_URL on the host).
 std::string CoverUrlFor(const std::string& nointro);
+// Resolve box, title screen and screenshot names independently from verified Libretro lists.
+std::string CoverUrlForGame(const GameInfo& game);
 // The covers the library still needs (WantedCover, fe_coverfetch.h); covers/wanted.txt lists them for the helper,
 // which downloads them in the background (fe_coverworker.h), or for the next start's prefetch (fe_prefetch.h).
 std::vector<WantedCover> MissingCovers(const std::vector<GameInfo>& games);

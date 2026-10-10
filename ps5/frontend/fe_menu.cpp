@@ -8,7 +8,6 @@
 #include "fe_menu.h"
 
 #include "fe_emu.h"
-#include "fe_cheatdownload.h"
 #include "fe_games.h"
 #include "fe_shelf.h"
 #include "fe_settings.h"
@@ -258,7 +257,6 @@ enum SettingRow
 	S_TRANSPARENCY,
 	S_SUPERFX,
 	S_COVERS,
-	S_CHEATS_AUTO,
 	S_DEBUGLOGS,
 	S_COUNT
 };
@@ -275,7 +273,6 @@ std::string SettingLabel(int s)
 		case S_TRANSPARENCY: return "Transparency";
 		case S_SUPERFX: return "Super FX clock";
 		case S_COVERS: return "Download covers";
-		case S_CHEATS_AUTO: return "Auto-download missing cheats";
 		case S_DEBUGLOGS: return "Debug logs";
 		default: return "";
 	}
@@ -295,7 +292,6 @@ std::string SettingValue(int s)
 		case S_TRANSPARENCY: return YesNo(c.transparency);
 		case S_SUPERFX: snprintf(buf, sizeof(buf), "%d%%", c.superfx_clock); return buf;
 		case S_COVERS: return YesNo(c.covers_download);
-		case S_CHEATS_AUTO: return YesNo(c.cheats_auto_download);
 		case S_DEBUGLOGS: return YesNo(c.debug_logs);
 		default: return "";
 	}
@@ -319,7 +315,6 @@ void ChangeSetting(int s, int dir)
 		case S_AUDIO: c.audio = !c.audio; break;
 		case S_TRANSPARENCY: c.transparency = !c.transparency; break;
 		case S_COVERS: c.covers_download = !c.covers_download; break;
-		case S_CHEATS_AUTO: c.cheats_auto_download = !c.cheats_auto_download; break;
 		case S_DEBUGLOGS:
 			c.debug_logs = !c.debug_logs;
 			OrbisLogSetEnabled(c.debug_logs); // at once: the line saying so is the last (or first) one written
@@ -350,7 +345,6 @@ void SettingsMenu()
 		for (int s = 0; s < S_COUNT; s++)
 			rows.push_back({SettingLabel(s), SettingValue(s)});
 		rows.push_back({"Controller shortcuts", ""});
-		rows.push_back({"Cheat downloads", ""});
 		rows.push_back({"Repair missing covers", ""});
 		rows.push_back({"Back", ""});
 		Header("Settings");
@@ -373,16 +367,11 @@ void SettingsMenu()
 		}
 		if (n.ok && sel == S_COUNT + 1)
 		{
-			CheatDownloadsMenu();
-			nav = NavReader();
-		}
-		if (n.ok && sel == S_COUNT + 2)
-		{
 			const int count = RepairMissingCovers();
 			OrbisLog("[settings] queued %d missing covers for retry", count);
 			nav = NavReader();
 		}
-		if (n.back || n.options || (n.ok && sel == S_COUNT + 3))
+		if (n.back || n.options || (n.ok && sel == S_COUNT + 2))
 		{
 			Config().Save();
 			return;
@@ -680,9 +669,9 @@ void CheatMenu()
 		if (count == 0)
 		{
 			Header("Cheats");
-			DrawOptionBox("No cheats found", {{"Download cheats for this game", ""}, {"Back", ""}}, 0, false);
+			DrawOptionBox("No cheats found", {{"Place a matching .cht file in /data/snes9x/cheats", ""}, {"Back", ""}}, 1, false);
 			DrawText(150, H - 184, FitText(emu::CheatStatus(), 3, W - 300).c_str(), 3, kText);
-			Footer("Cross: Download cheats     Circle: Back");
+			Footer("Copy .cht file over FTP     Circle: Back");
 		}
 		else
 		{
@@ -699,18 +688,11 @@ void CheatMenu()
 			char caption[120];
 			snprintf(caption, sizeof(caption), "Cheats %d-%d / %d", top + 1, top + visible, count);
 			DrawOptionBox(caption, rows, sel - top, true);
-			Footer("Cross: Toggle   L1/R1: Page   Triangle: All ON   Square: All OFF   Options: Downloads   Circle: Back");
+			Footer("Cross: Toggle   L1/R1: Page   Triangle: All ON   Square: All OFF   Circle: Back");
 		}
 		Present();
 		const Nav n = nav.Read();
 		if (n.back || n.menu) return;
-		if (n.options || (count == 0 && n.ok))
-		{
-			CheatDownloadsMenu({emu::RomBase(), emu::RomNoIntro()});
-			emu::ReloadDownloadedCheats();
-			nav = NavReader();
-			continue;
-		}
 		if (count == 0) continue;
 		if (n.up) sel = (sel + count - 1) % count;
 		if (n.down) sel = (sel + 1) % count;
@@ -729,69 +711,6 @@ void CheatMenu()
 	}
 }
 
-
-// Downloads run in the helper, not on the video/input thread. The status survives
-// exiting this screen, and one job at a time avoids accidental repeated downloads.
-void CheatDownloadsMenu(const CheatRequestGame& game)
-{
-    NavReader nav;
-    int sel = 0;
-    for (;;)
-    {
-        const bool have_game = !game.basename.empty();
-        std::vector<Row> rows;
-        if (have_game) rows.push_back({"Download cheats for selected game", ""});
-        rows.push_back({"Download missing cheats for installed games", ""});
-        rows.push_back({"Download ALL SNES cheats (entire Libretro library)", ""});
-        rows.push_back({"Back", ""});
-        const int all_row = have_game ? 2 : 1;
-        const int back_row = int(rows.size()) - 1;
-        const CheatDownloadStatus p = ReadCheatDownloadStatus();
-        Header(have_game ? game.basename.c_str() : "Cheat downloads");
-        DrawOptionBox("Cheat Downloads", rows, sel, false);
-        char status[192];
-        if (!p.helper_alive)
-            snprintf(status, sizeof(status), "Helper NOT READY - restart PS5 and reinstall updated ELF");
-        else if (!p.valid)
-            snprintf(status, sizeof(status), "Helper ready - %zu source cheat files", CheatDatabaseCount());
-        else snprintf(status, sizeof(status), "%s: %d/%d processed, %d saved, %d failed",
-                      p.state.c_str(), p.done, p.total, p.found, p.failed);
-        DrawText(125, H - 180, FitText(status, 3, W - 250).c_str(), 3, kText);
-        Footer("Cross: Start selected download    Circle: Back    Runs in background");
-        Present();
-        const Nav n = nav.Read();
-        if (n.back || n.options) return;
-        if (n.up) { sel = (sel + back_row) % int(rows.size()); }
-        if (n.down) { sel = (sel + 1) % int(rows.size()); }
-        if (!n.ok) continue;
-        if (sel == back_row) return;
-        bool queued = false;
-        if (have_game && sel == 0)
-            queued = RequestGameCheats(game);
-        else if (sel == all_row)
-            queued = RequestAllSnesCheats();
-        else
-        {
-            std::vector<CheatRequestGame> collection;
-            for (const GameInfo& entry : ScanGames())
-                collection.push_back({entry.file_base, entry.nointro});
-            queued = RequestLibraryCheats(collection);
-        }
-        if (queued)
-            MessageBox("Cheat download queued",
-                "The helper is downloading in the background. Check this screen for progress.");
-        else if (!CheatDownloadWorkerAlive())
-            MessageBox("Cheat downloader offline",
-                "Restart PS5, send the latest installer ELF, and reopen the app.");
-        else if (have_game && sel == 0 && BestCheatSourceFile(game).empty())
-            MessageBox("No matching cheats",
-                "No safe Libretro title match for this ROM. Try another ROM revision.");
-        else
-            MessageBox("Download not started",
-                "A download is already queued/running, or the cheat folder is not writable.");
-        nav = NavReader();
-    }
-}
 
 void ShortcutMenu()
 {
