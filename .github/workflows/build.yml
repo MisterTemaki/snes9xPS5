@@ -1,0 +1,43 @@
+name: Verify and build Snes9x PS5
+on:
+  pull_request:
+  push:
+    branches: [main, feature/cheat-manager-shortcuts]
+  workflow_dispatch:
+
+jobs:
+  host-tests:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - name: Test cheat-file matcher
+        run: python3 -m unittest discover -s ps5/tests -p 'test_libretro_import.py' -v
+      - name: Build and run emulator host tests
+        run: make -C ps5 -j2 test
+
+  ps5-installer:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - name: Install required build tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang-18 lld-18 unzip zlib1g-dev python3
+      - name: Install released PS5 payload SDK
+        run: |
+          curl -fL --retry 3 https://github.com/ps5-payload-dev/sdk/releases/latest/download/ps5-payload-sdk.zip -o /tmp/ps5-payload-sdk.zip
+          sudo unzip -q /tmp/ps5-payload-sdk.zip -d /opt
+          test -f /opt/ps5-payload-sdk/target/lib/libc++.a
+          echo "PS5_PAYLOAD_SDK=/opt/ps5-payload-sdk" >> "$GITHUB_ENV"
+      - name: Build console installer and native app
+        run: make -C ps5 -j2 ps5 HOST_CXX_NATIVE=clang++-18 LLD=ld.lld-18
+      - name: Upload PS5 installer ELF
+        uses: actions/upload-artifact@v4
+        with:
+          name: Snes9xPS5-cheats-installer
+          path: ps5/build/ps5/Snes9xPS5.elf
+          if-no-files-found: error

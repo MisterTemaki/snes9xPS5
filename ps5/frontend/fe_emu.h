@@ -12,6 +12,14 @@ void DeinitCore();
 bool LoadGame(const std::string& path);
 void CloseGame(); // writes the battery save
 bool GameLoaded();
+
+// Native Snes9x cheat groups, enabled/disabled live and persisted per game.
+int CheatCount();
+std::string CheatName(int index);
+bool CheatEnabled(int index);
+bool ToggleCheat(int index);
+void SetAllCheats(bool enabled);
+bool SaveCheats();
 std::string GameName(); // the file name without its extension
 
 // Settings from fe::Config() -> Snes9x (aspect, scanlines, FPS counter, sound, ...).
@@ -20,7 +28,9 @@ void ApplySettings();
 enum class FrameResult
 {
 	Continue,
-	OpenMenu, // L3 + R3 pressed together
+	OpenMenu, // configurable pause-menu chord
+	OpenCheats, // configurable quick cheat-manager chord
+	BackToList, // configurable quick library chord
 	Quit, // the core asked to exit (S9xExit)
 };
 // Polls the pads, runs one SNES frame, shows it and paces to the console's audio/video clock.
@@ -34,6 +44,6 @@ void Osd(const char* fmt, ...) __attribute__((format(printf, 1, 2))); // message
 
 // Redraws the last frame into the surface (the pause menu draws over it).
 void RedrawLastFrame();
-// The pause menu closed: the buttons still held (Cross, Circle, L3 + R3) don't reach the game until let go.
+// Menus closed: held navigation/shortcut buttons must not reach the SNES until all are released.
 void AfterMenu();
 } // namespace emu

@@ -15,6 +15,7 @@
 
 #include "fe_games.h"
 #include "fe_settings.h"
+#include "fe_shortcuts.h"
 
 #include "OrbisPaths.h"
 #include "ProsperoAudio.h"
@@ -39,6 +40,9 @@
 #include <zlib.h>
 
 #include <cstdarg>
+#include <cstdlib>
+#include <fstream>
+#include <map>
 #include <cstdio>
 #include <cstring>
 #include <ctime>
@@ -170,6 +174,69 @@ size_t SramFileSize()
 	else if (Memory.HiROM)
 		size = size < 0x40000 ? size : 0x40000;
 	return size;
+}
+
+
+struct RetroCheat
+{
+	std::string name, code;
+	bool enabled = false;
+};
+
+std::string TrimField(std::string s)
+{
+	const size_t first = s.find_first_not_of(" \t\r\n");
+	if (first == std::string::npos) return "";
+	const size_t last = s.find_last_not_of(" \t\r\n");
+	s = s.substr(first, last - first + 1);
+	if (s.size() >= 2 && s.front() == '"' && s.back() == '"')
+		s = s.substr(1, s.size() - 2);
+	return s;
+}
+
+// RetroArch .cht and Snes9x .cht have the same extension, not the same syntax.
+// Detect RetroArch assignments before the native Snes9x parser, without network dependencies.
+bool LoadRetroArchCheats(const std::string& file)
+{
+	std::ifstream in(file);
+	if (!in) return false;
+	std::map<int, RetroCheat> cheats;
+	std::string line;
+	bool recognized = false;
+	while (std::getline(in, line))
+	{
+		if (line.size() > 32768) continue;
+		const size_t eq = line.find('=');
+		if (eq == std::string::npos) continue;
+		const std::string key = TrimField(line.substr(0, eq));
+		const std::string val = TrimField(line.substr(eq + 1));
+		if (key.size() < 8 || key.compare(0, 5, "cheat") != 0) continue;
+		char* end = nullptr;
+		const long idx = strtol(key.c_str() + 5, &end, 10);
+		if (end == key.c_str() + 5 || idx < 0 || idx >= 4096 || !end || *end != '_')
+			continue;
+		const std::string field = end + 1;
+		RetroCheat& c = cheats[int(idx)];
+		if (field == "code") { c.code = val; recognized = true; }
+		else if (field == "desc") c.name = val;
+		else if (field == "enable") c.enabled = (val == "true" || val == "1");
+	}
+	if (!recognized) return false;
+	int added = 0;
+	for (const auto& item : cheats)
+	{
+		if (item.second.code.empty() || added >= 1024) continue;
+		const std::string& code = item.second.code;
+		std::string name = item.second.name.empty() ? ("Cheat " + std::to_string(item.first + 1)) : item.second.name;
+		// Snes9x stores names on a single BML line.
+		for (char& ch : name) if (ch == '\r' || ch == '\n') ch = ' ';
+		const int group = S9xAddCheatGroup(name, code);
+		if (group < 0) continue; // unsupported/invalid codes are not selectable
+		if (item.second.enabled) S9xEnableCheatGroup(uint32(group));
+		++added;
+	}
+	OrbisLog("[cheats] imported %d RetroArch cheat groups from %s", added, file.c_str());
+	return true;
 }
 
 std::string StatePath(int slot)
@@ -440,8 +507,11 @@ bool LoadGame(const std::string& path)
 	S9xDeleteCheats();
 	S9xCheatsEnable();
 	const std::string cht = S9xGetFilename(".cht", CHEAT_DIR);
-	if (OrbisIsFile(cht) && S9xLoadCheatFile(cht))
-		OrbisLog("[emu] cheats from %s", cht.c_str());
+	if (OrbisIsFile(cht))
+	{
+		const bool ok = LoadRetroArchCheats(cht) || S9xLoadCheatFile(cht);
+		if (ok) OrbisLog("[emu] cheats from %s (%zu groups)", cht.c_str(), Cheat.group.size());
+	}
 
 	g.loaded = true;
 	g.frame = 0;
@@ -462,8 +532,8 @@ void CloseGame()
 		return;
 	if (Memory.SRAMSize > 0)
 		S9xAutoSaveSRAM();
-	if (Settings.ApplyCheats || !Cheat.group.empty())
-		S9xSaveCheatFile(S9xGetFilename(".cht", CHEAT_DIR));
+	if (!Cheat.group.empty())
+		SaveCheats();
 	g.loaded = false;
 	g.rom_path.clear();
 }
@@ -471,6 +541,59 @@ void CloseGame()
 bool GameLoaded()
 {
 	return g.loaded;
+}
+
+int CheatCount()
+{
+	return g.loaded ? int(Cheat.group.size()) : 0;
+}
+
+std::string CheatName(int index)
+{
+	if (!g.loaded || index < 0 || index >= CheatCount()) return "";
+	return Cheat.group[size_t(index)].name;
+}
+
+bool CheatEnabled(int index)
+{
+	return g.loaded && index >= 0 && index < CheatCount() && Cheat.group[size_t(index)].enabled;
+}
+
+bool SaveCheats()
+{
+	if (!g.loaded) return false;
+	if (Cheat.group.empty()) return true;
+	const std::string path = S9xGetFilename(".cht", CHEAT_DIR);
+	const std::string tmp = path + ".part";
+	if (!S9xSaveCheatFile(tmp) || !CommitPart(tmp, path, 0))
+	{
+		unlink(tmp.c_str());
+		OrbisLog("[cheats] save failed: %s", path.c_str());
+		return false;
+	}
+	OrbisLog("[cheats] saved %zu groups to %s", Cheat.group.size(), path.c_str());
+	return true;
+}
+
+bool ToggleCheat(int index)
+{
+	if (!g.loaded || index < 0 || index >= CheatCount()) return false;
+	if (Cheat.group[size_t(index)].enabled)
+		S9xDisableCheatGroup(uint32(index));
+	else
+		S9xEnableCheatGroup(uint32(index));
+	return SaveCheats();
+}
+
+void SetAllCheats(bool enabled)
+{
+	if (!g.loaded) return;
+	for (int i = 0; i < CheatCount(); ++i)
+	{
+		if (enabled && !Cheat.group[size_t(i)].enabled) S9xEnableCheatGroup(uint32(i));
+		else if (!enabled && Cheat.group[size_t(i)].enabled) S9xDisableCheatGroup(uint32(i));
+	}
+	SaveCheats();
 }
 
 std::string GameName()
@@ -578,19 +701,22 @@ FrameResult RunFrame()
 	ps5input::Poll();
 	const ps5input::PadState& p1 = ps5input::Pad(0);
 	const uint32_t raw = p1.buttons;
+	const uint32_t physical = p1.raw_buttons;
 	if (g.wait_release)
 	{
-		g.wait_release = (p1.raw_buttons & (SCE_PAD_BUTTON_L3 | SCE_PAD_BUTTON_R3 | SCE_PAD_BUTTON_CROSS |
-											   SCE_PAD_BUTTON_CIRCLE)) != 0;
-		g.prev_p1 = raw; // nothing held over counts as a new press either
+		g.wait_release = physical != 0;
+		g.prev_p1 = raw; // never pass a menu button through as a new game button
 	}
 	const uint32_t pressed = raw & ~g.prev_p1;
+	const uint32_t pressed_physical = pressed & physical;
 	g.prev_p1 = raw;
-
-	// L3 + R3: pause menu
-	const uint32_t menu_combo = SCE_PAD_BUTTON_L3 | SCE_PAD_BUTTON_R3;
-	if ((raw & menu_combo) == menu_combo && (pressed & menu_combo))
+	const fe::Settings& bindings = fe::Config();
+	if (!g.wait_release && fe::shortcuts::JustPressed(physical, pressed_physical, bindings.shortcut_pause))
 		return FrameResult::OpenMenu;
+	if (!g.wait_release && fe::shortcuts::JustPressed(physical, pressed_physical, bindings.shortcut_list))
+		return FrameResult::BackToList;
+	if (!g.wait_release && fe::shortcuts::JustPressed(physical, pressed_physical, bindings.shortcut_cheats))
+		return FrameResult::OpenCheats;
 
 	// L2 + D-pad: quick save / load / slot (the D-pad doesn't reach the game while L2 is held)
 	fe::Settings& cfg = fe::Config();
@@ -624,6 +750,16 @@ FrameResult RunFrame()
 			b = 0;
 		if (p == 0 && l2)
 			b &= ~uint32_t(SCE_PAD_BUTTON_UP | SCE_PAD_BUTTON_DOWN | SCE_PAD_BUTTON_LEFT | SCE_PAD_BUTTON_RIGHT);
+		if (p == 0)
+		{
+			// Keep active shortcut chord buttons out of SNES button reports.
+			if (fe::shortcuts::Held(physical, bindings.shortcut_pause))
+				b &= ~fe::shortcuts::kChoices[bindings.shortcut_pause].buttons;
+			if (fe::shortcuts::Held(physical, bindings.shortcut_list))
+				b &= ~fe::shortcuts::kChoices[bindings.shortcut_list].buttons;
+			if (fe::shortcuts::Held(physical, bindings.shortcut_cheats))
+				b &= ~fe::shortcuts::kChoices[bindings.shortcut_cheats].buttons;
+		}
 		for (int i = 0; i < B_COUNT; i++)
 			S9xReportButton(MakeId(p, i), (b & kPadFor[i]) != 0);
 	}

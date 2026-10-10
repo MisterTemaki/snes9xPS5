@@ -9,6 +9,7 @@
 
 #include "fe_emu.h"
 #include "fe_settings.h"
+#include "fe_shortcuts.h"
 #include "fe_text.h"
 
 #include "OrbisPaths.h"
@@ -90,7 +91,7 @@ public:
 		n.back = down & SCE_PAD_BUTTON_CIRCLE;
 		n.options = down & SCE_PAD_BUTTON_OPTIONS;
 		n.triangle = down & SCE_PAD_BUTTON_TRIANGLE;
-		const uint32_t combo = SCE_PAD_BUTTON_L3 | SCE_PAD_BUTTON_R3;
+		const uint32_t combo = shortcuts::kChoices[Config().shortcut_pause].buttons;
 		n.menu = (cur & combo) == combo && (down & combo);
 		return n;
 	}
@@ -339,6 +340,7 @@ void SettingsMenu()
 		std::vector<Row> rows;
 		for (int s = 0; s < S_COUNT; s++)
 			rows.push_back({SettingLabel(s), SettingValue(s)});
+		rows.push_back({"Controller shortcuts", ""});
 		rows.push_back({"Back", ""});
 		Header("Settings");
 		DrawOptionBox("Settings", rows, sel, false);
@@ -353,7 +355,12 @@ void SettingsMenu()
 			sel = (sel + 1) % count;
 		if (sel < S_COUNT && (n.left || n.right || n.ok))
 			ChangeSetting(sel, n.left ? -1 : 1);
-		if (n.back || n.options || (n.ok && sel == S_COUNT))
+		if (n.ok && sel == S_COUNT)
+		{
+			ShortcutMenu();
+			nav = NavReader();
+		}
+		if (n.back || n.options || (n.ok && sel == S_COUNT + 1))
 		{
 			Config().Save();
 			return;
@@ -535,6 +542,8 @@ PauseAction PauseMenu()
 		I_SAVE,
 		I_LOAD,
 		I_SLOT,
+		I_CHEATS,
+		I_SHORTCUTS,
 		I_SET0, // the S_* settings follow
 		I_RESET = I_SET0 + S_COUNT,
 		I_LIST,
@@ -561,6 +570,8 @@ PauseAction PauseMenu()
 		rows[I_LOAD] = {slot, "", emu::StateExists(cfg.state_slot)};
 		snprintf(slot, sizeof(slot), "%d%s", cfg.state_slot, emu::StateExists(cfg.state_slot) ? " (used)" : " (empty)");
 		rows[I_SLOT] = {"State slot", slot};
+		rows[I_CHEATS] = {"Cheat manager", ""};
+		rows[I_SHORTCUTS] = {"Controller shortcuts", ""};
 		for (int s = 0; s < S_COUNT; s++)
 			rows[I_SET0 + s] = {SettingLabel(s), SettingValue(s)};
 		rows[I_RESET] = {"Reset game", ""};
@@ -611,6 +622,14 @@ PauseAction PauseMenu()
 					toast = "This slot is empty.";
 					toast_until = Now() + 2.0;
 					break;
+				case I_CHEATS:
+					CheatMenu();
+					nav = NavReader();
+					break;
+				case I_SHORTCUTS:
+					ShortcutMenu();
+					nav = NavReader();
+					break;
 				case I_RESET:
 					emu::Reset();
 					return PauseAction::Resume;
@@ -618,6 +637,101 @@ PauseAction PauseMenu()
 				case I_QUIT: return PauseAction::Quit;
 				default: break;
 			}
+		}
+	}
+}
+
+
+// Cheat groups are read from the game already loaded by emu::LoadGame.
+// A scrolled list is essential: RetroArch files can contain hundreds of codes.
+void CheatMenu()
+{
+	NavReader nav;
+	int sel = 0;
+	int top = 0;
+	constexpr int kVisible = 14;
+	for (;;)
+	{
+		const int count = emu::CheatCount();
+		const int visible = std::min(count, kVisible);
+		if (count == 0)
+		{
+			Header("Cheats");
+			DrawOptionBox("No cheats found", {{"Load a matching .cht file for your ROM", ""}}, 0, false);
+			Footer("FTP: /data/snes9x/cheats/<rom name>.cht     Circle: Back");
+		}
+		else
+		{
+			if (sel < top) top = sel;
+			if (sel >= top + visible) top = sel - visible + 1;
+			std::vector<Row> rows;
+			rows.reserve(size_t(visible));
+			for (int i = 0; i < visible; ++i)
+			{
+				const int index = top + i;
+				rows.push_back({FitText(emu::CheatName(index), 3, 670), emu::CheatEnabled(index) ? "ON" : "OFF"});
+			}
+			Header(emu::GameName().c_str());
+			char caption[120];
+			snprintf(caption, sizeof(caption), "Cheats %d-%d / %d", top + 1, top + visible, count);
+			DrawOptionBox(caption, rows, sel - top, true);
+			Footer("Cross/Left/Right: Toggle     L1/R1: Page     Triangle: All ON     Square: All OFF     Circle: Back");
+		}
+		Present();
+		const Nav n = nav.Read();
+		if (n.back || n.options || n.menu) return;
+		if (count == 0) continue;
+		if (n.up) sel = (sel + count - 1) % count;
+		if (n.down) sel = (sel + 1) % count;
+		if (n.pgup) sel = std::max(0, sel - kVisible);
+		if (n.pgdn) sel = std::min(count - 1, sel + kVisible);
+		// The navigation arrows auto-repeat; a toggle must react only to the edge,
+		// otherwise holding Left/Right flips the cheat repeatedly and hammers storage.
+		const uint32_t pressed_lr = ps5input::Pressed() & (SCE_PAD_BUTTON_LEFT | SCE_PAD_BUTTON_RIGHT);
+		if (n.ok || pressed_lr)
+		{
+			if (!emu::ToggleCheat(sel))
+				OrbisLog("[cheats] could not persist toggle for group %d", sel);
+		}
+		if (n.triangle) emu::SetAllCheats(true);
+		if (ps5input::Pressed() & SCE_PAD_BUTTON_SQUARE) emu::SetAllCheats(false);
+	}
+}
+
+void ShortcutMenu()
+{
+	NavReader nav;
+	int sel = 0;
+	for (;;)
+	{
+		Settings& cfg = Config();
+		int* items[] = {&cfg.shortcut_pause, &cfg.shortcut_list, &cfg.shortcut_cheats};
+		std::vector<Row> rows = {
+			{"Pause menu", shortcuts::Label(*items[0])},
+			{"Return to game shelf", shortcuts::Label(*items[1])},
+			{"Cheat manager", shortcuts::Label(*items[2])},
+			{"Back", ""}
+		};
+		Header("Controller shortcuts");
+		DrawOptionBox("Button shortcuts", rows, sel, false);
+		Footer("Left / Right: Reassign     Cross: Next option     Circle: Back");
+		Present();
+		const Nav n = nav.Read();
+		if (n.back || n.options || (n.ok && sel == 3)) { cfg.Save(); return; }
+		if (n.up) sel = (sel + 3) % 4;
+		if (n.down) sel = (sel + 1) % 4;
+		if (sel < 3 && (n.left || n.right || n.ok))
+		{
+			// Never let two actions share a chord; skip existing bindings.
+			const int dir = n.left ? -1 : 1;
+			for (int i = 0; i < shortcuts::kCount; i++)
+			{
+				const int proposed = (*items[sel] + dir + shortcuts::kCount) % shortcuts::kCount;
+				*items[sel] = proposed;
+				if (proposed != *items[(sel + 1) % 3] && proposed != *items[(sel + 2) % 3])
+					break;
+			}
+			cfg.Save();
 		}
 	}
 }
