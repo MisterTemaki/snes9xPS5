@@ -573,6 +573,28 @@ void Loading(const char* text)
 }
 } // namespace
 
+// Retries missing box art using the existing helper; never removes a user's own cover.
+int RepairMissingCovers()
+{
+	ShelfState& st = S();
+	int queued = 0;
+	for (size_t i = 0; i < st.games.size(); ++i)
+	{
+		const GameInfo& game = st.games[i];
+		const std::string name = CoverNameFor(game);
+		const std::string cache = OrbisDir("covers") + "/" + ThumbnailName(name) + ".png";
+		if (i < st.slots.size() && st.slots[i] && st.slots[i]->real) continue;
+		if (i < st.slots.size() && !st.slots[i] && OrbisIsFile(cache)) continue;
+		st.covers.Refetch(int(i));
+		++queued;
+	}
+	WriteWantedList(MissingCovers(st.games));
+	if (!ShelfDownloads())
+		CoversRestartIfNeeded(st.games, Config().covers_download, true, Loading);
+	OrbisLog("[covers] user requested repair of %d missing covers", queued);
+	return queued;
+}
+
 void ShelfShutdown()
 {
 	S().covers.Stop();
@@ -629,6 +651,8 @@ std::string Shelf()
 	double last = Now();
 	bool dirty = true;
 	int last_status = -1;
+	int bulk_covers = 0;
+	double bulk_covers_until = 0;
 
 	for (;;)
 	{
@@ -665,6 +689,12 @@ std::string Shelf()
 			cfg.last_rom = st.games[size_t(sel)].path;
 			cfg.Save();
 			return st.games[size_t(sel)].path;
+		}
+		if (down & SCE_PAD_BUTTON_R3)
+		{
+			bulk_covers = RepairMissingCovers();
+			bulk_covers_until = now + 5.0;
+			dirty = true;
 		}
 		if (down & SCE_PAD_BUTTON_TRIANGLE)
 		{
@@ -854,15 +884,21 @@ std::string Shelf()
 			const char* s = "Offline: covers next time";
 			DrawText(W - 80 - TextWidth(s, 3), 112, s, 3, Rgb(170, 160, 210));
 		}
+		if (now < bulk_covers_until)
+		{
+			char notice[128];
+			snprintf(notice, sizeof(notice), "Retrying %d missing covers (box art, then title screens)", bulk_covers);
+			CenterText(950, notice, 3, Rgb(225, 220, 245));
+		}
 		// hints
 		ps5video::DarkenRect(0, H - 78, W, 78);
 		const std::string sp = "      ";
 		const std::string hint = n > 0
 			? std::string(icon::Cross) + " Play" + sp + icon::DpadLeftRight + " Browse" + sp + icon::L1 + " " + icon::R1 +
 				" Skip 10" + sp + icon::Triangle + " Settings" + sp + icon::Square + " Get cover" + sp +
-				icon::Options + " Quit"
+				icon::R3 + " Fix Covers" + sp + icon::Options + " Quit"
 			: std::string(icon::Triangle) + " Settings" + sp + icon::Options + " Quit";
-		DrawText((W - TextWidth(hint.c_str(), 3)) / 2, H - 60, hint.c_str(), 3, Rgb(205, 200, 228));
+		DrawText((W - TextWidth(hint.c_str(), 2)) / 2, H - 54, hint.c_str(), 2, Rgb(205, 200, 228));
 
 		ps5video::Present(0, 0, 0, 0, true);
 	}

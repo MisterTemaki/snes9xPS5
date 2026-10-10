@@ -78,10 +78,20 @@ bool NonEmptyFile(const std::string& path)
 	return stat(path.c_str(), &st) == 0 && S_ISREG(st.st_mode) && st.st_size > 0;
 }
 
-bool RecentlyMissing(const std::string& marker)
+bool RecentlyMissing(const std::string& marker, const std::string& url)
 {
-	struct stat st = {};
-	return stat(marker.c_str(), &st) == 0 && time(nullptr) - st.st_mtime < kMissingRetrySeconds;
+    struct stat st = {};
+    if (stat(marker.c_str(), &st) != 0 || time(nullptr) - st.st_mtime >= kMissingRetrySeconds)
+        return false;
+    FILE* f = fopen(marker.c_str(), "r");
+    if (!f) return false;
+    char line[8192] = {};
+    const bool read = fgets(line, sizeof(line), f) != nullptr;
+    fclose(f);
+    if (!read) return false;
+    std::string old(line);
+    while (!old.empty() && (old.back() == '\n' || old.back() == '\r')) old.pop_back();
+    return old == url;
 }
 
 struct Worker
@@ -105,7 +115,7 @@ struct Worker
 		struct stat st = {};
 		if (stat((base + ".refetch").c_str(), &st) == 0)
 			return true; // Square on the shelf: asked for again
-		return !NonEmptyFile(path) && !RecentlyMissing(base + ".missing");
+		return !NonEmptyFile(path) && !RecentlyMissing(base + ".missing", w.url);
 	}
 
 	void Reload()

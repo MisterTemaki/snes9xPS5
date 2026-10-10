@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: MIT
 
 #include "fe_games.h"
+#include "fe_titlematch.h"
 
 #include "OrbisPaths.h"
 
@@ -101,6 +102,7 @@ struct Db
 	std::unordered_map<uint32_t, std::string> by_crc;
 	std::unordered_map<std::string, std::string> exact; // lower-case name -> name
 	std::unordered_map<std::string, std::string> loose; // Key -> best name
+	std::vector<std::string> all_names;
 	Db()
 	{
 		const char* p = s9x_gamedb_begin;
@@ -115,6 +117,7 @@ struct Db
 				const uint32_t crc = uint32_t(strtoul(std::string(p, 8).c_str(), nullptr, 16));
 				std::string name(p + 9, size_t(nl - p - 9));
 				by_crc.emplace(crc, name);
+				all_names.push_back(name);
 				exact.emplace(Lower(name), name);
 				const std::string k = Key(name);
 				auto it = loose.find(k);
@@ -295,6 +298,11 @@ std::string Loose(const std::string& file_base)
 	return it == D().loose.end() ? std::string() : it->second;
 }
 
+std::string Fuzzy(const std::string& file_base)
+{
+	return titles::Best(D().all_names, file_base);
+}
+
 std::string Title(const std::string& nointro)
 {
 	std::string t = nointro.substr(0, nointro.find(" ("));
@@ -415,6 +423,12 @@ std::vector<GameInfo> ScanGames()
 		}
 		if (g.nointro.empty())
 			g.nointro = gamedb::Loose(g.file_base);
+		if (g.nointro.empty())
+		{
+			g.nointro = gamedb::Fuzzy(g.file_base);
+			if (!g.nointro.empty())
+				OrbisLog("[games] fuzzy: %s -> %s", g.file_base.c_str(), g.nointro.c_str());
+		}
 		g.title = g.nointro.empty() ? g.file_base : gamedb::Title(g.nointro);
 		g.region = gamedb::Region(g.nointro);
 	}
