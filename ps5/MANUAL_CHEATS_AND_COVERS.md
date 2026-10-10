@@ -29,3 +29,13 @@ To download covers on a PC instead, use the [Libretro SNES thumbnails repository
 ## Debugging covers
 
 Enable **Settings > Debug logs** and check `/data/snes9x/logs/boot.log` and `helper.log`. The cover helper remains required for **online cover downloading**; removing the cheat downloader does not remove the existing cover helper.
+
+## English translation cover names (v2.5)
+
+For ROM archives named like `Bahamut Lagoon (ENG) # SNES.zip`, the artwork resolver removes the collection suffix and uses a verified alias for the original SNES release. Translated Japanese titles automatically reuse the **original Japanese game artwork** from Libretro, without renaming the ZIP.
+
+The mapped aliases include Final Fantasy VI, Dragon Ball Z: Super Gokuu Den 2 (Kakusei Hen), Super Butouden and Super Butouden 3, Hyper Dimension, Dragon Quest I & II, Dai-3-ji Super Robot Taisen and Bahamut Lagoon. For these games the artwork index already has real matching filenames.
+
+**Bootlegs need separate artwork:** `Pokemon Gold & Silver` and `Aladdin 2000` do not have distinct artwork entries in the current Libretro SNES box/title/screenshot lists. They should not be mapped to unrelated official Pokémon or Aladdin games. A matching PNG or JPG under `/data/snes9x/covers/<ROM ZIP name without .zip>.png` will still override the placeholder.
+
+The renderer never modifies the ROM file or the manual cheat lookup, and still handles alternate matching filenames conservatively.

@@ -685,6 +685,54 @@ kill $SRVPID 2>/dev/null
 expect "[ $rc = 0 ]" "game shelf opens even when an old missing-cover marker is present"
 expect "[ -f '$T/root/covers/Super Mario World (USA).png' ]" "improved artwork URL bypasses obsolete 30-day 404 marker"
 
+
+echo "== 23. English-patched ZIPs download matched artwork (real shelf + local server)"
+T=$(newroot t23)
+mkdir -p "$T/root/roms" "$T/srv/Named_Boxarts"
+python3 tests/make_test_rom.py "$T/source.sfc" ntsc >/dev/null
+python3 - "$T/source.sfc" "$T/root/roms" "$T/srv/Named_Boxarts" <<'PY'
+import sys,zipfile,os
+from PIL import Image
+aliases = [
+    ("Final Fantasy 6 (ENG) # SNES", "Final Fantasy VI (Japan)"),
+    ("Dragon-Ball-Z - Super Gokuden 2 (ENG) # SNES", "Dragon Ball Z - Super Gokuu Den - Kakusei Hen (Japan)"),
+    ("Dragon-Ball Z - Super Butouden 3 (ENG) # SNES", "Dragon Ball Z - Super Butouden 3 (Japan)"),
+    ("Dragon-Ball Z - Super Butouden (ENG) # SNES", "Dragon Ball Z - Super Butouden (Japan)"),
+    ("Dragon-Ball Z - Hyper Dimension (ENG) # SNES", "Dragon Ball Z - Hyper Dimension (Japan)"),
+    ("Dragon Quest 1 and 2 (ENG) # SNES", "Dragon Quest I _ II (Japan)"),
+    ("Dai 3 Ji - Super Robot Taisen (ENG) # SNES", "Dai-3-ji Super Robot Taisen (Japan)"),
+    ("Bahamut Lagoon (ENG) # SNES", "Bahamut Lagoon (Japan)"),
+    ("Pokemon Gold & Silver", "Pokemon Gold _ Silver"),
+    ("Aladdin 2000", "Aladdin 2000"),
+]
+for idx,(title,cover) in enumerate(aliases):
+    with zipfile.ZipFile(os.path.join(sys.argv[2],title+".zip"),"w",zipfile.ZIP_DEFLATED) as z:
+        z.write(sys.argv[1],"game.sfc")
+    Image.new('RGB',(512,357),(20+idx*18,30,40)).save(os.path.join(sys.argv[3],cover+".png"))
+PY
+PORT=18087
+(cd "$T/srv" && exec python3 -m http.server $PORT --bind 127.0.0.1 >/dev/null 2>&1) &
+SRVPID=$!
+sleep 1
+rc=$(OFFLINE= COVER_URL="http://127.0.0.1:$PORT/Named_Boxarts/\${name}.png" SNES9X_HOST_REALTIME=1 run "$T" \
+    "0:0;780:$OPTIONS;782:0;790:$CROSS;792:0" "")
+kill $SRVPID 2>/dev/null
+expect "[ $rc = 0 ]" "all photographed English-patched ZIPs scanned by the shelf"
+expect "grep -q '10 ROM(s)' '$T/root/logs/boot.log'" "all ten ZIP titles scanned"
+for cover in \
+    "Final Fantasy VI (Japan)" \
+    "Dragon Ball Z - Super Gokuu Den - Kakusei Hen (Japan)" \
+    "Dragon Ball Z - Super Butouden 3 (Japan)" \
+    "Dragon Ball Z - Super Butouden (Japan)" \
+    "Dragon Ball Z - Hyper Dimension (Japan)" \
+    "Dragon Quest I _ II (Japan)" \
+    "Dai-3-ji Super Robot Taisen (Japan)" \
+    "Bahamut Lagoon (Japan)"; do
+    expect "[ -f '$T/root/covers/$cover.png' ]" "matched art downloaded for $cover"
+done
+expect "[ -f '$T/root/covers/Pokemon Gold _ Silver.png' ]" "Pokemon bootleg gets its own distinct image filename"
+expect "[ -f '$T/root/covers/Aladdin 2000.png' ]" "Aladdin bootleg gets its own distinct image filename"
+
 echo
 echo "passed $PASS, failed $FAIL  (work dir $WORK)"
 [ $FAIL = 0 ]

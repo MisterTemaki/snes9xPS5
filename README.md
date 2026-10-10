@@ -15,7 +15,7 @@ own icon and background. The PS5 layer follows the layout of PS5SX2 (the PCSX2 p
 Everything outside `ps5/` is the original Snes9x source, unchanged, apart from this README (the original one is
 [README-Snes9x.md](README-Snes9x.md)).
 
-> **Status (2.4):** runs on the console: the app opens from its icon, the shelf, the controller, video and sound
+> **Status (2.5):** runs on the console: the app opens from its icon, the shelf, the controller, video and sound
 > work, and games play. It builds with the ps5-payload-dev SDK and runs host regression tests, which exercise the same code
 > on Linux with the PS5 calls simulated. If something fails, the logs in `/data/snes9x/logs/` say where.
 
@@ -46,9 +46,11 @@ written to PS5SX2's folders (`/data/PCSX2`, `/data/homebrew/PPSA99203`).
 
 ## Versions
 
-Every release carries its version in the file name: `Snes9xPS5-v2.4.elf` and `snes9x-ps5-v2.4-src.zip`
+Every release carries its version in the file name: `Snes9xPS5-v2.5.elf` and `snes9x-ps5-v2.5-src.zip`
 (`make dist`). When updating, replace the old ELF with the new one in your autoload or Payload Manager. In this
 README, "`Snes9xPS5.elf`" always means the current release's ELF.
+
+**2.5:** **Translated ROM cover recognition.** Automatically matches 8 more English-patched Japanese titles (Final Fantasy VI, Bahamut Lagoon, Dragon Quest I & II, Dragon Ball Z series, Dai-3-ji Super Robot Taisen) using their Libretro artwork filenames even when ROM archives contain "(ENG) # SNES". Distinct artwork is not available in the Libretro SNES indexes for the Pokémon Gold & Silver and Aladdin 2000 bootlegs, which can still use manually supplied PNG/JPG covers. No cheat or controller code was changed.
 
 **2.4:** **Manual cheat files only, improved artwork recovery.** Removed the nonworking PS5 cheat
 download menus, automatic cheat queue and network helper thread; manually copied .cht files and in-game
