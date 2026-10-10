@@ -3,6 +3,7 @@
 #pragma once
 
 #include <string>
+#include "fe_cheatdownload.h"
 
 namespace fe
 {
@@ -21,6 +22,7 @@ PauseAction PauseMenu();
 // In-game cheat list (single-code/group toggle, all on/off), and controller shortcut configuration.
 void CheatMenu();
 void ShortcutMenu();
+void CheatDownloadsMenu(const CheatRequestGame& game = {});
 
 // The settings screen (Triangle on the shelf).
 void SettingsMenu();

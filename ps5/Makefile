@@ -44,13 +44,15 @@ EMU_SRC := coreorbis/main-boot.cpp \
 	coreorbis/orbis-shims/ProsperoInput.cpp coreorbis/orbis-shims/ProsperoJailbreak.cpp \
 	coreorbis/orbis-shims/ProsperoCrash.cpp coreorbis/orbis-shims/ProsperoCrt.cpp \
 	frontend/fe_emu.cpp frontend/fe_menu.cpp frontend/fe_settings.cpp frontend/fe_text.cpp \
+	frontend/fe_cheatdownload.cpp \
 	frontend/fe_games.cpp frontend/fe_http.cpp frontend/fe_covers.cpp frontend/fe_shelf.cpp \
 	frontend/fe_prefetch.cpp frontend/fe_coverfetch.cpp frontend/fe_coverworker.cpp
 # the payloads: the helper, and the installer (= helper + install)
 # (the helper also downloads the covers in the background: fe_coverworker.cpp, with the app's HTTPS code)
 HELPER_SRC := coreorbis/orbis-shims/orbis_paths.cpp coreorbis/orbis-shims/ProsperoNotify.cpp \
 	coreorbis/orbis-shims/ProsperoHelper.cpp coreorbis/orbis-shims/ProsperoCrash.cpp \
-	frontend/fe_http.cpp frontend/fe_coverfetch.cpp frontend/fe_coverworker.cpp frontend/fe_tlshttp.cpp
+	frontend/fe_http.cpp frontend/fe_coverfetch.cpp frontend/fe_coverworker.cpp frontend/fe_tlshttp.cpp \
+	frontend/fe_cheatdownload.cpp
 # the helper's own HTTPS (fe_tlshttp.cpp): Mbed TLS 3.6 (Apache-2.0), with fe_mbedtls_config.h on its default settings
 MBEDTLS := frontend/third_party/mbedtls
 MBEDTLS_SRC := $(sort $(wildcard $(MBEDTLS)/library/*.c))
@@ -72,6 +74,9 @@ GAMEDB_DEFS := -DGAMEDB_TSV='"$(abspath frontend/data/snes-nointro.tsv)"'
 %/port/frontend/fe_games.o: EXTRA_FLAGS = $(GAMEDB_DEFS)
 %/port/frontend/fe_covers.o: EXTRA_FLAGS = -Wno-error -Wno-sign-compare -Wno-unused-but-set-variable -Wno-implicit-fallthrough
 %/port/frontend/fe_games.o: frontend/data/snes-nointro.tsv
+CHEAT_MANIFEST_DEFS := -DCHEAT_MANIFEST_TXT='"$(abspath frontend/data/snes-cheat-index.txt)"'
+%/port/frontend/fe_cheatdownload.o: EXTRA_FLAGS = $(CHEAT_MANIFEST_DEFS)
+%/port/frontend/fe_cheatdownload.o: frontend/data/snes-cheat-index.txt
 # the UI fonts (PS5SX2's: PCSX2's Roboto Regular and PromptFont) built into fe_text.o
 %/port/frontend/fe_text.o: EXTRA_FLAGS = -DFE_FONT_DIR='"$(abspath frontend/assets/fonts)"' -Wno-error -Wno-sign-compare -Wno-unused-function
 %/port/frontend/fe_text.o: frontend/assets/fonts/Roboto-Regular.ttf frontend/assets/fonts/promptfont.otf \

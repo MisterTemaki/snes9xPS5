@@ -382,10 +382,10 @@ python3 tests/make_test_rom.py "$T/root/roms/Alpha (USA).sfc" ntsc >/dev/null
 TRIANGLE=1000; RIGHT=20
 rc=$(run "$T" "0:0;30:$TRIANGLE;32:0;40:$RIGHT;42:0;46:$RIGHT;48:0;52:$RIGHT;54:0;60:$CIRCLE;62:0;70:$OPTIONS;72:0;80:$CROSS;82:0" "50")
 expect "grep -q '^shader=3$' $T/root/snes9x-ps5.ini" "the settings screen's Shader row is saved (shader=0 -> 3)"
-# in a game: L3 + R3, Down four times (Save, Load, State slot, Shader), Right -> CRT Easymode style, Circle resumes
+# in a game: L3 + R3, Down six times (Save, Load, Slot, Cheats, Shortcuts, Shader), Right -> CRT Easymode style
 T=$(newroot t16p)
 python3 tests/make_test_rom.py "$T/root/roms/test.sfc" ntsc >/dev/null
-rc=$(run "$T" "0:0;60:$L3R3;65:0;80:$DOWN;82:0;86:$DOWN;88:0;92:$DOWN;94:0;98:$DOWN;100:0;110:$RIGHT;112:0;120:$CIRCLE;122:0;$(QUITAT 200)" "" "$T/root/roms/test.sfc")
+rc=$(run "$T" "0:0;60:$L3R3;65:0;80:$DOWN;82:0;86:$DOWN;88:0;92:$DOWN;94:0;98:$DOWN;100:0;104:$DOWN;106:0;110:$DOWN;112:0;120:$RIGHT;122:0;130:$CIRCLE;132:0;$(QUITAT 200)" "" "$T/root/roms/test.sfc")
 expect "[ $rc = 0 ] && grep -q '^shader=1$' $T/root/snes9x-ps5.ini" "the pause menu's Shader row changes it in the game (saved)"
 expect "grep -q 'shader CRT Easymode style' $T/root/logs/boot.log && [ \$(grep -c '\[video\] picture' $T/root/logs/boot.log) -le 4 ]" "the game is drawn through it; the menu doesn't flood boot.log"
 expect "! grep -q 'runtime error\|AddressSanitizer' $T/out.txt" "no sanitizer reports"
@@ -434,10 +434,10 @@ expect "$CHECK $T/dump/flip00090.ppm 960 540 255 0 0 >/dev/null" "the game runs"
 expect "[ \"\$(cat $T/root/logs/boot.log)\" = 'OLD RUN' ] && [ ! -e $T/root/logs/boot.prev.log ]" "the earlier boot.log is kept as it was, nothing new written"
 expect "! grep -q '^\[snes9x-ps5' $T/out.txt" "nothing on stdout either"
 expect "! grep -q 'runtime error\|AddressSanitizer' $T/out.txt" "no sanitizer reports"
-# Settings (Triangle) -> Debug logs (Up twice from Shader: Back, then Debug logs) -> Off: that line is the last one
+# Settings (Triangle) -> Debug logs (Up five times from Shader after new menu rows) -> Off
 T=$(newroot t18b)
 python3 tests/make_test_rom.py "$T/root/roms/test.sfc" ntsc >/dev/null
-rc=$(run "$T" "0:0;30:$TRIANGLE;32:0;50:$UP;52:0;60:$UP;62:0;70:$CROSS;72:0;90:$CIRCLE;92:0;$(SHELFQUIT_AT 120)" "")
+rc=$(run "$T" "0:0;30:$TRIANGLE;32:0;50:$UP;52:0;60:$UP;62:0;70:$UP;72:0;80:$UP;82:0;90:$UP;92:0;100:$CROSS;102:0;120:$CIRCLE;122:0;$(SHELFQUIT_AT 150)" "")
 expect "[ $rc = 0 ]" "exit code 0 (got $rc)"
 expect "grep -q '^debug_logs=0' $T/root/snes9x-ps5.ini" "Debug logs Off saved"
 expect "tail -1 $T/root/logs/boot.log | grep -q 'debug logs turned off'" "the last line of boot.log says the logs were turned off"
@@ -445,7 +445,7 @@ expect "tail -1 $T/root/logs/boot.log | grep -q 'debug logs turned off'" "the la
 T=$(newroot t18c)
 python3 tests/make_test_rom.py "$T/root/roms/test.sfc" ntsc >/dev/null
 echo "debug_logs=0" >>"$T/root/snes9x-ps5.ini"
-rc=$(run "$T" "0:0;30:$TRIANGLE;32:0;50:$UP;52:0;60:$UP;62:0;70:$CROSS;72:0;90:$CIRCLE;92:0;$(SHELFQUIT_AT 120)" "")
+rc=$(run "$T" "0:0;30:$TRIANGLE;32:0;50:$UP;52:0;60:$UP;62:0;70:$UP;72:0;80:$UP;82:0;90:$UP;92:0;100:$CROSS;102:0;120:$CIRCLE;122:0;$(SHELFQUIT_AT 150)" "")
 expect "grep -q '^debug_logs=1' $T/root/snes9x-ps5.ini" "Debug logs On saved"
 expect "head -1 $T/root/logs/boot.log | grep -q 'debug logs turned on'" "boot.log starts at the switch (nothing from before it)"
 expect "! grep -q 'runtime error\|AddressSanitizer' $T/out.txt" "no sanitizer reports"

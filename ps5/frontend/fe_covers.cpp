@@ -320,7 +320,14 @@ std::string CoverUrlFor(const std::string& nointro)
 	const size_t p = url.find("${name}");
 	if (p != std::string::npos)
 		url.replace(p, 7, UrlEncode(ThumbnailName(nointro)));
-	return url;
+	// Respect the host's test/custom URL without generating unintended traffic.
+	if (getenv("SNES9X_COVER_URL")) return url;
+	const std::string encoded = UrlEncode(ThumbnailName(nointro));
+	const std::string root =
+		"https://raw.githubusercontent.com/libretro-thumbnails/Nintendo_-_Super_Nintendo_Entertainment_System/master/";
+	// A missing box art can still get an official title screen or screenshot, not a blank shelf card.
+	return url + "\t" + root + "Named_Titles/" + encoded + ".png\t" +
+		root + "Named_Snaps/" + encoded + ".png";
 }
 
 std::string WantedListPath()
@@ -334,9 +341,8 @@ std::vector<WantedCover> MissingCovers(const std::vector<GameInfo>& games)
 	const std::string covers = OrbisDir("covers");
 	for (const GameInfo& g : games)
 	{
-		if (g.nointro.empty())
-			continue;
-		const std::string file = ThumbnailName(g.nointro) + ".png";
+		const std::string name = g.nointro.empty() ? g.file_base : g.nointro;
+		const std::string file = ThumbnailName(name) + ".png";
 		const std::string cache = covers + "/" + file;
 		if (!Exists(RefetchMarker(cache)) &&
 			(NonEmptyFile(cache) || RecentlyMissing(cache.substr(0, cache.size() - 4) + ".missing")))
@@ -351,7 +357,7 @@ std::vector<WantedCover> MissingCovers(const std::vector<GameInfo>& games)
 		for (const WantedCover& w : out)
 			dup = dup || w.file == file;
 		if (!dup)
-			out.push_back({file, CoverUrlFor(g.nointro)});
+			out.push_back({file, CoverUrlFor(name)});
 	}
 	return out;
 }
@@ -368,9 +374,8 @@ void WriteWantedList(const std::vector<WantedCover>& wanted)
 std::string CoverService::CachePath(int i) const
 {
 	const GameInfo& g = m_games[size_t(i)];
-	if (g.nointro.empty())
-		return "";
-	return OrbisDir("covers") + "/" + ThumbnailName(g.nointro) + ".png";
+	const std::string name = g.nointro.empty() ? g.file_base : g.nointro;
+	return OrbisDir("covers") + "/" + ThumbnailName(name) + ".png";
 }
 
 bool CoverService::NeedsDownload(int i) const
@@ -483,7 +488,7 @@ bool CoverService::Download(int i)
 	const std::string marker = cache.substr(0, cache.size() - 4) + ".missing";
 	if (m_offline || RecentlyMissing(marker))
 		return false;
-	const std::string url = CoverUrlFor(g.nointro);
+	const std::string url = CoverUrlFor(g.nointro.empty() ? g.file_base : g.nointro);
 	std::vector<uint8_t> data;
 	S9X_STAGE(Cover, "http get cover");
 	const int status = FetchCoverUrl(m_http, url, ThumbnailName(g.nointro), data);

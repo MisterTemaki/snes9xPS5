@@ -15,6 +15,9 @@ bool GameLoaded();
 
 // Native Snes9x cheat groups, enabled/disabled live and persisted per game.
 int CheatCount();
+std::string RomBase();
+std::string RomNoIntro();
+bool ReloadDownloadedCheats();
 std::string CheatName(int index);
 bool CheatEnabled(int index);
 bool ToggleCheat(int index);

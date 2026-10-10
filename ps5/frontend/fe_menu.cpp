@@ -8,6 +8,9 @@
 #include "fe_menu.h"
 
 #include "fe_emu.h"
+#include "fe_cheatdownload.h"
+#include "fe_games.h"
+#include "fe_shelf.h"
 #include "fe_settings.h"
 #include "fe_shortcuts.h"
 #include "fe_text.h"
@@ -212,8 +215,10 @@ void DrawOptionBox(const char* title, const std::vector<Row>& rows, int sel, boo
 {
 	const int scale = 3;
 	const int row_h = 44;
-	const int bw = 1000;
-	const int bh = 120 + int(rows.size()) * row_h + 30;
+	const int bw = 1050;
+	const int visible = std::min(16, int(rows.size()));
+	const int start = std::min(std::max(0, sel - visible + 1), std::max(0, int(rows.size()) - visible));
+	const int bh = 120 + visible * row_h + 30;
 	const int bx = (W - bw) / 2;
 	const int by = std::max(20, (H - bh) / 2);
 	if (!over_game)
@@ -221,13 +226,13 @@ void DrawOptionBox(const char* title, const std::vector<Row>& rows, int sel, boo
 	ps5video::FillRect(bx, by, bw, bh, kPanel);
 	ps5video::FillRect(bx, by + 86, bw, 3, kAccent);
 	DrawText(bx + 40, by + 24, title, 5, kAccent);
-	for (size_t i = 0; i < rows.size(); i++)
+	for (int i = start; i < start + visible; i++)
 	{
-		const int y = by + 110 + int(i) * row_h;
+		const int y = by + 110 + (i - start) * row_h;
 		if (int(i) == sel)
 			ps5video::FillRect(bx + 16, y - 6, bw - 32, row_h, kSel);
 		const uint32_t col = rows[i].enabled ? kText : kDim;
-		DrawText(bx + 40, y, rows[i].label.c_str(), scale, col);
+		DrawText(bx + 40, y, FitText(rows[i].label, scale, bw - 320).c_str(), scale, col);
 		if (!rows[i].value.empty())
 		{
 			const std::string v = (int(i) == sel ? "< " + rows[i].value + " >" : rows[i].value);
@@ -253,6 +258,7 @@ enum SettingRow
 	S_TRANSPARENCY,
 	S_SUPERFX,
 	S_COVERS,
+	S_CHEATS_AUTO,
 	S_DEBUGLOGS,
 	S_COUNT
 };
@@ -269,6 +275,7 @@ std::string SettingLabel(int s)
 		case S_TRANSPARENCY: return "Transparency";
 		case S_SUPERFX: return "Super FX clock";
 		case S_COVERS: return "Download covers";
+		case S_CHEATS_AUTO: return "Auto-download missing cheats";
 		case S_DEBUGLOGS: return "Debug logs";
 		default: return "";
 	}
@@ -288,6 +295,7 @@ std::string SettingValue(int s)
 		case S_TRANSPARENCY: return YesNo(c.transparency);
 		case S_SUPERFX: snprintf(buf, sizeof(buf), "%d%%", c.superfx_clock); return buf;
 		case S_COVERS: return YesNo(c.covers_download);
+		case S_CHEATS_AUTO: return YesNo(c.cheats_auto_download);
 		case S_DEBUGLOGS: return YesNo(c.debug_logs);
 		default: return "";
 	}
@@ -311,6 +319,7 @@ void ChangeSetting(int s, int dir)
 		case S_AUDIO: c.audio = !c.audio; break;
 		case S_TRANSPARENCY: c.transparency = !c.transparency; break;
 		case S_COVERS: c.covers_download = !c.covers_download; break;
+		case S_CHEATS_AUTO: c.cheats_auto_download = !c.cheats_auto_download; break;
 		case S_DEBUGLOGS:
 			c.debug_logs = !c.debug_logs;
 			OrbisLogSetEnabled(c.debug_logs); // at once: the line saying so is the last (or first) one written
@@ -341,6 +350,8 @@ void SettingsMenu()
 		for (int s = 0; s < S_COUNT; s++)
 			rows.push_back({SettingLabel(s), SettingValue(s)});
 		rows.push_back({"Controller shortcuts", ""});
+		rows.push_back({"Cheat downloads", ""});
+		rows.push_back({"Repair missing covers", ""});
 		rows.push_back({"Back", ""});
 		Header("Settings");
 		DrawOptionBox("Settings", rows, sel, false);
@@ -360,7 +371,18 @@ void SettingsMenu()
 			ShortcutMenu();
 			nav = NavReader();
 		}
-		if (n.back || n.options || (n.ok && sel == S_COUNT + 1))
+		if (n.ok && sel == S_COUNT + 1)
+		{
+			CheatDownloadsMenu();
+			nav = NavReader();
+		}
+		if (n.ok && sel == S_COUNT + 2)
+		{
+			const int count = RepairMissingCovers();
+			OrbisLog("[settings] queued %d missing covers for retry", count);
+			nav = NavReader();
+		}
+		if (n.back || n.options || (n.ok && sel == S_COUNT + 3))
 		{
 			Config().Save();
 			return;
@@ -652,13 +674,14 @@ void CheatMenu()
 	constexpr int kVisible = 14;
 	for (;;)
 	{
+		if (emu::CheatCount() == 0) emu::ReloadDownloadedCheats();
 		const int count = emu::CheatCount();
 		const int visible = std::min(count, kVisible);
 		if (count == 0)
 		{
 			Header("Cheats");
-			DrawOptionBox("No cheats found", {{"Load a matching .cht file for your ROM", ""}}, 0, false);
-			Footer("FTP: /data/snes9x/cheats/<rom name>.cht     Circle: Back");
+			DrawOptionBox("No cheats found", {{"Download cheats for this game", ""}, {"Back", ""}}, 0, false);
+			Footer("Cross: Download cheats     Circle: Back");
 		}
 		else
 		{
@@ -675,11 +698,18 @@ void CheatMenu()
 			char caption[120];
 			snprintf(caption, sizeof(caption), "Cheats %d-%d / %d", top + 1, top + visible, count);
 			DrawOptionBox(caption, rows, sel - top, true);
-			Footer("Cross/Left/Right: Toggle     L1/R1: Page     Triangle: All ON     Square: All OFF     Circle: Back");
+			Footer("Cross: Toggle   L1/R1: Page   Triangle: All ON   Square: All OFF   Options: Downloads   Circle: Back");
 		}
 		Present();
 		const Nav n = nav.Read();
-		if (n.back || n.options || n.menu) return;
+		if (n.back || n.menu) return;
+		if (n.options || (count == 0 && n.ok))
+		{
+			CheatDownloadsMenu({emu::RomBase(), emu::RomNoIntro()});
+			emu::ReloadDownloadedCheats();
+			nav = NavReader();
+			continue;
+		}
 		if (count == 0) continue;
 		if (n.up) sel = (sel + count - 1) % count;
 		if (n.down) sel = (sel + 1) % count;
@@ -696,6 +726,64 @@ void CheatMenu()
 		if (n.triangle) emu::SetAllCheats(true);
 		if (ps5input::Pressed() & SCE_PAD_BUTTON_SQUARE) emu::SetAllCheats(false);
 	}
+}
+
+
+// Downloads run in the helper, not on the video/input thread. The status survives
+// exiting this screen, and one job at a time avoids accidental repeated downloads.
+void CheatDownloadsMenu(const CheatRequestGame& game)
+{
+    NavReader nav;
+    int sel = 0;
+    bool confirm_all = false;
+    for (;;)
+    {
+        const bool have_game = !game.basename.empty();
+        std::vector<Row> rows;
+        if (have_game) rows.push_back({"Download cheats for selected game", ""});
+        rows.push_back({"Download missing cheats for installed games", ""});
+        rows.push_back({"Download ALL SNES cheats (entire Libretro library)", ""});
+        rows.push_back({"Back", ""});
+        const int all_row = have_game ? 2 : 1;
+        const int back_row = int(rows.size()) - 1;
+        const CheatDownloadStatus p = ReadCheatDownloadStatus();
+        Header(have_game ? game.basename.c_str() : "Cheat downloads");
+        DrawOptionBox("Cheat Downloads", rows, sel, false);
+        char status[192];
+        if (!p.valid) snprintf(status, sizeof(status), "Idle - %zu source cheat files available", CheatDatabaseCount());
+        else snprintf(status, sizeof(status), "%s: %d/%d processed, %d saved, %d failed",
+                      p.state.c_str(), p.done, p.total, p.found, p.failed);
+        DrawText(125, H - 180, FitText(status, 3, W - 250).c_str(), 3, kText);
+        Footer(confirm_all ? "Download ALL files? Press Cross again to confirm or Circle to cancel"
+                           : "Cross: Download    Circle: Back    Downloads continue in background");
+        Present();
+        const Nav n = nav.Read();
+        if (n.back || n.options) return;
+        if (n.up) { sel = (sel + back_row) % int(rows.size()); confirm_all = false; }
+        if (n.down) { sel = (sel + 1) % int(rows.size()); confirm_all = false; }
+        if (!n.ok) continue;
+        if (sel == back_row) return;
+        if (sel == all_row && !confirm_all)
+        {
+            confirm_all = true;
+            continue;
+        }
+        confirm_all = false;
+        bool queued = false;
+        if (have_game && sel == 0)
+            queued = RequestGameCheats(game);
+        else if (sel == all_row)
+            queued = RequestAllSnesCheats();
+        else
+        {
+            std::vector<CheatRequestGame> collection;
+            for (const GameInfo& entry : ScanGames())
+                collection.push_back({entry.file_base, entry.nointro});
+            queued = RequestLibraryCheats(collection);
+        }
+        if (!queued)
+            OrbisLog("[cheat-download] request ignored (already queued, empty, or invalid)");
+    }
 }
 
 void ShortcutMenu()
