@@ -16,7 +16,7 @@ Everything outside `ps5/` is the original Snes9x source, unchanged, apart from t
 [README-Snes9x.md](README-Snes9x.md)).
 
 > **Status (2.4):** runs on the console: the app opens from its icon, the shelf, the controller, video and sound
-> work, and games play. It builds with the ps5-payload-dev SDK and passes 200 host tests, which run the same code
+> work, and games play. It builds with the ps5-payload-dev SDK and passes 183 host tests, which run the same code
 > on Linux with the PS5 calls simulated. If something fails, the logs in `/data/snes9x/logs/` say where.
 
 ## How it works (the PS5SX2 model)
@@ -52,8 +52,8 @@ README, "`Snes9xPS5.elf`" always means the current release's ELF.
 
 **2.4:** **New title ID: PPSA99922** (it was PPSA99009, which another app in the homebrew catalog uses; see
 [New title ID](#new-title-id-ppsa99922)). This fixes the missing home-screen icon when ProsperoLichess is
-installed too ([#2](https://github.com/MisterTemaki/snes9xPS5/issues/2)). Updating moves the install to the new ID and removes the old icon by itself;
-games, saves and settings are kept. The helper listens on port 9089.
+installed too ([#2](https://github.com/MisterTemaki/snes9xPS5/issues/2)). Nothing under the old ID is touched (it may be
+another app's): an earlier version of ours stays as its own icon until you delete it. Games, saves and settings are shared. The helper listens on port 9089.
 
 **2.3:** **The helper downloads the covers with its own HTTPS.** In 2.2 the helper got nothing: the console's own
 HTTPS (libSceSsl) fails outside the app's sandbox, and every cover failed in a few milliseconds while the counter
@@ -77,27 +77,23 @@ home-screen app.
 ## New title ID (PPSA99922)
 
 Up to 2.3, Snes9x PS5 used the title ID PPSA99009. The homebrew catalog
-([homebrew.page](https://homebrew.page/app/PPSA99009/)) lists that ID for another app, ProsperoLichess, and two apps with one
-title ID can't be on the console together: the second one's folder and home-screen icon take the first one's place.
-So from 2.4 on the app is **PPSA99922**, an ID no listed app uses.
+([homebrew.page](https://homebrew.page/app/PPSA99009/)) lists that ID for another app, and two apps with one title ID
+can't be on the console together: the second one's folder and home-screen icon take the first one's place. So
+from 2.4 on the app is **PPSA99922**, an ID no listed app uses, and it installs in `/data/homebrew/PPSA99922/`.
 
-**Updating from 2.3 or older needs nothing special:** send `Snes9xPS5-v2.4.elf` as usual. The installer:
+**Nothing under the old ID is touched:** `/data/homebrew/PPSA99009/` may just as well be the other app's, so the
+installer never renames, removes or unregisters it. When our own earlier version is still there (its
+`param.json` carries Snes9x PS5's content ID), the notification says so: it is a separate icon, the old version. To
+remove it, delete the folder `/data/homebrew/PPSA99009/` (over FTP, for example), then select the old icon on the home
+screen, press **OPTIONS** and choose **Delete** (deleting only the icon isn't enough: ShadowMountPlus finds the folder
+again and puts the icon back).
 
-1. renames our old folder, `/data/homebrew/PPSA99009`, to `/data/homebrew/PPSA99922` and brings it up to date. It reads
-   the folder's `param.json` first: another app's folder under PPSA99009 is never touched.
-2. removes the old icon through ShadowMountPlus's API (`127.0.0.1:10101`, or the `api_port` in
-   `/data/shadowmount/config.ini`), after checking that the title registered as PPSA99009 has our content ID, and asks
-   it to scan again, so the icon of PPSA99922 shows up. ShadowMountPlus refuses while an app is open (PS5 Payload
-   Manager, for instance); then the notification says "The old icon is removed in the background" and the helper
-   tries again every 30 seconds.
-3. without ShadowMountPlus's API (an older ShadowMountPlus, or `api_enabled=0`), the notification says to remove the
-   old icon yourself: select it on the home screen, press **OPTIONS**, choose **Delete**.
+Games, saves, states, covers and settings live in `/data/snes9x/`, which doesn't depend on the title ID: the new
+version finds everything where it was. The helper listens on a new port, because the helpers of 2.3 and older
+only let PPSA99009 out.
 
-Games, saves, states, covers and settings live in `/data/snes9x/`, which doesn't depend on the title ID: nothing is
-lost. The helper moved to port 9089, because the helpers of 2.3 and older only let PPSA99009 out.
-
-**Replace the old ELF in your autoload** with `Snes9xPS5-v2.4.elf`. An old payload that runs again puts the old folder
-back; the app removes it the next time it opens, and the helper removes the old icon again.
+**Replace the old ELF in your autoload** with the new ELF, or the old version keeps
+being installed beside the new one.
 
 ## Language
 
