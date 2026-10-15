@@ -4,6 +4,8 @@
 
 **Inside the emulator, to access the main menu press L3 + R3.**
 
+> **The title ID is now PPSA99922** (it was PPSA99009 up to 2.5, which ProsperoLichess uses too). From 2.6 on the app installs in `/data/homebrew/PPSA99922/`; our old version under `/data/homebrew/PPSA99009/` stays as a separate icon until you delete it (check that the folder is ours first), and your games, saves and settings are kept. Replace the old ELF in your autoload. See [New title ID](#new-title-id-ppsa99922).
+
 Snes9x 1.63, the Super Nintendo emulator, running on a jailbroken PS5 as a **native home-screen app** with its
 own icon and background. The PS5 layer follows the layout of PS5SX2 (the PCSX2 port):
 
@@ -96,7 +98,7 @@ screen, press **OPTIONS** and choose **Delete** (deleting only the icon isn't en
 again and puts the icon back).
 
 Games, saves, states, covers and settings live in `/data/snes9x/`, which doesn't depend on the title ID: the new
-version finds everything where it was. The helper listens on a new port, because the helpers of 2.3 and older
+version finds everything where it was. The helper listens on a new port, because the helpers of 2.5 and older
 only let PPSA99009 out.
 
 **Replace the old ELF in your autoload** with the new ELF, or the old version keeps
