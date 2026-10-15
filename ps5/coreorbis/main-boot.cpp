@@ -71,6 +71,15 @@ bool PlayGame(const std::string& rom)
 			case emu::FrameResult::Quit:
 				emu::CloseGame();
 				return false;
+			case emu::FrameResult::BackToList:
+				emu::CloseGame();
+				return true;
+			case emu::FrameResult::OpenCheats:
+				fe::CheatMenu();
+				emu::AfterMenu();
+				ps5video::FillRect(0, 0, ps5video::kWidth, ps5video::kHeight, ps5video::Rgb(0, 0, 0));
+				ps5video::InvalidateSnes();
+				break;
 			case emu::FrameResult::OpenMenu:
 				switch (fe::PauseMenu())
 				{

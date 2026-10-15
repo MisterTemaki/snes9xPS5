@@ -382,10 +382,10 @@ python3 tests/make_test_rom.py "$T/root/roms/Alpha (USA).sfc" ntsc >/dev/null
 TRIANGLE=1000; RIGHT=20
 rc=$(run "$T" "0:0;30:$TRIANGLE;32:0;40:$RIGHT;42:0;46:$RIGHT;48:0;52:$RIGHT;54:0;60:$CIRCLE;62:0;70:$OPTIONS;72:0;80:$CROSS;82:0" "50")
 expect "grep -q '^shader=3$' $T/root/snes9x-ps5.ini" "the settings screen's Shader row is saved (shader=0 -> 3)"
-# in a game: L3 + R3, Down four times (Save, Load, State slot, Shader), Right -> CRT Easymode style, Circle resumes
+# in a game: L3 + R3, Down six times (Save, Load, Slot, Cheats, Shortcuts, Shader), Right -> CRT Easymode style
 T=$(newroot t16p)
 python3 tests/make_test_rom.py "$T/root/roms/test.sfc" ntsc >/dev/null
-rc=$(run "$T" "0:0;60:$L3R3;65:0;80:$DOWN;82:0;86:$DOWN;88:0;92:$DOWN;94:0;98:$DOWN;100:0;110:$RIGHT;112:0;120:$CIRCLE;122:0;$(QUITAT 200)" "" "$T/root/roms/test.sfc")
+rc=$(run "$T" "0:0;60:$L3R3;65:0;80:$DOWN;82:0;86:$DOWN;88:0;92:$DOWN;94:0;98:$DOWN;100:0;104:$DOWN;106:0;110:$DOWN;112:0;120:$RIGHT;122:0;130:$CIRCLE;132:0;$(QUITAT 200)" "" "$T/root/roms/test.sfc")
 expect "[ $rc = 0 ] && grep -q '^shader=1$' $T/root/snes9x-ps5.ini" "the pause menu's Shader row changes it in the game (saved)"
 expect "grep -q 'shader CRT Easymode style' $T/root/logs/boot.log && [ \$(grep -c '\[video\] picture' $T/root/logs/boot.log) -le 4 ]" "the game is drawn through it; the menu doesn't flood boot.log"
 expect "! grep -q 'runtime error\|AddressSanitizer' $T/out.txt" "no sanitizer reports"
@@ -434,10 +434,10 @@ expect "$CHECK $T/dump/flip00090.ppm 960 540 255 0 0 >/dev/null" "the game runs"
 expect "[ \"\$(cat $T/root/logs/boot.log)\" = 'OLD RUN' ] && [ ! -e $T/root/logs/boot.prev.log ]" "the earlier boot.log is kept as it was, nothing new written"
 expect "! grep -q '^\[snes9x-ps5' $T/out.txt" "nothing on stdout either"
 expect "! grep -q 'runtime error\|AddressSanitizer' $T/out.txt" "no sanitizer reports"
-# Settings (Triangle) -> Debug logs (Up twice from Shader: Back, then Debug logs) -> Off: that line is the last one
+# Settings (Triangle) -> Debug logs (Up four times from Shader without cheat-download rows) -> Off
 T=$(newroot t18b)
 python3 tests/make_test_rom.py "$T/root/roms/test.sfc" ntsc >/dev/null
-rc=$(run "$T" "0:0;30:$TRIANGLE;32:0;50:$UP;52:0;60:$UP;62:0;70:$CROSS;72:0;90:$CIRCLE;92:0;$(SHELFQUIT_AT 120)" "")
+rc=$(run "$T" "0:0;30:$TRIANGLE;32:0;50:$UP;52:0;60:$UP;62:0;70:$UP;72:0;80:$UP;82:0;100:$CROSS;102:0;120:$CIRCLE;122:0;$(SHELFQUIT_AT 150)" "")
 expect "[ $rc = 0 ]" "exit code 0 (got $rc)"
 expect "grep -q '^debug_logs=0' $T/root/snes9x-ps5.ini" "Debug logs Off saved"
 expect "tail -1 $T/root/logs/boot.log | grep -q 'debug logs turned off'" "the last line of boot.log says the logs were turned off"
@@ -445,7 +445,7 @@ expect "tail -1 $T/root/logs/boot.log | grep -q 'debug logs turned off'" "the la
 T=$(newroot t18c)
 python3 tests/make_test_rom.py "$T/root/roms/test.sfc" ntsc >/dev/null
 echo "debug_logs=0" >>"$T/root/snes9x-ps5.ini"
-rc=$(run "$T" "0:0;30:$TRIANGLE;32:0;50:$UP;52:0;60:$UP;62:0;70:$CROSS;72:0;90:$CIRCLE;92:0;$(SHELFQUIT_AT 120)" "")
+rc=$(run "$T" "0:0;30:$TRIANGLE;32:0;50:$UP;52:0;60:$UP;62:0;70:$UP;72:0;80:$UP;82:0;100:$CROSS;102:0;120:$CIRCLE;122:0;$(SHELFQUIT_AT 150)" "")
 expect "grep -q '^debug_logs=1' $T/root/snes9x-ps5.ini" "Debug logs On saved"
 expect "head -1 $T/root/logs/boot.log | grep -q 'debug logs turned on'" "boot.log starts at the switch (nothing from before it)"
 expect "! grep -q 'runtime error\|AddressSanitizer' $T/out.txt" "no sanitizer reports"
@@ -639,6 +639,99 @@ expect "grep -q 'Certificate verification failed' $H && [ -z \"\$(ls $D 2>/dev/n
 tls_case closing "$C/srv.pem" "$C/srv.key" drop localhost
 D="$T/root/covers"
 expect "[ -f '$D/A.png' ] && [ -f '$D/B.png' ] && [ -f '$D/C.png' ]" "a server that closes kept connections: a new one each time"
+
+
+echo "== 21. manually copied EarthBound (USA).cht loads with EarthBound.zip"
+T=$(newroot t21)
+mkdir -p "$T/root/cheats"
+python3 tests/make_test_rom.py "$T/earthbound.sfc" ntsc >/dev/null
+python3 - "$T/earthbound.sfc" "$T/root/roms/EarthBound.zip" <<'PY'
+import sys,zipfile
+with zipfile.ZipFile(sys.argv[2],"w",zipfile.ZIP_DEFLATED) as z:
+    z.write(sys.argv[1],"EarthBound.sfc")
+PY
+cat > "$T/root/cheats/EarthBound (USA).cht" <<'CHEATS'
+cheats = 2
+cheat0_desc = "Infinite Health"
+cheat0_code = "8251-57D6"
+cheat0_enable = false
+cheat1_desc = "Raw Action Replay"
+cheat1_code = "7E0DBE63"
+cheat1_enable = false
+CHEATS
+rc=$(run "$T" "0:0;100:$L3R3;102:0;110:$UP;112:0;120:$CROSS;122:0" "" "$T/root/roms/EarthBound.zip")
+expect "[ $rc = 0 ]" "EarthBound.zip launched and exited"
+expect "grep -q 'Loaded 2 cheats from EarthBound (USA).cht' '$T/root/logs/boot.log'" "manual EarthBound (USA).cht recognized for EarthBound.zip"
+expect "! grep -q 'no supported codes' '$T/root/logs/boot.log'" "EarthBound sample uses supported SNES codes"
+
+
+echo "== 22. previously missing artwork is retried after URL matching improves"
+T=$(newroot t22)
+mkdir -p "$T/root/covers" "$T/srv/Named_Boxarts"
+python3 tests/make_test_rom.py "$T/root/roms/Super Mario World (USA).sfc" ntsc >/dev/null
+python3 - "$T/srv/Named_Boxarts/Super Mario World (USA).png" <<'PY'
+from PIL import Image
+import sys
+Image.new('RGB',(512,357),(255,0,0)).save(sys.argv[1])
+PY
+echo 'https://old.example.invalid/no-such-cover.png' > "$T/root/covers/Super Mario World (USA).missing"
+PORT=18086
+(cd "$T/srv" && exec python3 -m http.server $PORT --bind 127.0.0.1 >/dev/null 2>&1) &
+SRVPID=$!
+sleep 1
+rc=$(OFFLINE= COVER_URL="http://127.0.0.1:$PORT/Named_Boxarts/\${name}.png" SNES9X_HOST_REALTIME=1 run "$T" \
+    "0:0;330:$OPTIONS;332:0;340:$CROSS;342:0" "")
+kill $SRVPID 2>/dev/null
+expect "[ $rc = 0 ]" "game shelf opens even when an old missing-cover marker is present"
+expect "[ -f '$T/root/covers/Super Mario World (USA).png' ]" "improved artwork URL bypasses obsolete 30-day 404 marker"
+
+
+echo "== 23. English-patched ZIPs download matched artwork (real shelf + local server)"
+T=$(newroot t23)
+mkdir -p "$T/root/roms" "$T/srv/Named_Boxarts"
+python3 tests/make_test_rom.py "$T/source.sfc" ntsc >/dev/null
+python3 - "$T/source.sfc" "$T/root/roms" "$T/srv/Named_Boxarts" <<'PY'
+import sys,zipfile,os
+from PIL import Image
+aliases = [
+    ("Final Fantasy 6 (ENG) # SNES", "Final Fantasy VI (Japan)"),
+    ("Dragon-Ball-Z - Super Gokuden 2 (ENG) # SNES", "Dragon Ball Z - Super Gokuu Den - Kakusei Hen (Japan)"),
+    ("Dragon-Ball Z - Super Butouden 3 (ENG) # SNES", "Dragon Ball Z - Super Butouden 3 (Japan)"),
+    ("Dragon-Ball Z - Super Butouden (ENG) # SNES", "Dragon Ball Z - Super Butouden (Japan)"),
+    ("Dragon-Ball Z - Hyper Dimension (ENG) # SNES", "Dragon Ball Z - Hyper Dimension (Japan)"),
+    ("Dragon Quest 1 and 2 (ENG) # SNES", "Dragon Quest I _ II (Japan)"),
+    ("Dai 3 Ji - Super Robot Taisen (ENG) # SNES", "Dai-3-ji Super Robot Taisen (Japan)"),
+    ("Bahamut Lagoon (ENG) # SNES", "Bahamut Lagoon (Japan)"),
+    ("Pokemon Gold & Silver", "Pokemon Gold _ Silver"),
+    ("Aladdin 2000", "Aladdin 2000"),
+]
+for idx,(title,cover) in enumerate(aliases):
+    with zipfile.ZipFile(os.path.join(sys.argv[2],title+".zip"),"w",zipfile.ZIP_DEFLATED) as z:
+        z.write(sys.argv[1],"game.sfc")
+    Image.new('RGB',(512,357),(20+idx*18,30,40)).save(os.path.join(sys.argv[3],cover+".png"))
+PY
+PORT=18087
+(cd "$T/srv" && exec python3 -m http.server $PORT --bind 127.0.0.1 >/dev/null 2>&1) &
+SRVPID=$!
+sleep 1
+rc=$(OFFLINE= COVER_URL="http://127.0.0.1:$PORT/Named_Boxarts/\${name}.png" SNES9X_HOST_REALTIME=1 run "$T" \
+    "0:0;780:$OPTIONS;782:0;790:$CROSS;792:0" "")
+kill $SRVPID 2>/dev/null
+expect "[ $rc = 0 ]" "all photographed English-patched ZIPs scanned by the shelf"
+expect "grep -q '10 ROM(s)' '$T/root/logs/boot.log'" "all ten ZIP titles scanned"
+for cover in \
+    "Final Fantasy VI (Japan)" \
+    "Dragon Ball Z - Super Gokuu Den - Kakusei Hen (Japan)" \
+    "Dragon Ball Z - Super Butouden 3 (Japan)" \
+    "Dragon Ball Z - Super Butouden (Japan)" \
+    "Dragon Ball Z - Hyper Dimension (Japan)" \
+    "Dragon Quest I _ II (Japan)" \
+    "Dai-3-ji Super Robot Taisen (Japan)" \
+    "Bahamut Lagoon (Japan)"; do
+    expect "[ -f '$T/root/covers/$cover.png' ]" "matched art downloaded for $cover"
+done
+expect "[ -f '$T/root/covers/Pokemon Gold _ Silver.png' ]" "Pokemon bootleg gets its own distinct image filename"
+expect "[ -f '$T/root/covers/Aladdin 2000.png' ]" "Aladdin bootleg gets its own distinct image filename"
 
 echo
 echo "passed $PASS, failed $FAIL  (work dir $WORK)"

@@ -14,6 +14,9 @@ struct Settings
 	bool show_fps = false;
 	bool audio = true;
 	int state_slot = 0; // 0..9
+	int shortcut_pause = 0; // L3+R3 by default
+	int shortcut_list = 3; // Touchpad+Options
+	int shortcut_cheats = 1; // L2+R3
 	bool transparency = true; // Snes9x "Transparency"
 	int superfx_clock = 100; // % (Snes9x SuperFXClockMultiplier)
 	bool covers_download = true; // fetch box art from libretro-thumbnails

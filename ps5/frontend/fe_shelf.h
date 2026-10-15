@@ -20,4 +20,6 @@ namespace fe
 std::string Shelf();
 // Stops the cover downloads before the payload exits.
 void ShelfShutdown();
+// Mark missing covers for helper retry; safe to call from the Settings menu.
+int RepairMissingCovers();
 } // namespace fe
