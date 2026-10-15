@@ -434,10 +434,10 @@ expect "$CHECK $T/dump/flip00090.ppm 960 540 255 0 0 >/dev/null" "the game runs"
 expect "[ \"\$(cat $T/root/logs/boot.log)\" = 'OLD RUN' ] && [ ! -e $T/root/logs/boot.prev.log ]" "the earlier boot.log is kept as it was, nothing new written"
 expect "! grep -q '^\[snes9x-ps5' $T/out.txt" "nothing on stdout either"
 expect "! grep -q 'runtime error\|AddressSanitizer' $T/out.txt" "no sanitizer reports"
-# Settings (Triangle) -> Debug logs (Up twice from Shader: Back, then Debug logs) -> Off: that line is the last one
+# Settings (Triangle) -> Debug logs (Up three times from Shader: Back, Updates, then Debug logs) -> Off: that line is the last one
 T=$(newroot t18b)
 python3 tests/make_test_rom.py "$T/root/roms/test.sfc" ntsc >/dev/null
-rc=$(run "$T" "0:0;30:$TRIANGLE;32:0;50:$UP;52:0;60:$UP;62:0;70:$CROSS;72:0;90:$CIRCLE;92:0;$(SHELFQUIT_AT 120)" "")
+rc=$(run "$T" "0:0;30:$TRIANGLE;32:0;50:$UP;52:0;60:$UP;62:0;65:$UP;67:0;70:$CROSS;72:0;90:$CIRCLE;92:0;$(SHELFQUIT_AT 120)" "")
 expect "[ $rc = 0 ]" "exit code 0 (got $rc)"
 expect "grep -q '^debug_logs=0' $T/root/snes9x-ps5.ini" "Debug logs Off saved"
 expect "tail -1 $T/root/logs/boot.log | grep -q 'debug logs turned off'" "the last line of boot.log says the logs were turned off"
@@ -445,7 +445,7 @@ expect "tail -1 $T/root/logs/boot.log | grep -q 'debug logs turned off'" "the la
 T=$(newroot t18c)
 python3 tests/make_test_rom.py "$T/root/roms/test.sfc" ntsc >/dev/null
 echo "debug_logs=0" >>"$T/root/snes9x-ps5.ini"
-rc=$(run "$T" "0:0;30:$TRIANGLE;32:0;50:$UP;52:0;60:$UP;62:0;70:$CROSS;72:0;90:$CIRCLE;92:0;$(SHELFQUIT_AT 120)" "")
+rc=$(run "$T" "0:0;30:$TRIANGLE;32:0;50:$UP;52:0;60:$UP;62:0;65:$UP;67:0;70:$CROSS;72:0;90:$CIRCLE;92:0;$(SHELFQUIT_AT 120)" "")
 expect "grep -q '^debug_logs=1' $T/root/snes9x-ps5.ini" "Debug logs On saved"
 expect "head -1 $T/root/logs/boot.log | grep -q 'debug logs turned on'" "boot.log starts at the switch (nothing from before it)"
 expect "! grep -q 'runtime error\|AddressSanitizer' $T/out.txt" "no sanitizer reports"
@@ -678,6 +678,72 @@ expect "waitfor21 $T/root/logs/installer.log 'listening on 127.0.0.1'" "installe
 expect "[ ! -e $T/homebrew/$OLDID ] && ! grep -q 'title ID is now' $T/inst.txt" "no old version: nothing made or said under $OLDID"
 expect "! grep -q 'runtime error\|AddressSanitizer' $WORK/t21a/inst.txt $WORK/t21b/inst.txt $T/inst.txt" "no sanitizer reports"
 stop21
+
+echo "== 22. updates from GitHub's releases (Settings, Updates): the helper checks, downloads, checks every file, installs"
+T=$(newroot t22)
+UPD="python3 tests/update_client.py $SNES9X_HELPER_PORT"
+stop22() { pkill -f 'build/host/snes9x-ps5-(installer|helper)' 2>/dev/null; pkill -f 'http.server 1[89][0-9][0-9][0-9]' 2>/dev/null; sleep 0.3; }
+waitfor22() { for i in $(seq 1 80); do grep -q "$2" "$1" 2>/dev/null && return 0; sleep 0.1; done; return 1; }
+stop22
+SRV=$T/srv; mkdir -p "$SRV" "$T/appmeta/PPSA99922"; echo old >"$T/appmeta/PPSA99922/icon0.png"
+SPORT=$((18000 + RANDOM % 1900))
+(cd "$SRV" && exec python3 -m http.server $SPORT --bind 127.0.0.1 >/dev/null 2>&1) &
+# the release: the installed app with a new eboot, a newer param.json, a new file; the old manifest lists a file that goes
+release() { # tag contentVersion [bad]
+	rm -rf "$T/rel" && mkdir -p "$T/rel" && cp -r "$T/homebrew/PPSA99922" "$T/rel/PPSA99922" && rm -f "$T/rel/PPSA99922/manifest.sha256" "$T/rel/PPSA99922/sce_sys/old.bin"
+	echo "eboot $1" >"$T/rel/PPSA99922/eboot.bin"; echo "new art" >"$T/rel/PPSA99922/sce_sys/icon0.png"; echo extra >"$T/rel/PPSA99922/sce_sys/extra.bin"
+	sed -i "s/\"contentVersion\": \"[0-9.]*\"/\"contentVersion\": \"$2\"/" "$T/rel/PPSA99922/sce_sys/param.json"
+	python3 tools/make_release_zip.py "$T/rel/PPSA99922" PPSA99922 "$SRV/Snes9xPS5-$1-PPSA99922.zip" >/dev/null
+	local sha size
+	sha=$(sha256sum "$SRV/Snes9xPS5-$1-PPSA99922.zip" | cut -c1-64); size=$(stat -c %s "$SRV/Snes9xPS5-$1-PPSA99922.zip")
+	[ -n "${3:-}" ] && sha=0000${sha:4}
+	printf '{"tag_name":"%s","name":"Genesis Plus GX PS5 %s","assets":[{"name":"Snes9xPS5-%s.elf","size":1,"browser_download_url":"http://127.0.0.1:%s/x.elf"},{"name":"Snes9xPS5-%s-PPSA99922.zip","size":%s,"digest":"sha256:%s","browser_download_url":"http://127.0.0.1:%s/Snes9xPS5-%s-PPSA99922.zip"}]}' \
+		"$1" "$1" "$1" $SPORT "$1" $size $sha $SPORT "$1" >"$SRV/latest.json"
+}
+# the app installed by the payload (2.4), which then stays as the helper; the updater asks the test server
+SNES9X_UPDATE_API=http://127.0.0.1:$SPORT/latest.json SNES9X_PS5_ROOT=$T/root SNES9X_PS5_HOMEBREW=$T/homebrew SNES9X_PS5_APPMETA=$T/appmeta \
+	ASAN_OPTIONS=detect_leaks=0 timeout 120 "$INSTALLER" >"$T/inst.txt" 2>&1 &
+expect "waitfor22 $T/root/logs/installer.log 'listening on 127.0.0.1'" "the payload installed 2.4 and serves as the helper"
+expect "[ \"\$($UPD status 2.4 | cut -d'|' -f1)\" = idle ]" "the updater answers: idle"
+release v2.4 02.040.000
+expect "$UPD check 2.4 --until uptodate,failed | grep -q '^uptodate|2.4|'" "the newest release is this version: up to date"
+echo gone >"$T/homebrew/PPSA99922/sce_sys/old.bin"
+printf '%s *sce_sys/old.bin\n' "$(sha256sum <"$T/homebrew/PPSA99922/sce_sys/old.bin" | cut -c1-64)" >"$T/homebrew/PPSA99922/manifest.sha256"
+release v9.9 99.000.000 bad
+expect "$UPD check 2.4 --until available,failed | grep -q '^available|9.9|'" "a newer release (9.9): available, with its size"
+cp "$T/homebrew/PPSA99922/eboot.bin" "$T/eboot.before"
+expect "$UPD install 2.4 --until done,failed | grep -q \"^failed|.*SHA-256 doesn't match\"" "a download whose SHA-256 isn't GitHub's: refused"
+expect "cmp -s $T/homebrew/PPSA99922/eboot.bin $T/eboot.before && [ -z \"\$(find $T/homebrew -name '*.new')\" ]" "and nothing was changed"
+release v9.9 99.000.000
+expect "$UPD check 2.4 --until available,failed | grep -q '^available|9.9|'" "checked again"
+expect "$UPD install 2.4 --until done,failed | grep -q '^done|9.9|'" "downloaded, every file checked, installed"
+expect "grep -q 'eboot v9.9' $T/homebrew/PPSA99922/eboot.bin && grep -q '\"contentVersion\": \"99.000.000\"' $T/homebrew/PPSA99922/sce_sys/param.json" "the new eboot.bin and param.json in place"
+expect "[ -f $T/homebrew/PPSA99922/sce_sys/extra.bin ] && [ ! -e $T/homebrew/PPSA99922/sce_sys/old.bin ] && grep -q 'sce_sys/extra.bin' $T/homebrew/PPSA99922/manifest.sha256" "a new file added, one the old manifest had removed, the manifest kept"
+expect "grep -q 'new art' $T/appmeta/PPSA99922/icon0.png && [ -z \"\$(find $T/homebrew -name '*.new')\" ]" "the home screen's copy of the art refreshed; no .new files left"
+expect "$UPD status 9.9 | grep -q '^done|'" "the result stays until the app is opened again"
+stop22
+(cd "$SRV" && exec python3 -m http.server $SPORT --bind 127.0.0.1 >/dev/null 2>&1) &
+# the old payload sent again (an autoload): the newer version is left alone
+SNES9X_UPDATE_API=http://127.0.0.1:$SPORT/latest.json SNES9X_PS5_ROOT=$T/root SNES9X_PS5_HOMEBREW=$T/homebrew SNES9X_PS5_APPMETA=$T/appmeta \
+	ASAN_OPTIONS=detect_leaks=0 timeout 120 "$INSTALLER" >"$T/inst2.txt" 2>&1 &
+expect "waitfor22 $T/inst2.txt 'a newer version is installed'" "an older payload sent again: says a newer version is installed"
+expect "grep -q 'eboot v9.9' $T/homebrew/PPSA99922/eboot.bin && grep -q 'new art' $T/appmeta/PPSA99922/icon0.png" "and leaves the update (and its art) as they are"
+expect "$UPD check 9.9 --until uptodate,available,failed | grep -q '^uptodate|9.9|'" "the app says which version it is: an older helper finds it up to date"
+stop22
+# the app: at start the daily check (the helper finds 9.9); Settings (Triangle), Up twice to "Updates" (it shows
+# "Install 9.9"), Cross: the helper installs it
+T2=$(newroot t22b)
+(cd "$SRV" && exec python3 -m http.server $SPORT --bind 127.0.0.1 >/dev/null 2>&1) &
+SNES9X_UPDATE_API=http://127.0.0.1:$SPORT/latest.json SNES9X_PS5_ROOT=$T2/root SNES9X_PS5_HOMEBREW=$T2/homebrew SNES9X_PS5_APPMETA=$T2/appmeta \
+	ASAN_OPTIONS=detect_leaks=0 timeout 120 "$INSTALLER" >"$T2/inst.txt" 2>&1 &
+waitfor22 $T2/root/logs/installer.log 'listening on 127.0.0.1'
+python3 tests/make_test_rom.py "$T2/root/roms/test.sfc" ntsc >/dev/null
+rc=$(SNES9X_HOST_REALTIME=1 SNES9X_PS5_APPMETA=$T2/appmeta run "$T2" "0:0;30:$TRIANGLE;32:0;40:$UP;42:0;46:$UP;48:0;56:$CROSS;58:0;150:$CIRCLE;152:0;170:$OPTIONS;172:0;180:$CROSS;182:0" "54,140")
+expect "grep -q 'daily check asked of the helper' $T2/root/logs/boot.log && [ -f $T2/root/update-check.txt ]" "at start: the daily check asked of the helper"
+expect "grep -q 'update install' $T2/root/logs/installer.log && grep -q 'eboot v9.9' $T2/homebrew/PPSA99922/eboot.bin" "Cross on \"Install 9.9\": the helper installs it"
+expect "grep -q 'is available: Settings, Updates' $T2/inst.txt $T2/root/logs/installer.log" "the daily check found 9.9: a notification says so"
+expect "! grep -q 'runtime error\|AddressSanitizer' $T2/out.txt $T2/inst.txt $T/inst.txt $T/inst2.txt" "no sanitizer reports"
+stop22
 
 echo
 echo "passed $PASS, failed $FAIL  (work dir $WORK)"

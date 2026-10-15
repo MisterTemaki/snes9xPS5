@@ -216,6 +216,41 @@ bool FetchWantedCovers(std::string& text, bool* background)
 	return r == 1;
 }
 
+bool UpdateRequest(const char* what, std::string& reply)
+{
+	reply.clear();
+	const int fd = ConnectLocal(PortFromEnv("SNES9X_HELPER_PORT", kHelperPort));
+	if (fd < 0)
+		return false;
+	Request req;
+	memset(&req, 0, sizeof(req));
+	req.magic = kMagic;
+	req.cmd = kCmdUpdate;
+	req.pid = int32_t(getpid());
+	req.ret = kRetUntouched;
+	snprintf(req.msg1, sizeof(req.msg1), "%s", what);
+	snprintf(req.msg2, sizeof(req.msg2), "%s", SNES9X_PS5_VERSION); // the version installed: this app's
+	if (!WriteAll(fd, &req, sizeof(req)))
+	{
+		close(fd);
+		return false;
+	}
+	size_t got = 0;
+	while (got < sizeof(req))
+	{
+		const ssize_t n = recv(fd, reinterpret_cast<char*>(&req) + got, sizeof(req) - got, 0);
+		if (n <= 0)
+			break;
+		got += size_t(n);
+	}
+	close(fd);
+	if (got != sizeof(req) || req.magic != kMagic || req.ret != 0)
+		return false;
+	req.msg1[sizeof(req.msg1) - 1] = 0;
+	reply = req.msg1;
+	return true;
+}
+
 bool RequestForSelf(std::string& how)
 {
 	const int own = PortFromEnv("SNES9X_HELPER_PORT", kHelperPort);

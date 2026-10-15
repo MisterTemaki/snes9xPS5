@@ -10,6 +10,7 @@
 #include "ProsperoInstall.h"
 
 #include "OrbisPaths.h"
+#include "ProsperoUpdate.h"
 
 #include <fcntl.h>
 #include <sys/stat.h>
@@ -91,6 +92,30 @@ std::string AppInstallDir()
 	return std::string(env && *env ? env : "/data/homebrew") + "/" SNES9X_TITLE_ID;
 }
 
+namespace
+{
+std::string ContentVersion(const std::string& param)
+{
+	const size_t k = param.find("\"contentVersion\"");
+	if (k == std::string::npos)
+		return "";
+	const size_t a = param.find('"', param.find(':', k) + 1);
+	const size_t b = a == std::string::npos ? a : param.find('"', a + 1);
+	return b == std::string::npos ? "" : param.substr(a + 1, b - a - 1);
+}
+} // namespace
+
+std::string InstalledVersion()
+{
+	FILE* f = fopen((AppInstallDir() + "/sce_sys/param.json").c_str(), "rb");
+	if (!f)
+		return "";
+	std::string s(65536, '\0');
+	s.resize(fread(&s[0], 1, s.size(), f));
+	fclose(f);
+	return ContentVersion(s);
+}
+
 InstallResult InstallApp()
 {
 	const EmbeddedAppFile* files = EmbeddedAppFiles();
@@ -98,6 +123,19 @@ InstallResult InstallApp()
 		return InstallResult::NothingEmbedded;
 
 	const std::string dir = AppInstallDir();
+	// a newer version installed (by the app's own update): this older payload doesn't put itself over it
+	for (const EmbeddedAppFile* f = files; f->rel; f++)
+		if (strcmp(f->rel, "sce_sys/param.json") == 0)
+		{
+			const std::string mine = ContentVersion(std::string(reinterpret_cast<const char*>(f->begin), size_t(f->end - f->begin)));
+			const std::string there = InstalledVersion();
+			if (!mine.empty() && !there.empty() && update::CompareVersions(there, mine) > 0)
+			{
+				OrbisLog("[install] %s holds version %s, newer than this payload's %s: left as it is", dir.c_str(),
+					there.c_str(), mine.c_str());
+				return InstallResult::NewerInstalled;
+			}
+		}
 	const bool existed = OrbisIsFile(dir + "/eboot.bin");
 	if (!OrbisMkdirs(dir + "/sce_sys"))
 	{

@@ -16,7 +16,7 @@ Everything outside `ps5/` is the original Snes9x source, unchanged, apart from t
 [README-Snes9x.md](README-Snes9x.md)).
 
 > **Status (2.4):** runs on the console: the app opens from its icon, the shelf, the controller, video and sound
-> work, and games play. It builds with the ps5-payload-dev SDK and passes 183 host tests, which run the same code
+> work, and games play. It builds with the ps5-payload-dev SDK and passes 202 host tests, which run the same code
 > on Linux with the PS5 calls simulated. If something fails, the logs in `/data/snes9x/logs/` say where.
 
 ## How it works (the PS5SX2 model)
@@ -54,6 +54,8 @@ README, "`Snes9xPS5.elf`" always means the current release's ELF.
 [New title ID](#new-title-id-ppsa99922)). This fixes the missing home-screen icon when ProsperoLichess is
 installed too ([#2](https://github.com/MisterTemaki/snes9xPS5/issues/2)). Nothing under the old ID is touched (it may be
 another app's): an earlier version of ours stays as its own icon until you delete it. Games, saves and settings are shared. The helper listens on port 9089.
+**Updates from the app** (Settings, Updates), as Porpoise does: see [Updates](#updates). The ELF is 18 MB
+instead of 26 MB (the pic0/pic1 backgrounds, the same picture, are built in once).
 
 **2.3:** **The helper downloads the covers with its own HTTPS.** In 2.2 the helper got nothing: the console's own
 HTTPS (libSceSsl) fails outside the app's sandbox, and every cover failed in a few milliseconds while the counter
@@ -94,6 +96,31 @@ only let PPSA99009 out.
 
 **Replace the old ELF in your autoload** with the new ELF, or the old version keeps
 being installed beside the new one.
+
+## Updates
+
+From 2.4 on, the app updates itself from this repository's GitHub releases, as
+[Porpoise](https://github.com/elripalda/Porpoise-Dolphin-Emulator-for-PS5) does:
+
+- **Settings, Updates** shows the version you have and what to do: *Check now*, *Install 2.5 (23 MB)*,
+  the download and install progress, then *Installed: restart* (Cross opens the new version).
+- Once a day, when the app starts, it checks by itself; when a newer version is out, a notification says so.
+  Nothing is installed without you choosing *Install*.
+- The helper does the work (the app's own HTTPS doesn't work once it is out of its sandbox), with its own HTTPS
+  (Mbed TLS, certificates checked). It asks `api.github.com/repos/MisterTemaki/snes9xPS5/releases/latest` for
+  the newest release and takes its asset `Snes9xPS5-v<version>-PPSA99922.zip`.
+- The zip is checked before anything is written: its size and SHA-256 against what GitHub gives, then every file
+  against the zip's own list (`PPSA99922/manifest.sha256`). Each file is written beside the old one, then all are
+  put in place with `eboot.bin` last; files the new version no longer has are removed, and the home screen's
+  copy of the art is refreshed. If anything fails before that, nothing has changed.
+- Only `/data/homebrew/PPSA99922/` changes. Games, saves and settings aren't touched.
+- **Your autoload:** the app updated this way is newer than the ELF in your autoload. The older ELF sees that and
+  leaves the app alone (its notification says so), and its helper still serves the newer app. Put the new ELF in
+  your autoload when you can: a new version may come with a new helper.
+
+For a release, `make dist` builds the zip (`build/dist/Snes9xPS5-v<version>-PPSA99922.zip`, the app
+folder stored without compression, with its manifest). Attach it to the GitHub release, tagged `v<version>`,
+next to the ELF. The same zip is what the homebrew catalog lists.
 
 ## Language
 
@@ -380,8 +407,8 @@ Good to know:
 
 ## Debugging (logs and crashes)
 
-**Turning the logs on or off:** Settings (Triangle on the shelf, or L3 + R3 in a game) -> **Debug logs** (the last
-row; On by default). Off stops every log at once: the app writes nothing more to `boot.log` (its last line says
+**Turning the logs on or off:** Settings (Triangle on the shelf, or L3 + R3 in a game) -> **Debug logs** (just above
+Updates; On by default). Off stops every log at once: the app writes nothing more to `boot.log` (its last line says
 the logs were turned off) or to the console output, and the next starts -- the app, the installer and the helper --
 write no log files at all; the files of earlier runs are left as they are (delete them over FTP if you want). On
 starts again at once, adding to `boot.log`. The setting is `debug_logs=0` / `debug_logs=1` in `snes9x-ps5.ini`.
@@ -416,9 +443,9 @@ export PS5_PAYLOAD_SDK=/opt/ps5-payload-sdk
 cd ps5
 make ps5 -j$(nproc)              # build/ps5/Snes9xPS5.elf (installer + helper, with the app inside)
 make send PS5_HOST=192.168.0.10  # sends it to elfldr (port 9021)
-make dist                        # build/dist/Snes9xPS5-v<version>.elf + the source zip
+make dist                        # build/dist/Snes9xPS5-v<version>.elf, the release zip, the source zip
 make app                         # only build/app/PPSA99922/, to copy by hand
-make test                        # Linux builds (app, installer, helper) + 173 tests (ASan/UBSan)
+make test                        # Linux builds (app, installer, helper) + 202 tests (ASan/UBSan)
 ```
 
 The build has three stages:

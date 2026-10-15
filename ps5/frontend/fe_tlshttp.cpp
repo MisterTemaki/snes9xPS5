@@ -226,6 +226,7 @@ struct TlsHttp::Impl
 	mbedtls_x509_crt ca;
 	mbedtls_ssl_config conf;
 
+	std::atomic<size_t>* progress = nullptr;
 	// the network state, asked again after Term
 	bool net_tried = false, net_ok = false;
 	int pool = -1;
@@ -639,7 +640,11 @@ struct TlsHttp::Impl
 				return false;
 			const size_t take = std::min(n, inbuf.size() - inpos);
 			if (out)
+			{
 				out->insert(out->end(), inbuf.begin() + long(inpos), inbuf.begin() + long(inpos + take));
+				if (progress)
+					progress->store(out->size(), std::memory_order_relaxed);
+			}
 			inpos += take;
 			n -= take;
 		}
@@ -802,6 +807,11 @@ TlsHttp::~TlsHttp() = default;
 bool TlsHttp::Offline() const
 {
 	return m->net_tried && !m->net_ok;
+}
+
+void TlsHttp::SetProgress(std::atomic<size_t>* bytes)
+{
+	m->progress = bytes;
 }
 
 void TlsHttp::Term()

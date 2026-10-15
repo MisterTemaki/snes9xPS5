@@ -22,7 +22,13 @@ S9X_INCBIN(s9x_app_eboot, APP_EBOOT)
 S9X_INCBIN(s9x_app_param, APP_PARAM)
 S9X_INCBIN(s9x_app_icon0, APP_ICON0)
 S9X_INCBIN(s9x_app_pic0, APP_PIC0)
+#ifndef APP_PIC1_IS_PIC0
 S9X_INCBIN(s9x_app_pic1, APP_PIC1)
+#else
+// the two backgrounds are the same image (the Makefile compared them): built in once
+#define s9x_app_pic1_begin s9x_app_pic0_begin
+#define s9x_app_pic1_end s9x_app_pic0_end
+#endif
 S9X_INCBIN(s9x_app_libc, APP_LIBC)
 
 const EmbeddedAppFile* EmbeddedAppFiles()

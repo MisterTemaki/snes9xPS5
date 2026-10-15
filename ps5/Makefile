@@ -23,6 +23,8 @@ PS5_HOST ?= ps5
 PS5_PORT ?= 9021
 VERSION ?= 2.4
 TITLE_ID ?= PPSA99922
+# where the app looks for its updates (Settings, Updates): this repository's GitHub releases
+UPDATE_REPO ?= MisterTemaki/snes9xPS5
 APP_OUT := build/app/$(TITLE_ID)
 
 ROOT := ..
@@ -42,7 +44,7 @@ EMU_SRC := coreorbis/main-boot.cpp \
 	coreorbis/orbis-shims/orbis_paths.cpp coreorbis/orbis-shims/ProsperoNotify.cpp \
 	coreorbis/orbis-shims/ProsperoVideo.cpp coreorbis/orbis-shims/ProsperoAudio.cpp \
 	coreorbis/orbis-shims/ProsperoInput.cpp coreorbis/orbis-shims/ProsperoJailbreak.cpp \
-	coreorbis/orbis-shims/ProsperoCrash.cpp coreorbis/orbis-shims/ProsperoCrt.cpp \
+	coreorbis/orbis-shims/ProsperoCrash.cpp coreorbis/orbis-shims/ProsperoCrt.cpp coreorbis/orbis-shims/ProsperoUpdate.cpp \
 	frontend/fe_emu.cpp frontend/fe_menu.cpp frontend/fe_settings.cpp frontend/fe_text.cpp \
 	frontend/fe_games.cpp frontend/fe_http.cpp frontend/fe_covers.cpp frontend/fe_shelf.cpp \
 	frontend/fe_prefetch.cpp frontend/fe_coverfetch.cpp frontend/fe_coverworker.cpp
@@ -50,6 +52,7 @@ EMU_SRC := coreorbis/main-boot.cpp \
 # (the helper also downloads the covers in the background: fe_coverworker.cpp, with the app's HTTPS code)
 HELPER_SRC := coreorbis/orbis-shims/orbis_paths.cpp coreorbis/orbis-shims/ProsperoNotify.cpp \
 	coreorbis/orbis-shims/ProsperoHelper.cpp coreorbis/orbis-shims/ProsperoMigrate.cpp coreorbis/orbis-shims/ProsperoCrash.cpp \
+	coreorbis/orbis-shims/ProsperoUpdate.cpp \
 	frontend/fe_http.cpp frontend/fe_coverfetch.cpp frontend/fe_coverworker.cpp frontend/fe_tlshttp.cpp
 # the helper's own HTTPS (fe_tlshttp.cpp): Mbed TLS 3.6 (Apache-2.0), with fe_mbedtls_config.h on its default settings
 MBEDTLS := frontend/third_party/mbedtls
@@ -61,7 +64,7 @@ ZLIB_SRC := $(wildcard $(ZLIB)/*.c)
 
 INCS := -I$(ROOT) -I$(ROOT)/apu -I$(ROOT)/apu/bapu -I$(ROOT)/unzip -I$(ZLIB) \
 	-Icoreorbis/include-orbis -Icoreorbis/orbis-shims -Ifrontend
-DEFS := -DRIGHTSHIFT_IS_SAR -DZLIB -DUNZIP_SUPPORT -DSNES9X_PS5_VERSION='"$(VERSION)"' -DSNES9X_TITLE_ID='"$(TITLE_ID)"'
+DEFS := -DRIGHTSHIFT_IS_SAR -DZLIB -DUNZIP_SUPPORT -DSNES9X_PS5_VERSION='"$(VERSION)"' -DSNES9X_TITLE_ID='"$(TITLE_ID)"' -DSNES9X_UPDATE_REPO='"$(UPDATE_REPO)"'
 WARN := -Wall -Wno-unused-function -Wno-unused-variable -Wno-unused-but-set-variable -Wno-missing-braces \
 	-Wno-char-subscripts -Wno-deprecated-declarations -Wno-sign-compare -Wno-unused-value \
 	-Wno-parentheses -Wno-unknown-warning-option
@@ -139,7 +142,8 @@ APP_FILES = $(APP_OUT)/eboot.bin $(APP_OUT)/sce_sys/param.json $(APP_OUT)/sce_sy
 APP_DATA_DEFS = -DAPP_EBOOT='"$(abspath $(APP_OUT)/eboot.bin)"' -DAPP_PARAM='"$(abspath $(APP_OUT)/sce_sys/param.json)"' \
 	-DAPP_ICON0='"$(abspath $(APP_OUT)/sce_sys/icon0.png)"' -DAPP_PIC0='"$(abspath $(APP_OUT)/sce_sys/pic0.dds)"' \
 	-DAPP_PIC1='"$(abspath $(APP_OUT)/sce_sys/pic1.dds)"' \
-	-DAPP_LIBC='"$(abspath $(APP_OUT)/sce_module/libc.prx)"'
+	-DAPP_LIBC='"$(abspath $(APP_OUT)/sce_module/libc.prx)"' \
+	$(if $(shell cmp -s app/sce_sys/pic0.dds app/sce_sys/pic1.dds && echo same),-DAPP_PIC1_IS_PIC0)
 
 $(PS5_OUT)/install_data.o: coreorbis/orbis-shims/install_data.cpp coreorbis/orbis-shims/ProsperoInstall.h $(APP_FILES)
 	$(PS5_CXX) -std=c++17 $(PS5_OPT) $(DEFS) $(INCS) $(PORT_WARN) $(APP_DATA_DEFS) -c -o $@ $<
@@ -155,9 +159,12 @@ strip: $(PS5_OUT)/Snes9xPS5-stripped.elf
 
 # the release files, named with the version: build/dist/Snes9xPS5-v$(VERSION).elf and the sources zip
 DIST := build/dist
-dist: $(PS5_OUT)/Snes9xPS5.elf
+# + the app folder as a stored zip with its manifest (Snes9xPS5-v$(VERSION)-$(TITLE_ID).zip): attach it to the GitHub
+# release tagged v$(VERSION), so the app can update itself (Settings, Updates)
+dist: $(PS5_OUT)/Snes9xPS5.elf $(APP_FILES)
 	@mkdir -p $(DIST)
 	cp $< $(DIST)/Snes9xPS5-v$(VERSION).elf
+	python3 tools/make_release_zip.py $(APP_OUT) $(TITLE_ID) $(DIST)/Snes9xPS5-v$(VERSION)-$(TITLE_ID).zip
 	cd ../.. && rm -f $(abspath $(DIST))/snes9x-ps5-v$(VERSION)-src.zip && \
 		zip -qr $(abspath $(DIST))/snes9x-ps5-v$(VERSION)-src.zip $(notdir $(abspath ..)) \
 		-x '*/ps5/build/*' '*/proto/native/build/*' '*.o'

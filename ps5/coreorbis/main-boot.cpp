@@ -19,6 +19,7 @@
 #include "ProsperoCrash.h"
 #include "ProsperoInput.h"
 #include "ProsperoJailbreak.h"
+#include "ProsperoUpdate.h"
 #include "ProsperoNotify.h"
 #include "ProsperoSce.h"
 #include "ProsperoVideo.h"
@@ -91,6 +92,32 @@ bool PlayGame(const std::string& rom)
 	}
 }
 
+// Once a day the helper looks for a newer release on GitHub (ProsperoUpdate.h); when there is one, it says so in a
+// notification (Settings, Updates installs it). <root>/update-check.txt holds the time of the last look.
+void AutoCheckUpdates()
+{
+	const std::string stamp = OrbisRoot() + "/update-check.txt";
+	long long last = 0;
+	if (FILE* f = fopen(stamp.c_str(), "r"))
+	{
+		if (fscanf(f, "%lld", &last) != 1)
+			last = 0;
+		fclose(f);
+	}
+	const long long now = (long long)time(nullptr);
+	if (now - last < 24 * 3600 && now >= last)
+		return;
+	std::string reply;
+	if (!jailbreak::UpdateRequest("autocheck", reply))
+		return; // no helper of ours: nothing to ask
+	OrbisLog("[update] daily check asked of the helper: %s", reply.c_str());
+	if (FILE* f = fopen(stamp.c_str(), "w"))
+	{
+		fprintf(f, "%lld\n", now);
+		fclose(f);
+	}
+}
+
 // The end of the app: through the system, then _exit() if it never comes (PS5SX2's OrbisExitApp: on the
 // console a title's exit() or return from main ends in SIGSYS).
 [[noreturn]] void ExitApp(int status)
@@ -140,7 +167,10 @@ int Run(int argc, char** argv)
 	if (!have_data)
 		OrbisLog("[boot] can't create %s: no access to /data", OrbisRoot().c_str());
 	else
+	{
 		WritePid();
+		AutoCheckUpdates();
+	}
 	fe::Config().Load();
 
 	S9X_STAGE(Boot, "video");

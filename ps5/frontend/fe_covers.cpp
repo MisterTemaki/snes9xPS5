@@ -85,7 +85,7 @@ bool WriteFileAtomic(const std::string& path, const std::vector<uint8_t>& data)
 	FILE* f = fopen(tmp.c_str(), "wb");
 	if (!f)
 		return false;
-	bool ok = fwrite(data.data(), 1, data.size(), f) == data.size();
+	bool ok = data.empty() || fwrite(data.data(), 1, data.size(), f) == data.size(); // (an empty file: no fwrite of a null pointer)
 	ok = fflush(f) == 0 && ok;
 	ok = fsync(fileno(f)) == 0 && ok;
 	ok = fclose(f) == 0 && ok;

@@ -12,6 +12,7 @@
 
 #include "fe_http.h"
 
+#include <atomic>
 #include <memory>
 
 namespace fe
@@ -25,6 +26,8 @@ public:
 	bool Offline() const override;
 	// Closes the connection and asks the console for its network state again on the next Get (the TLS setup stays).
 	void Term() override;
+	// The bytes of the answer read so far go here while a Get runs (the updater's progress); nullptr: nowhere.
+	void SetProgress(std::atomic<size_t>* bytes);
 
 	struct Impl;
 

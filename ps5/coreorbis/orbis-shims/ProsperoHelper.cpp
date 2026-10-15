@@ -13,7 +13,10 @@
 #include "ProsperoJailbreak.h"
 
 #include "OrbisPaths.h"
+#include "ProsperoNotify.h"
+#include "ProsperoUpdate.h"
 #include "fe_coverworker.h"
+#include "fe_tlshttp.h"
 
 #include <arpa/inet.h>
 #include <cerrno>
@@ -32,6 +35,10 @@
 
 #ifndef SNES9X_TITLE_ID
 #define SNES9X_TITLE_ID "PPSA99922"
+#endif
+
+#ifndef SNES9X_UPDATE_REPO
+#define SNES9X_UPDATE_REPO "MisterTemaki/snes9xPS5"
 #endif
 
 #ifdef __PROSPERO__
@@ -213,6 +220,56 @@ std::string ReadWantedList()
 }
 } // namespace
 
+namespace
+{
+// The app's updates (ProsperoUpdate.h): this helper downloads and installs them, with its own HTTPS (the cover
+// worker has another connection) and the right to write the app folder.
+fe::TlsHttp* g_update_http = nullptr;
+
+std::string EnvOr(const char* name, const char* fallback)
+{
+	const char* v = getenv(name);
+	return v && *v ? v : fallback;
+}
+
+void InitUpdater()
+{
+	update::Config c;
+	c.repo = SNES9X_UPDATE_REPO;
+	c.title_id = SNES9X_TITLE_ID;
+	c.version = SNES9X_PS5_VERSION;
+	c.app_name = "Snes9x PS5";
+	c.app_dir = EnvOr("SNES9X_PS5_HOMEBREW", "/data/homebrew") + "/" SNES9X_TITLE_ID;
+	c.appmeta_dir = EnvOr("SNES9X_PS5_APPMETA", "/user/appmeta") + "/" SNES9X_TITLE_ID;
+	c.api_url = EnvOr("SNES9X_UPDATE_API", "");
+	g_update_http = new fe::TlsHttp;
+	update::Init(c, [](const std::string& url, std::vector<uint8_t>& out, size_t max, std::atomic<size_t>* progress) {
+		g_update_http->SetProgress(progress);
+		const int r = g_update_http->Get(url, out, max);
+		g_update_http->SetProgress(nullptr);
+		return r;
+	});
+	update::SetOnNewer([](const std::string& v) {
+		ProsperoNotify("Snes9x PS5 %s is available: Settings, Updates.", v.c_str());
+		ProsperoNotifyFlush();
+	});
+}
+
+// One updater request from the app: "status", "check", "autocheck", "install", "ack". The answer: the status.
+std::string UpdateCommand(const char* what)
+{
+	if (!strcmp(what, "check"))
+		update::StartCheck(false);
+	else if (!strcmp(what, "autocheck"))
+		update::StartCheck(true);
+	else if (!strcmp(what, "install"))
+		update::StartInstall();
+	else if (!strcmp(what, "ack"))
+		update::Acknowledge();
+	return update::Encode(update::GetStatus());
+}
+} // namespace
+
 bool ServeHelper(void (*on_ready)())
 {
 	signal(SIGPIPE, SIG_IGN);
@@ -245,6 +302,7 @@ bool ServeHelper(void (*on_ready)())
 		on_ready();
 	// the covers the app wants, downloaded while it runs (fe_coverworker.h)
 	fe::StartCoverWorker();
+	InitUpdater();
 	for (;;)
 	{
 		const int c = accept(srv, nullptr, nullptr);
@@ -281,6 +339,30 @@ bool ServeHelper(void (*on_ready)())
 			memset(req.msg1, 0, sizeof(req.msg1));
 			snprintf(req.msg1, sizeof(req.msg1), "%s", ok ? "ok" : why.c_str());
 			OrbisLog("[helper] pid %d: %s", req.pid, req.msg1);
+			SendUntil(c, &req, sizeof(req), deadline);
+		}
+		else if (got == sizeof(req) && req.magic == kMagic && req.cmd == kCmdUpdate)
+		{
+			// only for our own app (the title decides, as for the jailbreak); it can only fetch our releases
+			req.msg1[sizeof(req.msg1) - 1] = 0;
+			const std::string title = TitleOf(req.pid);
+			if (title != SNES9X_TITLE_ID)
+			{
+				req.ret = -1;
+				snprintf(req.msg1, sizeof(req.msg1), "%s", "not our app");
+			}
+			else
+			{
+				const std::string what = req.msg1;
+				req.msg2[sizeof(req.msg2) - 1] = 0;
+				update::SetCurrentVersion(req.msg2);
+				const std::string answer = UpdateCommand(what.c_str());
+				if (what != "status")
+					OrbisLog("[helper] pid %d: update %s -> %s", req.pid, what.c_str(), answer.c_str());
+				req.ret = 0;
+				memset(req.msg1, 0, sizeof(req.msg1));
+				snprintf(req.msg1, sizeof(req.msg1), "%s", answer.c_str());
+			}
 			SendUntil(c, &req, sizeof(req), deadline);
 		}
 		else

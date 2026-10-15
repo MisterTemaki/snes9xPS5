@@ -47,6 +47,10 @@ constexpr int32_t kCmdWantedCovers = 6;
 constexpr const char* kBackgroundCovers = "covers: background";
 constexpr int32_t kMaxWantedBytes = 1 << 20;
 constexpr int32_t kRetUntouched = -1337;
+// Our own (2.4): the app's updates (ProsperoUpdate.h), done by the helper (its own HTTPS; it writes the app folder).
+// msg1 asks "status", "check", "autocheck" (a notification when there is a newer version), "install" or "ack";
+// the answer's msg1 is the updater's status (update::Encode).
+constexpr int32_t kCmdUpdate = 7;
 
 // The app side: ask for this process. Returns true when a helper answered yes; `how` names it.
 // Every step goes to OrbisLog (kept in memory until boot.log can be opened).
@@ -56,6 +60,9 @@ bool RequestForSelf(std::string& how);
 // ELF loader if none answers). False when no helper could be reached; `text` may be empty (nothing wanted).
 // `background`: the helper downloads them itself (the app downloads nothing at start).
 bool FetchWantedCovers(std::string& text, bool* background = nullptr);
+
+// The app side: one updater request to our own helper (kCmdUpdate). False when no helper of ours answered.
+bool UpdateRequest(const char* what, std::string& reply);
 
 // The helper ELF built into the app (helper_data.cpp in the native eboot; nothing elsewhere).
 struct Blob

@@ -12,6 +12,8 @@
 #include "fe_text.h"
 
 #include "OrbisPaths.h"
+#include "ProsperoJailbreak.h"
+#include "ProsperoUpdate.h"
 #include "ProsperoCrt.h"
 #include "ProsperoInput.h"
 #include "ProsperoSce.h"
@@ -27,6 +29,7 @@
 #include <cstdio>
 #include <cstring>
 #include <ctime>
+#include <unistd.h>
 #include <vector>
 
 #ifndef SNES9X_PS5_VERSION
@@ -253,8 +256,81 @@ enum SettingRow
 	S_SUPERFX,
 	S_COVERS,
 	S_DEBUGLOGS,
+	S_UPDATES,
 	S_COUNT
 };
+
+// ---- updates (ProsperoUpdate.h): the helper checks, downloads and installs; this screen shows it ----------------
+struct UpdateView
+{
+	update::Status st;
+	bool helper = false;
+	double polled = -1;
+};
+UpdateView g_upd;
+
+void PollUpdate(bool force)
+{
+	if (!force && Now() - g_upd.polled < 0.5)
+		return;
+	g_upd.polled = Now();
+	std::string reply;
+	g_upd.helper = jailbreak::UpdateRequest("status", reply) && update::Decode(reply, g_upd.st);
+}
+
+std::string UpdateValue()
+{
+	char buf[96];
+	if (!g_upd.helper)
+		return "Needs the helper";
+	const update::Status& st = g_upd.st;
+	switch (st.phase)
+	{
+		case update::Phase::Checking: return "Checking...";
+		case update::Phase::UpToDate: return "Up to date";
+		case update::Phase::Available:
+			snprintf(buf, sizeof(buf), "Install %s (%.1f MB)", st.latest.c_str(), st.size / 1048576.0);
+			return buf;
+		case update::Phase::Downloading:
+			snprintf(buf, sizeof(buf), "Downloading %d%%", st.total ? int(st.done * 100 / st.total) : 0);
+			return buf;
+		case update::Phase::Installing:
+			snprintf(buf, sizeof(buf), "Installing %d/%d", int(st.done), int(st.total));
+			return buf;
+		case update::Phase::Done: return "Installed: restart";
+		case update::Phase::Failed: return "Failed: try again";
+		default: return "Check now";
+	}
+}
+
+void UpdateAction()
+{
+	std::string reply;
+	switch (g_upd.st.phase)
+	{
+		case update::Phase::Available: jailbreak::UpdateRequest("install", reply); break;
+		case update::Phase::Checking:
+		case update::Phase::Downloading:
+		case update::Phase::Installing: break;
+		case update::Phase::Done:
+		{
+			// the new build, opened in this one's place
+			const char* path = "/data/homebrew/" SNES9X_TITLE_ID "/eboot.bin";
+			OrbisLog("[update] restarting %s", path);
+			Config().Save();
+			OrbisLogClose();
+			const int rc = sceSystemServiceLoadExec(path, nullptr);
+			if (rc == 0)
+				for (int i = 0; i < 100; i++)
+					usleep(100 * 1000);
+			OrbisLogOpen("boot-after-update");
+			OrbisLog("[update] sceSystemServiceLoadExec(%s) -> %x: close the app and open it again", path, unsigned(rc));
+			break;
+		}
+		default: jailbreak::UpdateRequest("check", reply); break;
+	}
+	PollUpdate(true);
+}
 
 std::string SettingLabel(int s)
 {
@@ -269,6 +345,7 @@ std::string SettingLabel(int s)
 		case S_SUPERFX: return "Super FX clock";
 		case S_COVERS: return "Download covers";
 		case S_DEBUGLOGS: return "Debug logs";
+		case S_UPDATES: return "Updates (this is " SNES9X_PS5_VERSION ")";
 		default: return "";
 	}
 }
@@ -288,6 +365,7 @@ std::string SettingValue(int s)
 		case S_SUPERFX: snprintf(buf, sizeof(buf), "%d%%", c.superfx_clock); return buf;
 		case S_COVERS: return YesNo(c.covers_download);
 		case S_DEBUGLOGS: return YesNo(c.debug_logs);
+		case S_UPDATES: return UpdateValue();
 		default: return "";
 	}
 }
@@ -336,12 +414,17 @@ void SettingsMenu()
 	int sel = 0;
 	for (;;)
 	{
+		PollUpdate(false);
 		std::vector<Row> rows;
 		for (int s = 0; s < S_COUNT; s++)
 			rows.push_back({SettingLabel(s), SettingValue(s)});
 		rows.push_back({"Back", ""});
 		Header("Settings");
 		DrawOptionBox("Settings", rows, sel, false);
+		if (sel == S_UPDATES && g_upd.st.phase == update::Phase::Failed && !g_upd.st.error.empty())
+			DrawText(80, H - 130, FitText(g_upd.st.error, 2, W - 160).c_str(), 2, kAccent);
+		else if (sel == S_UPDATES && !g_upd.helper)
+			DrawText(80, H - 130, "Updates are downloaded by the helper: send the payload, then open Settings again.", 2, kDim);
 		Footer((std::string(icon::Cross) + " Toggle     " + icon::DpadLeftRight + " Adjust     " + icon::Circle + " Back").c_str());
 		Present();
 
@@ -351,7 +434,12 @@ void SettingsMenu()
 			sel = (sel + count - 1) % count;
 		if (n.down)
 			sel = (sel + 1) % count;
-		if (sel < S_COUNT && (n.left || n.right || n.ok))
+		if (sel == S_UPDATES)
+		{
+			if (n.ok)
+				UpdateAction();
+		}
+		else if (sel < S_COUNT && (n.left || n.right || n.ok))
 			ChangeSetting(sel, n.left ? -1 : 1);
 		if (n.back || n.options || (n.ok && sel == S_COUNT))
 		{
