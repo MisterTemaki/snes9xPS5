@@ -8,6 +8,11 @@
 #define MBEDTLS_NO_PLATFORM_ENTROPY
 #define MBEDTLS_ENTROPY_HARDWARE_ALT
 
+// two clients can run at once in the helper (the covers' worker, the app's updates): Mbed TLS's own locks around
+// its shared PSA crypto state (key slots, the one-time init, the random generator), with pthread mutexes
+#define MBEDTLS_THREADING_C
+#define MBEDTLS_THREADING_PTHREAD
+
 // the sockets are fe_tlshttp.cpp's; no files, no key storage, no servers
 #undef MBEDTLS_NET_C
 #undef MBEDTLS_TIMING_C
