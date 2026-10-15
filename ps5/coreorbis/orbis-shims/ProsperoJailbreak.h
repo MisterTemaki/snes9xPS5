@@ -8,7 +8,7 @@
 // those two. When nobody answers, the app sends the helper built into it (Snes9xPS5-helper.elf) to the
 // console's ELF loader (127.0.0.1:9021) and asks again.
 //
-// The helper only lets out the Snes9x PS5 title (PPSA99009): it gives the process root's folder view
+// The helper only lets out the Snes9x PS5 title (PPSA99922 since 2.4; PPSA99009 before): it gives the process root's folder view
 // (/data, /mnt/usbN) and uid 0. It never touches another title.
 //
 // SPDX-License-Identifier: MIT
@@ -23,7 +23,8 @@ namespace jailbreak
 // Snes9x PS5's helper (SNES9X_HELPER_PORT on the host). Up to 2.1 the helper listened on 9075, 2.2's (the first
 // to download the covers) on 9080; 2.3's, with its own HTTPS, listens on 9083, so an older helper still running
 // (until the console restarts) is left alone and the app starts its own.
-constexpr int kHelperPort = 9083;
+// 2.4 moved the app to a new title ID (PPSA99922): older helpers only let PPSA99009 out, so 2.4's listens on 9089.
+constexpr int kHelperPort = 9089;
 // the ELF loader the helper is sent to when it isn't running (SNES9X_ELFLDR_PORT on the host)
 constexpr int kElfLoaderPort = 9021;
 

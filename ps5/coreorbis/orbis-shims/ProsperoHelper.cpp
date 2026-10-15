@@ -31,7 +31,7 @@
 #include <unistd.h>
 
 #ifndef SNES9X_TITLE_ID
-#define SNES9X_TITLE_ID "PPSA99009"
+#define SNES9X_TITLE_ID "PPSA99922"
 #endif
 
 #ifdef __PROSPERO__

@@ -15,8 +15,8 @@ own icon and background. The PS5 layer follows the layout of PS5SX2 (the PCSX2 p
 Everything outside `ps5/` is the original Snes9x source, unchanged, apart from this README (the original one is
 [README-Snes9x.md](README-Snes9x.md)).
 
-> **Status (2.3):** runs on the console: the app opens from its icon, the shelf, the controller, video and sound
-> work, and games play. It builds with the ps5-payload-dev SDK and passes 173 host tests, which run the same code
+> **Status (2.4):** runs on the console: the app opens from its icon, the shelf, the controller, video and sound
+> work, and games play. It builds with the ps5-payload-dev SDK and passes 200 host tests, which run the same code
 > on Linux with the PS5 calls simulated. If something fails, the logs in `/data/snes9x/logs/` say where.
 
 ## How it works (the PS5SX2 model)
@@ -26,29 +26,34 @@ system UI, so the controller never worked. Since 1.6 Snes9x follows PS5SX2's mod
 
 | Piece | What it is | In PS5SX2 |
 |---|---|---|
-| `eboot.bin` in `/data/homebrew/PPSA99009/` | **Snes9x itself**, a native app opened from its icon | PCSX2 (PPSA99203) |
+| `eboot.bin` in `/data/homebrew/PPSA99922/` | **Snes9x itself**, a native app opened from its icon | PCSX2 (PPSA99203) |
 | `sce_module/libc.prx` | the C runtime module every native app carries | the same file, byte for byte |
 | `Snes9xPS5.elf` (payload) | the **installer**: installs or updates the app, then stays running as the **helper** | PS5SX2Installer.elf + PS5SX2Helper.elf |
 
 When it opens, the app asks the helper to let it out of its sandbox; without that an app sees neither `/data`
 nor USB drives. The request is the one PS5SX2 makes:
 
-- **Who is asked, in order:** the Snes9x helper (127.0.0.1:9083; older helpers used 9075 up to 2.1 and 9080 in
+- **Who is asked, in order:** the Snes9x helper (127.0.0.1:9089 since 2.4; 2.3's used 9083; older helpers used 9075 up to 2.1 and 9080 in
   2.2, and are left alone), then etaHEN (9028) and the daemon on port 9069.
 - **If nobody answers:** the app carries a copy of the helper (`Snes9xPS5-helper.elf`), sends it to the ELF
   loader (127.0.0.1:9021) and asks again. So the icon keeps working after a reboot, as long as the ELF loader
   runs.
-- **What the helper allows:** only title PPSA99009. It gives the process the system's root folder and uid 0, as
+- **What the helper allows:** only title PPSA99922. It gives the process the system's root folder and uid 0, as
   elfldr does for payloads. No other app is touched.
 
-Snes9x only uses `/data/snes9x/`, `/data/homebrew/PPSA99009/` and its own `/user/appmeta/PPSA99009/`. Nothing is
+Snes9x only uses `/data/snes9x/`, `/data/homebrew/PPSA99922/` and its own `/user/appmeta/PPSA99922/`. Nothing is
 written to PS5SX2's folders (`/data/PCSX2`, `/data/homebrew/PPSA99203`).
 
 ## Versions
 
-Every release carries its version in the file name: `Snes9xPS5-v2.3.elf` and `snes9x-ps5-v2.3-src.zip`
+Every release carries its version in the file name: `Snes9xPS5-v2.4.elf` and `snes9x-ps5-v2.4-src.zip`
 (`make dist`). When updating, replace the old ELF with the new one in your autoload or Payload Manager. In this
 README, "`Snes9xPS5.elf`" always means the current release's ELF.
+
+**2.4:** **New title ID: PPSA99922** (it was PPSA99009, which another app in the homebrew catalog uses; see
+[New title ID](#new-title-id-ppsa99922)). This fixes the missing home-screen icon when ProsperoLichess is
+installed too ([#2](https://github.com/MisterTemaki/snes9xPS5/issues/2)). Updating moves the install to the new ID and removes the old icon by itself;
+games, saves and settings are kept. The helper listens on port 9089.
 
 **2.3:** **The helper downloads the covers with its own HTTPS.** In 2.2 the helper got nothing: the console's own
 HTTPS (libSceSsl) fails outside the app's sandbox, and every cover failed in a few milliseconds while the counter
@@ -69,6 +74,31 @@ tested (see [MSU-1](#msu-1-cd-quality-music-in-snes-games)); a setting to turn t
 library, 720p). **2.0:** Snes9x as a native
 home-screen app.
 
+## New title ID (PPSA99922)
+
+Up to 2.3, Snes9x PS5 used the title ID PPSA99009. The homebrew catalog
+([homebrew.page](https://homebrew.page/app/PPSA99009/)) lists that ID for another app, ProsperoLichess, and two apps with one
+title ID can't be on the console together: the second one's folder and home-screen icon take the first one's place.
+So from 2.4 on the app is **PPSA99922**, an ID no listed app uses.
+
+**Updating from 2.3 or older needs nothing special:** send `Snes9xPS5-v2.4.elf` as usual. The installer:
+
+1. renames our old folder, `/data/homebrew/PPSA99009`, to `/data/homebrew/PPSA99922` and brings it up to date. It reads
+   the folder's `param.json` first: another app's folder under PPSA99009 is never touched.
+2. removes the old icon through ShadowMountPlus's API (`127.0.0.1:10101`, or the `api_port` in
+   `/data/shadowmount/config.ini`), after checking that the title registered as PPSA99009 has our content ID, and asks
+   it to scan again, so the icon of PPSA99922 shows up. ShadowMountPlus refuses while an app is open (PS5 Payload
+   Manager, for instance); then the notification says "The old icon is removed in the background" and the helper
+   tries again every 30 seconds.
+3. without ShadowMountPlus's API (an older ShadowMountPlus, or `api_enabled=0`), the notification says to remove the
+   old icon yourself: select it on the home screen, press **OPTIONS**, choose **Delete**.
+
+Games, saves, states, covers and settings live in `/data/snes9x/`, which doesn't depend on the title ID: nothing is
+lost. The helper moved to port 9089, because the helpers of 2.3 and older only let PPSA99009 out.
+
+**Replace the old ELF in your autoload** with `Snes9xPS5-v2.4.elf`. An old payload that runs again puts the old folder
+back; the app removes it the next time it opens, and the helper removes the old icon again.
+
 ## Language
 
 Every screen and notification of Snes9x PS5 is in English.
@@ -84,10 +114,10 @@ Every screen and notification of Snes9x PS5 is in English.
 
 1. **Send `Snes9xPS5.elf`** with PS5 Payload Manager, or from a PC on the same network:
    ```sh
-   nc -q0 PS5_IP 9021 < Snes9xPS5-v2.1.elf
+   nc -q0 PS5_IP 9021 < Snes9xPS5-v2.4.elf
    ```
-   It installs the app in `/data/homebrew/PPSA99009/` (`eboot.bin`, `sce_module/libc.prx`, `param.json`, the
-   icon and the backgrounds), shows **"Snes9x PS5 2.3 installed. Open it from the Snes9x PS5 icon on the home
+   It installs the app in `/data/homebrew/PPSA99922/` (`eboot.bin`, `sce_module/libc.prx`, `param.json`, the
+   icon and the backgrounds), shows **"Snes9x PS5 2.4 installed. Open it from the Snes9x PS5 icon on the home
    screen."** and stays running as the helper.
 2. **Open the Snes9x PS5 icon.** The game shelf appears and the controller works.
 3. **Copy your ROMs** (`.sfc .smc .swc .fig .bs .st .zip .gz`) to `/data/snes9x/roms`, over FTP for example, or
@@ -119,10 +149,10 @@ the helper is already running only installs and exits.
 ### The home-screen app
 
 ```
-/data/homebrew/PPSA99009/
+/data/homebrew/PPSA99922/
   eboot.bin              Snes9x (a native app, signed as PS5SX2's is), with the helper inside
   sce_module/libc.prx    the native app's C runtime (the same as PS5SX2's and ps5-native-app-boilerplate's)
-  sce_sys/param.json     title "Snes9x PS5", ID PPSA99009
+  sce_sys/param.json     title "Snes9x PS5", ID PPSA99922
   sce_sys/icon0.png      the icon (512x512; ps5/app/sce_sys/icon0.png in the source)
   sce_sys/pic0.dds       the home-screen background while the icon is selected (3840x2160, BC7)
   sce_sys/pic1.dds       the launch background (the same image)
@@ -133,7 +163,7 @@ To change the icon, replace `ps5/app/sce_sys/icon0.png` (512x512 PNG) and rebuil
 `tools/prepare-assets.sh --background`. For another title ID: `make ps5 TITLE_ID=XXXX00000`.
 
 **Home-screen art:** ShadowMountPlus copies the art in `sce_sys` (icon, backgrounds, `param.json`) to
-`/user/appmeta/PPSA99009/` only when it first registers the title, and the system keeps the art it saw at that
+`/user/appmeta/PPSA99922/` only when it first registers the title, and the system keeps the art it saw at that
 moment. The installer keeps that folder current on every update, but if the title was registered before the art
 changed, register it again once:
 
@@ -391,7 +421,7 @@ cd ps5
 make ps5 -j$(nproc)              # build/ps5/Snes9xPS5.elf (installer + helper, with the app inside)
 make send PS5_HOST=192.168.0.10  # sends it to elfldr (port 9021)
 make dist                        # build/dist/Snes9xPS5-v<version>.elf + the source zip
-make app                         # only build/app/PPSA99009/, to copy by hand
+make app                         # only build/app/PPSA99922/, to copy by hand
 make test                        # Linux builds (app, installer, helper) + 173 tests (ASan/UBSan)
 ```
 
