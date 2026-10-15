@@ -15,8 +15,8 @@ own icon and background. The PS5 layer follows the layout of PS5SX2 (the PCSX2 p
 Everything outside `ps5/` is the original Snes9x source, unchanged, apart from this README (the original one is
 [README-Snes9x.md](README-Snes9x.md)).
 
-> **Status (2.4):** runs on the console: the app opens from its icon, the shelf, the controller, video and sound
-> work, and games play. It builds with the ps5-payload-dev SDK and passes 202 host tests, which run the same code
+> **Status (2.6):** runs on the console: the app opens from its icon, the shelf, the controller, video and sound
+> work, and games play. It builds with the ps5-payload-dev SDK and passes 219 host tests, which run the same code
 > on Linux with the PS5 calls simulated. If something fails, the logs in `/data/snes9x/logs/` say where.
 
 ## How it works (the PS5SX2 model)
@@ -33,7 +33,7 @@ system UI, so the controller never worked. Since 1.6 Snes9x follows PS5SX2's mod
 When it opens, the app asks the helper to let it out of its sandbox; without that an app sees neither `/data`
 nor USB drives. The request is the one PS5SX2 makes:
 
-- **Who is asked, in order:** the Snes9x helper (127.0.0.1:9089 since 2.4; 2.3's used 9083; older helpers used 9075 up to 2.1 and 9080 in
+- **Who is asked, in order:** the Snes9x helper (127.0.0.1:9089 since 2.6; 2.3's used 9083; older helpers used 9075 up to 2.1 and 9080 in
   2.2, and are left alone), then etaHEN (9028) and the daemon on port 9069.
 - **If nobody answers:** the app carries a copy of the helper (`Snes9xPS5-helper.elf`), sends it to the ELF
   loader (127.0.0.1:9021) and asks again. So the icon keeps working after a reboot, as long as the ELF loader
@@ -46,11 +46,16 @@ written to PS5SX2's folders (`/data/PCSX2`, `/data/homebrew/PPSA99203`).
 
 ## Versions
 
-Every release carries its version in the file name: `Snes9xPS5-v2.4.elf` and `snes9x-ps5-v2.4-src.zip`
+Every release carries its version in the file name: `Snes9xPS5-v2.6.elf` and `snes9x-ps5-v2.6-src.zip`
 (`make dist`). When updating, replace the old ELF with the new one in your autoload or Payload Manager. In this
 README, "`Snes9xPS5.elf`" always means the current release's ELF.
 
-**2.4:** **New title ID: PPSA99922** (it was PPSA99009, which another app in the homebrew catalog uses; see
+**2.6:** **Cheats, controller shortcuts and better covers**, by
+[thatboialex](https://github.com/thatboialex) ([#1](https://github.com/MisterTemaki/snes9xPS5/pull/1)): a cheat
+manager in the pause menu, RetroArch `.cht` files imported (see [Cheats](#cheats)), shortcuts you choose for the
+pause menu, the cheats and the game list, "Repair missing covers", and covers found for translated and bootleg ROMs
+(the shelf matches their names against libretro-thumbnails' lists). (Those were "2.4/2.5" on the main branch, never
+released.) And **a new title ID: PPSA99922** (it was PPSA99009, which another app in the homebrew catalog uses; see
 [New title ID](#new-title-id-ppsa99922)). This fixes the missing home-screen icon when ProsperoLichess is
 installed too ([#2](https://github.com/MisterTemaki/snes9xPS5/issues/2)). Nothing under the old ID is touched (it may be
 another app's): an earlier version of ours stays as its own icon until you delete it. Games, saves and settings are shared. The helper listens on port 9089.
@@ -78,10 +83,10 @@ home-screen app.
 
 ## New title ID (PPSA99922)
 
-Up to 2.3, Snes9x PS5 used the title ID PPSA99009. The homebrew catalog
+Up to 2.5, Snes9x PS5 used the title ID PPSA99009. The homebrew catalog
 ([homebrew.page](https://homebrew.page/app/PPSA99009/)) lists that ID for another app, and two apps with one title ID
 can't be on the console together: the second one's folder and home-screen icon take the first one's place. So
-from 2.4 on the app is **PPSA99922**, an ID no listed app uses, and it installs in `/data/homebrew/PPSA99922/`.
+from 2.6 on the app is **PPSA99922**, an ID no listed app uses, and it installs in `/data/homebrew/PPSA99922/`.
 
 **Nothing under the old ID is touched:** `/data/homebrew/PPSA99009/` may just as well be the other app's, so the
 installer never renames, removes or unregisters it. When our own earlier version is still there (its
@@ -99,7 +104,7 @@ being installed beside the new one.
 
 ## Updates
 
-From 2.4 on, the app updates itself from this repository's GitHub releases, as
+From 2.6 on, the app updates itself from this repository's GitHub releases, as
 [Porpoise](https://github.com/elripalda/Porpoise-Dolphin-Emulator-for-PS5) does:
 
 - **Settings, Updates** shows the version you have and what to do: *Check now*, *Install 2.5 (23 MB)*,
@@ -137,10 +142,10 @@ Every screen and notification of Snes9x PS5 is in English.
 
 1. **Send `Snes9xPS5.elf`** with PS5 Payload Manager, or from a PC on the same network:
    ```sh
-   nc -q0 PS5_IP 9021 < Snes9xPS5-v2.4.elf
+   nc -q0 PS5_IP 9021 < Snes9xPS5-v2.6.elf
    ```
    It installs the app in `/data/homebrew/PPSA99922/` (`eboot.bin`, `sce_module/libc.prx`, `param.json`, the
-   icon and the backgrounds), shows **"Snes9x PS5 2.4 installed. Open it from the Snes9x PS5 icon on the home
+   icon and the backgrounds), shows **"Snes9x PS5 2.6 installed. Open it from the Snes9x PS5 icon on the home
    screen."** and stays running as the helper.
 2. **Open the Snes9x PS5 icon.** The game shelf appears and the controller works.
 3. **Copy your ROMs** (`.sfc .smc .swc .fig .bs .st .zip .gz`) to `/data/snes9x/roms`, over FTP for example, or
@@ -297,13 +302,34 @@ On the test PC a frame takes about 15 ms on 2 cores.
 
 | Combination | Does |
 |---|---|
-| L3 + R3 | pause menu (save/load state, slot, shader, aspect ratio, scanlines, FPS, sound, reset, back to the list, quit) |
+| L3 + R3 | pause menu (save/load state, slot, cheat manager, controller shortcuts, the settings, reset, back to the list, quit) |
+| L2 + R3 | cheat manager |
+| touchpad + OPTIONS | back to the game list |
 | L2 + Up / Down | save / load the state in the current slot |
 | L2 + Left / Right | change slot (0–9) |
 | hold R2 | fast forward |
 
+The three shortcuts above are the defaults: Settings (or the pause menu), **Controller shortcuts**, sets each one to
+another combination (L2 + R3, R2 + L3, touchpad + OPTIONS, L1 + R1 + L3, L2 / R2 / OPTIONS / touchpad + Triangle,
+R3 + OPTIONS); two can't share one.
+
 Up to 4 controllers: players 2 to 4 are the other signed-in users. With 3 or 4 controllers the multitap is turned
 on in port 2. The light bar shows the player (blue, red, green, pink).
+
+## Cheats
+
+The **cheat manager** (L2 + R3 in a game, or the pause menu) lists the game's cheats; Cross turns one on or off,
+and the choice is kept.
+
+- Put the cheats in `/data/snes9x/cheats/`, named as the ROM (`EarthBound.cht` for `EarthBound.zip`); a file named
+  with the full No-Intro name (`EarthBound (USA).cht`) is found too.
+- Both formats work: Snes9x's own and RetroArch's `.cht` (`cheatN_desc` / `cheatN_code`: Game Genie, Pro Action
+  Replay and raw codes). A RetroArch file is imported and saved in Snes9x's format after the first change.
+- `ps5/tools/install_libretro_cheats.py` picks RetroArch's cheat files from
+  [libretro-database](https://github.com/libretro/libretro-database) for your ROMs and names them for the console:
+  `python3 ps5/tools/install_libretro_cheats.py --roms ./my-roms --database
+  "./libretro-database/cht/Nintendo - Super Nintendo Entertainment System" --output ./ps5-cheats`, then copy
+  `ps5-cheats/` to `/data/snes9x/cheats/`.
 
 ## CRT shaders
 
@@ -445,7 +471,7 @@ make ps5 -j$(nproc)              # build/ps5/Snes9xPS5.elf (installer + helper, 
 make send PS5_HOST=192.168.0.10  # sends it to elfldr (port 9021)
 make dist                        # build/dist/Snes9xPS5-v<version>.elf, the release zip, the source zip
 make app                         # only build/app/PPSA99922/, to copy by hand
-make test                        # Linux builds (app, installer, helper) + 202 tests (ASan/UBSan)
+make test                        # Linux builds (app, installer, helper) + 219 tests (ASan/UBSan)
 ```
 
 The build has three stages:
@@ -503,7 +529,8 @@ The build has three stages:
 ## License and credits
 
 - **Snes9x**: the Snes9x license (`LICENSE` at the root: personal, non-commercial use, with source).
-- **New code in `ps5/`**: MIT.
+- **New code in `ps5/`**: MIT. The cheat manager, the controller shortcuts and the cover matching for translated
+  ROMs are by [thatboialex](https://github.com/thatboialex) (pull request #1).
 - **ps5-payload-dev SDK** (John Törnblom): toolchain, CRT, kernel access and import stubs (GPLv3+).
   - The payloads are linked with the SDK's CRT;
   - the app is linked with the SDK's static libc++.

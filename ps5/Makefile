@@ -21,7 +21,7 @@
 PS5_PAYLOAD_SDK ?= /opt/ps5-payload-sdk
 PS5_HOST ?= ps5
 PS5_PORT ?= 9021
-VERSION ?= 2.4
+VERSION ?= 2.6
 TITLE_ID ?= PPSA99922
 # where the app looks for its updates (Settings, Updates): this repository's GitHub releases
 UPDATE_REPO ?= MisterTemaki/snes9xPS5
@@ -73,7 +73,8 @@ PORT_WARN := -Wall -Wextra -Werror -Wno-unused-parameter -Wno-missing-field-init
 # the No-Intro name table built into fe_games.o; stb_image in fe_covers.o has warnings of its own
 GAMEDB_DEFS := -DGAMEDB_TSV='"$(abspath frontend/data/snes-nointro.tsv)"'
 %/port/frontend/fe_games.o: EXTRA_FLAGS = $(GAMEDB_DEFS)
-%/port/frontend/fe_covers.o: EXTRA_FLAGS = -Wno-error -Wno-sign-compare -Wno-unused-but-set-variable -Wno-implicit-fallthrough
+%/port/frontend/fe_covers.o: EXTRA_FLAGS = -Wno-error -Wno-sign-compare -Wno-unused-but-set-variable -Wno-implicit-fallthrough -DCOVER_MANIFEST_TXT='"$(abspath frontend/data/snes-cover-index.txt)"' -DTITLE_MANIFEST_TXT='"$(abspath frontend/data/snes-title-index.txt)"' -DSNAP_MANIFEST_TXT='"$(abspath frontend/data/snes-snap-index.txt)"'
+%/port/frontend/fe_covers.o: frontend/data/snes-cover-index.txt frontend/data/snes-title-index.txt frontend/data/snes-snap-index.txt
 %/port/frontend/fe_games.o: frontend/data/snes-nointro.tsv
 # the UI fonts (PS5SX2's: PCSX2's Roboto Regular and PromptFont) built into fe_text.o
 %/port/frontend/fe_text.o: EXTRA_FLAGS = -DFE_FONT_DIR='"$(abspath frontend/assets/fonts)"' -Wno-error -Wno-sign-compare -Wno-unused-function

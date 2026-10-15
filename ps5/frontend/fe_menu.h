@@ -18,6 +18,10 @@ enum class PauseAction
 // The in-game menu, over the paused picture.
 PauseAction PauseMenu();
 
+// In-game cheat list (single-code/group toggle, all on/off), and controller shortcut configuration.
+void CheatMenu();
+void ShortcutMenu();
+
 // The settings screen (Triangle on the shelf).
 void SettingsMenu();
 

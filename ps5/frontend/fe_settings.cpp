@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: MIT
 
 #include "fe_settings.h"
+#include "fe_shortcuts.h"
 
 #include "OrbisPaths.h"
 
@@ -60,6 +61,12 @@ void Settings::Load()
 			audio = atoi(val) != 0;
 		else if (key == "state_slot")
 			state_slot = Clamp(atoi(val), 0, 9);
+		else if (key == "shortcut_pause")
+			shortcut_pause = Clamp(atoi(val), 0, shortcuts::kCount - 1);
+		else if (key == "shortcut_list")
+			shortcut_list = Clamp(atoi(val), 0, shortcuts::kCount - 1);
+		else if (key == "shortcut_cheats")
+			shortcut_cheats = Clamp(atoi(val), 0, shortcuts::kCount - 1);
 		else if (key == "transparency")
 			transparency = atoi(val) != 0;
 		else if (key == "superfx_clock")
@@ -74,6 +81,13 @@ void Settings::Load()
 			last_rom = val;
 	}
 	fclose(f);
+	// If manually-edited ini values conflict, restore distinct, reachable defaults.
+	if (shortcut_pause == shortcut_list || shortcut_pause == shortcut_cheats || shortcut_list == shortcut_cheats)
+	{
+		shortcut_pause = 0;
+		shortcut_list = 3;
+		shortcut_cheats = 1;
+	}
 	OrbisLog("[settings] loaded %s", IniPath().c_str());
 }
 
@@ -93,6 +107,9 @@ void Settings::Save() const
 	fprintf(f, "show_fps=%d\n", show_fps ? 1 : 0);
 	fprintf(f, "audio=%d\n", audio ? 1 : 0);
 	fprintf(f, "state_slot=%d\n", state_slot);
+	fprintf(f, "shortcut_pause=%d\n", shortcut_pause);
+	fprintf(f, "shortcut_list=%d\n", shortcut_list);
+	fprintf(f, "shortcut_cheats=%d\n", shortcut_cheats);
 	fprintf(f, "transparency=%d\n", transparency ? 1 : 0);
 	fprintf(f, "superfx_clock=%d\n", superfx_clock);
 	fprintf(f, "covers_download=%d\n", covers_download ? 1 : 0);
