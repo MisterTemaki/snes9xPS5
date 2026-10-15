@@ -106,11 +106,12 @@ std::string MatchArtName(const std::vector<std::string>& names, const GameInfo& 
         ? game.file_base : game.nointro;
     auto exact = std::find(names.begin(), names.end(), requested);
     if (exact != names.end()) return *exact; // preserve revisions and git symlinks
-    std::string result = titles::Best(names, requested);
+    const titles::Index& index = titles::IndexOf(names); // names: one of the built-in art lists
+    std::string result = titles::Best(index, requested);
     if (result.empty())
     {
         const std::string cleaned = artaliases::TrimFrontendSuffix(game.file_base);
-        result = titles::Best(names, cleaned);
+        result = titles::Best(index, cleaned);
     }
     return result;
 }

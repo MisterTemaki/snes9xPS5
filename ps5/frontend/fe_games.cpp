@@ -234,7 +234,7 @@ bool CachedCrc(CrcCache& cache, const std::string& path, uint32_t* crc)
 	return true;
 }
 
-void Walk(const std::string& dir, int depth, bool usb, std::vector<GameInfo>& out)
+void Walk(const std::string& dir, int depth, bool usb, std::vector<GameInfo>& out, const ScanProgress& progress)
 {
 	DIR* d = opendir(dir.c_str());
 	if (!d)
@@ -250,7 +250,7 @@ void Walk(const std::string& dir, int depth, bool usb, std::vector<GameInfo>& ou
 		if (S_ISDIR(st.st_mode))
 		{
 			if (depth < 4)
-				Walk(path, depth + 1, usb, out);
+				Walk(path, depth + 1, usb, out, progress);
 			continue;
 		}
 		if (!S_ISREG(st.st_mode))
@@ -268,6 +268,8 @@ void Walk(const std::string& dir, int depth, bool usb, std::vector<GameInfo>& ou
 		g.ext = ext;
 		g.on_usb = usb;
 		out.push_back(std::move(g));
+		if (progress)
+			progress(0, out.size(), 0);
 	}
 	closedir(d);
 }
@@ -300,7 +302,7 @@ std::string Loose(const std::string& file_base)
 
 std::string Fuzzy(const std::string& file_base)
 {
-	return titles::Best(D().all_names, file_base);
+	return titles::Best(titles::IndexOf(D().all_names), file_base);
 }
 
 std::string Title(const std::string& nointro)
@@ -401,16 +403,19 @@ bool RomCrc32(const std::string& path, uint32_t* crc)
 	return true;
 }
 
-std::vector<GameInfo> ScanGames()
+std::vector<GameInfo> ScanGames(const ScanProgress& progress)
 {
 	std::vector<GameInfo> games;
 	for (const std::string& root : OrbisRomRoots())
-		Walk(root, 0, root.rfind("/mnt/", 0) == 0, games);
+		Walk(root, 0, root.rfind("/mnt/", 0) == 0, games, progress);
 
 	CrcCache cache;
 	cache.Load();
+	size_t identified = 0;
 	for (GameInfo& g : games)
 	{
+		if (progress)
+			progress(1, identified++, games.size());
 		g.nointro = gamedb::Exact(g.file_base);
 		if (g.nointro.empty())
 		{

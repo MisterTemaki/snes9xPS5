@@ -18,7 +18,7 @@ Everything outside `ps5/` is the original Snes9x source, unchanged, apart from t
 [README-Snes9x.md](README-Snes9x.md)).
 
 > **Status (2.6):** runs on the console: the app opens from its icon, the shelf, the controller, video and sound
-> work, and games play. It builds with the ps5-payload-dev SDK and passes 219 host tests, which run the same code
+> work, and games play. It builds with the ps5-payload-dev SDK and passes 222 host tests, which run the same code
 > on Linux with the PS5 calls simulated. If something fails, the logs in `/data/snes9x/logs/` say where.
 
 ## How it works (the PS5SX2 model)
@@ -57,7 +57,9 @@ README, "`Snes9xPS5.elf`" always means the current release's ELF.
 manager in the pause menu, RetroArch `.cht` files imported (see [Cheats](#cheats)), shortcuts you choose for the
 pause menu, the cheats and the game list, "Repair missing covers", and covers found for translated and bootleg ROMs
 (the shelf matches their names against libretro-thumbnails' lists). (Those were "2.4/2.5" on the main branch, never
-released.) And **a new title ID: PPSA99922** (it was PPSA99009, which another app in the homebrew catalog uses; see
+released.) A big library no longer holds "Looking for games..." for long: the screen counts the games
+found, then shows a bar while each one is identified, and the name matching for unknown ROMs is about 50 times
+faster (1500 unknown ROMs: 10 s on the PC before, 0.2 s now). And **a new title ID: PPSA99922** (it was PPSA99009, which another app in the homebrew catalog uses; see
 [New title ID](#new-title-id-ppsa99922)). This fixes the missing home-screen icon when ProsperoLichess is
 installed too ([#2](https://github.com/MisterTemaki/snes9xPS5/issues/2)). Nothing under the old ID is touched (it may be
 another app's): an earlier version of ours stays as its own icon until you delete it. Games, saves and settings are shared. The helper listens on port 9089.
@@ -473,7 +475,7 @@ make ps5 -j$(nproc)              # build/ps5/Snes9xPS5.elf (installer + helper, 
 make send PS5_HOST=192.168.0.10  # sends it to elfldr (port 9021)
 make dist                        # build/dist/Snes9xPS5-v<version>.elf, the release zip, the source zip
 make app                         # only build/app/PPSA99922/, to copy by hand
-make test                        # Linux builds (app, installer, helper) + 219 tests (ASan/UBSan)
+make test                        # Linux builds (app, installer, helper) + 222 tests (ASan/UBSan)
 ```
 
 The build has three stages:

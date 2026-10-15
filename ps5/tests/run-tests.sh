@@ -838,6 +838,28 @@ expect "grep -q 'is available: Settings, Updates' $T2/inst.txt $T2/root/logs/ins
 expect "! grep -q 'runtime error\|AddressSanitizer' $T2/out.txt $T2/inst.txt $T/inst.txt $T/inst2.txt" "no sanitizer reports"
 stop22
 
+echo "== 26. a big library of unknown ROMs: the scan stays quick (the fuzzy name match looks only at likely names)"
+T=$(newroot t26)
+python3 - "$T/root/roms" <<'PY'
+import os, random, sys
+random.seed(7)
+words = "Super Mario Zelda Final Fantasy Dragon Quest Kirby Star Metroid Castle Mega Man Street Fighter Donkey Kong Chrono Secret Mana".split()
+for i in range(1000):
+    with open(os.path.join(sys.argv[1], " ".join(random.sample(words, 3)) + " %04d (Hack) [T+Eng].sfc" % i), "wb") as f:
+        f.write(b"\0" * 4096)
+PY
+rc=$(run "$T" "0:0;100:$OPTIONS;102:0;110:$CROSS;112:0" "")
+expect "[ $rc = 0 ] && grep -q '\[games\] 1000 ROM(s)' $T/root/logs/boot.log" "1000 ROMs found"
+expect "python3 - $T/root/logs/boot.log <<'PY'
+import re, sys
+t = {}
+for line in open(sys.argv[1], errors='replace'):
+    m = re.match(r'\[\s*([0-9.]+)\] \[(emu|games)\] (core ready|1000 ROM)', line)
+    if m: t[m.group(2)] = float(m.group(1))
+sys.exit(0 if 'emu' in t and 'games' in t and t['games'] - t['emu'] < 3.0 else 1)
+PY" "the scan (with a CRC of each) took under 3 seconds"
+expect "! grep -q 'runtime error\|AddressSanitizer' $T/out.txt" "no sanitizer reports"
+
 echo
 echo "passed $PASS, failed $FAIL  (work dir $WORK)"
 [ $FAIL = 0 ]

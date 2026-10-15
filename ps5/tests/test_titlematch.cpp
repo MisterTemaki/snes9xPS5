@@ -99,6 +99,28 @@ int main()
     assert(!chrono.empty() && std::find(boxarts.begin(),boxarts.end(),chrono)!=boxarts.end());
     assert(Best(boxarts,"Aladdin 2000").empty()); // never use unrelated official Aladdin image
     assert(Best(boxarts,"Pokemon Gold & Silver").empty());
+    // the index (first four characters) gives the plain scan's answers: every art name, its variants, and the
+    // names of the other lists, looked up both ways
+    {
+        const fe::titles::Index& ix = fe::titles::IndexOf(boxarts);
+        size_t checked = 0;
+        auto same = [&](const std::string& q) {
+            assert(Best(ix, q) == Best(boxarts, q));
+            ++checked;
+        };
+        for (const auto* list : {&boxarts, &titles, &snaps})
+            for (const std::string& n : *list)
+            {
+                same(n);
+                same(n.substr(0, n.find(" (")));
+                std::string typo = n;
+                if (typo.size() > 6) typo[typo.size() / 2] = 'x';
+                same(typo);
+            }
+        for (const auto& item : translated)
+            same(item.first);
+        std::cout << "Index lookups equal to the plain scan: " << checked << "\n";
+    }
     std::cout << "Title matcher regressions passed\n";
     return 0;
 }

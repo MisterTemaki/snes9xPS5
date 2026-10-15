@@ -12,6 +12,7 @@
 #pragma once
 
 #include <cstdint>
+#include <functional>
 #include <string>
 #include <vector>
 
@@ -51,5 +52,9 @@ bool RomCrc32(const std::string& path, uint32_t* crc);
 
 // Every ROM under the ROM folders (sub-folders included, 4 levels), sorted by title. Names that need a
 // CRC are resolved here too, with a cache (/data/snes9x/covers/crc-cache.txt) so each ROM is read once.
-std::vector<GameInfo> ScanGames();
+// progress (when given) is told how far the scan is: stage 0 while the folders are listed (done = games found
+// so far, total = 0), stage 1 while each game is identified (done of total). It is called often: it decides itself
+// how often to draw.
+using ScanProgress = std::function<void(int stage, size_t done, size_t total)>;
+std::vector<GameInfo> ScanGames(const ScanProgress& progress = nullptr);
 } // namespace fe
