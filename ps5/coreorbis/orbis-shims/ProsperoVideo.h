@@ -69,6 +69,11 @@ struct Border
 // The border DrawSnes uses from the next frame on; null = none (today's black). Cheap: swaps a pointer.
 void SetBorder(std::shared_ptr<const Border> border);
 
+// Where the picture goes inside 'bounds' (the whole surface, or a border's window): centred, width kept even.
+// 4:3 and 8:7 fit by the limiting side, or fill 'bounds' when it has that ratio within 3%; Integer is the largest whole
+// multiple that fits; Stretch fills 'bounds'. src_w / src_h are the picture's size as the core draws it.
+Rect ComputeRect(int src_w, int src_h, Aspect aspect, const Rect& bounds);
+
 // Scales a w x h RGB565 picture (pitch in bytes) into the surface (nearest neighbour); returns the
 // rectangle that changed so the caller can Present just that. 'scanlines' darkens the last output row of
 // every source line, CRT style, when the scale is 3x or more.
