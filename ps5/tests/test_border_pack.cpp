@@ -647,9 +647,12 @@ void TestFetch()
 	unsetenv("SNES9X_BORDER_URL");
 
 	const std::vector<std::string>& names = IndexNames();
-	CHECK(names.size() > 1400 && names.size() < 1600, "the index has the 1445 SNES borders The Bezel Project had on 2026-10-04");
+	CHECK(names.size() > 4000 && names.size() < 4500, "the index has the 1445 SNES and 2685 Super Famicom borders The Bezel Project had in 2026-10");
 	CHECK(std::find(names.begin(), names.end(), "Super Mario World (USA)") != names.end(), "Super Mario World (USA) is in it");
 	CHECK(std::find(names.begin(), names.end(), "Joe & Mac (USA)") != names.end(), "so is a name with an ampersand, as the repository spells it");
+	CHECK(std::find(names.begin(), names.end(), "Star Ocean (Japan)") != names.end() &&
+			std::find(names.begin(), names.end(), "Seiken Densetsu 3 (Japan)") != names.end(),
+		"the Japanese games are in it (the Super Famicom repository's names)");
 	CHECK(std::set<std::string>(names.begin(), names.end()).size() == names.size(), "no name twice");
 	bool clean = true;
 	for (const std::string& n : names)
@@ -662,6 +665,13 @@ void TestFetch()
 			"Joe%20%26%20Mac%20%28USA%29.png",
 		"the address is the repository's raw file, every odd character escaped");
 	CHECK(BezelUrl("Super Mario World 2 - Yoshi's Island (USA)").find("Yoshi%27s%20Island") != std::string::npos, "an apostrophe is escaped");
+	CHECK(BezelUrl("Star Ocean (Japan)") ==
+			"https://raw.githubusercontent.com/thebezelproject/bezelproject-SFC/master/retroarch/overlay/GameBezels/SFC/"
+			"Star%20Ocean%20%28Japan%29.png",
+		"a Japanese game's border is in The Bezel Project's Super Famicom repository");
+	CHECK(BezelUrl("Actraiser 2 (Europe) (En,Fr,De)").find("/bezelproject-SFC/") != std::string::npos &&
+			BezelUrl("Super Mario World (USA)").find("/bezelproject-SNES/") != std::string::npos,
+		"each name is downloaded from the repository whose list it is in");
 	setenv("SNES9X_BORDER_URL", "http://127.0.0.1:1/b/", 1);
 	CHECK(BezelUrl("A (USA)") == "http://127.0.0.1:1/b/A%20%28USA%29.png", "SNES9X_BORDER_URL replaces the base (the host tests)");
 	unsetenv("SNES9X_BORDER_URL");
@@ -672,6 +682,9 @@ void TestFetch()
 		"a game The Bezel Project has a border for, and the pack lacks, is wanted");
 	CHECK(!BorderWanted(pack, Game("Not In Any Pack (USA)", "Not In Any Pack (USA)"), &w), "a game it has none for is not");
 	CHECK(BorderWanted(pack, Game("Super Mario World", "Super Mario World"), &w) == false, "(the stand-in matcher knows only exact names)");
+	CHECK(BorderWanted(pack, Game("Star Ocean (Japan)", "Star Ocean (Japan)"), &w) && w.file == "Star Ocean (Japan).png" &&
+			w.url.find("bezelproject-SFC") != std::string::npos,
+		"a Japanese game is wanted from the Super Famicom repository");
 
 	// the loose translation: matched through the name its CRC has
 	fe::GameInfo loose = Game("Loose Translation", "Loose Translation");

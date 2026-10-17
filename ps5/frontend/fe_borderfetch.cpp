@@ -14,9 +14,10 @@
 #include <cstring>
 #include <ctime>
 #include <set>
+#include <unordered_set>
 
 #ifndef BORDER_INDEX_TXT
-#error BORDER_INDEX_TXT must name the built-in index of the SNES borders The Bezel Project has
+#error BORDER_INDEX_TXT must name the built-in index of the SNES and Super Famicom borders The Bezel Project has
 #endif
 #define S9X_INCBIN(sym, path)                                                                                  \
 	__asm__(".section .rodata\n"                                                                               \
@@ -36,8 +37,11 @@ namespace
 {
 constexpr long kMissingRetrySeconds = 30L * 24 * 3600; // as the covers: a 404 isn't asked again for 30 days
 
+// The Bezel Project keeps the USA and World borders and the Japan, Europe and other regions' in two repositories; no name is in both.
 const char* const kBezelBase =
 	"https://raw.githubusercontent.com/thebezelproject/bezelproject-SNES/master/retroarch/overlay/GameBezels/SNES/";
+const char* const kBezelSfcBase =
+	"https://raw.githubusercontent.com/thebezelproject/bezelproject-SFC/master/retroarch/overlay/GameBezels/SFC/";
 
 // "Joe & Mac (USA)" -> "Joe%20%26%20Mac%20%28USA%29": everything but letters, digits and -_.~
 std::string Encode(const std::string& s)
@@ -84,19 +88,40 @@ bool RecentlyMissing(const std::string& marker, const std::string& url)
 	return old == url;
 }
 
-std::vector<std::string> ParseIndex(const char* p, const char* end)
+// The index text: the SNES repository's names, then, after a "#@ SFC" line, the Super Famicom repository's. Other "#" lines are
+// comments.
+struct Index
 {
 	std::vector<std::string> names;
+	std::unordered_set<std::string> sfc;
+};
+
+Index ParseIndex(const char* p, const char* end)
+{
+	Index index;
+	bool sfc = false;
 	while (p < end)
 	{
 		const char* nl = static_cast<const char*>(memchr(p, '\n', size_t(end - p)));
 		if (!nl)
 			break;
-		if (*p != '#' && nl > p)
-			names.emplace_back(p, size_t(nl - p));
+		if (nl - p >= 3 && memcmp(p, "#@ ", 3) == 0)
+			sfc = nl - p >= 6 && memcmp(p + 3, "SFC", 3) == 0;
+		else if (*p != '#' && nl > p)
+		{
+			index.names.emplace_back(p, size_t(nl - p));
+			if (sfc)
+				index.sfc.insert(index.names.back());
+		}
 		p = nl + 1;
 	}
-	return names;
+	return index;
+}
+
+const Index& TheIndex()
+{
+	static const Index index = ParseIndex(s9x_border_index_begin, s9x_border_index_end);
+	return index;
 }
 
 const PackMatcher& Matcher()
@@ -128,8 +153,7 @@ void WriteList(const std::string& path, const std::vector<WantedCover>& list)
 
 const std::vector<std::string>& IndexNames()
 {
-	static const std::vector<std::string> names = ParseIndex(s9x_border_index_begin, s9x_border_index_end);
-	return names;
+	return TheIndex().names;
 }
 
 std::string BezelNameFor(const GameInfo& game)
@@ -140,7 +164,8 @@ std::string BezelNameFor(const GameInfo& game)
 std::string BezelUrl(const std::string& name)
 {
 	const char* base = getenv("SNES9X_BORDER_URL");
-	return std::string(base && *base ? base : kBezelBase) + Encode(name) + ".png";
+	const char* repository = TheIndex().sfc.count(name) ? kBezelSfcBase : kBezelBase;
+	return std::string(base && *base ? base : repository) + Encode(name) + ".png";
 }
 
 bool BorderWanted(const std::string& pack, const GameInfo& game, WantedCover* out)

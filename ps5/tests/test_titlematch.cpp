@@ -267,6 +267,68 @@ int main()
         std::cout << "Extra CRC table: " << by_crc.size() << " dumps, " << found << " of " << translations << " English translations find art\n";
         assert(translations > 300 && found * 100 >= translations * 75);
     }
+    // The border index (tools/make_border_index.py): The Bezel Project's SNES repository, then its Super Famicom one. Japanese
+    // games have their borders in the second: an index of the first alone left every Japan-only game with the built-in frame.
+    {
+        namespace am = fe::artmatch;
+        std::vector<std::string> snes, sfc;
+        {
+            std::ifstream f("ps5/frontend/data/snes-border-index.txt", std::ios::binary);
+            assert(f);
+            std::string line;
+            bool in_sfc = false;
+            while (std::getline(f, line))
+            {
+                if (line.compare(0, 3, "#@ ") == 0) in_sfc = line.compare(3, 3, "SFC") == 0;
+                else if (!line.empty() && line[0] != '#') (in_sfc ? sfc : snes).push_back(line);
+            }
+        }
+        assert(snes.size() > 1400 && sfc.size() > 2500);
+        std::vector<std::string> all = snes;
+        all.insert(all.end(), sfc.begin(), sfc.end());
+        assert(std::set<std::string>(all.begin(), all.end()).size() == all.size()); // no name in both: its section says where it is
+        const auto has = [&all](const char* name) { return std::find(all.begin(), all.end(), name) != all.end(); };
+        assert(std::find(snes.begin(), snes.end(), "Super Mario World (USA)") != snes.end());
+        assert(std::find(sfc.begin(), sfc.end(), "Star Ocean (Japan)") != sfc.end());
+        assert(std::find(sfc.begin(), sfc.end(), "Seiken Densetsu 3 (Japan)") != sfc.end());
+        const fe::artmatch::Index& ix = am::IndexOf(all);
+        // the English patches of the two games Jason found without a border, by the names their CRCs have in the extra table
+        const auto extra = index("ps5/frontend/data/snes-extra-crc.tsv");
+        std::map<std::string, std::string> by_crc;
+        for (const std::string& line : extra) by_crc.emplace(line.substr(0, 8), line.substr(9));
+        for (const char* crc : {"A2B3B3FD", "6BA9E08D", "5CA81740"}) // Star Ocean, DeJap
+            assert(am::Resolve(ix, by_crc.at(crc)) == "Star Ocean (Japan)");
+        for (const char* crc : {"5F14F4CA", "11B87DEA", "86C49FCD"}) // Seiken Densetsu 3: Corlett, Spanish, cheat hack
+            assert(am::Resolve(ix, by_crc.at(crc)) == "Seiken Densetsu 3 (Japan)");
+        // the file names these patches usually go by
+        for (const char* name : {"Star Ocean (English)", "Star Ocean [T-Eng]", "Star Ocean (Translated)", "star_ocean_english"})
+            assert(am::Resolve(ix, name) == "Star Ocean (Japan)");
+        for (const char* name : {"Seiken Densetsu 3 (English)", "Seiken Densetsu 3 [T+Eng v1.1]", "Seiken Densetsu 3 (Translated)"})
+            assert(am::Resolve(ix, name) == "Seiken Densetsu 3 (Japan)");
+        assert(fe::artaliases::Canonical("Secret of Mana 2") == "Seiken Densetsu 3 (Japan)" && has("Seiken Densetsu 3 (Japan)"));
+        assert(fe::artaliases::Canonical("Secret of Mana 2 (English)") == "Seiken Densetsu 3 (Japan)");
+        assert(fe::artaliases::Canonical("Secret of Mana").empty());
+        // a game takes its own region's border now (Europe for Europe, Japan for Japan), not the USA one
+        assert(am::Resolve(ix, "Mortal Kombat II (Europe)") == "Mortal Kombat II (Europe)");
+        assert(am::Resolve(ix, "Populous (Japan)") == "Populous (Japan)");
+        // every No-Intro Japan release but the betas, prototypes and unlicensed ones has a border in the index
+        const auto nointro = index("ps5/frontend/data/snes-nointro.tsv");
+        size_t japan = 0, bordered = 0;
+        for (const std::string& line : nointro)
+        {
+            const std::string name = line.substr(9);
+            if (name.find("(Japan") == std::string::npos) continue;
+            bool odd = false;
+            for (const char* tag : {"(Beta", "(Proto", "(Sample", "(Unl", "(Aftermarket", "(Pirate", "(Demo", "(Enhancement Chip", "(Program"})
+                odd = odd || name.find(tag) != std::string::npos;
+            if (odd) continue;
+            ++japan;
+            bordered += has(name.c_str());
+        }
+        std::cout << "Border index: " << snes.size() << " SNES + " << sfc.size() << " Super Famicom names, " << bordered << " of " << japan
+                  << " Japan releases have a border by name\n";
+        assert(japan > 1500 && bordered * 100 >= japan * 95);
+    }
     // The database covers (tools/make_db_art.py): games libretro-thumbnails has no art for.
     {
         namespace am = fe::artmatch;

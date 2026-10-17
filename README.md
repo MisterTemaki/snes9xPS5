@@ -686,9 +686,11 @@ The build has three stages:
   - **PromptFont** (Yukari "Shinmera" Hafner, SIL OFL 1.1);
   - **Font Awesome Brands** (Fonticons, Inc.; font SIL OFL 1.1, icons CC BY 4.0), for the GitHub mark on the
     shelf.
-- **Borders:** [The Bezel Project](https://github.com/thebezelproject/bezelproject-SNES), downloaded on the console, not
-  included; only the list of its file names is built in (`ps5/frontend/data/snes-border-index.txt`, from
-  `ps5/tools/make_border_index.py`). No licence is stated for its pictures.
+- **Borders:** [The Bezel Project](https://github.com/thebezelproject/bezelproject-SNES) (USA and World games) and its
+  [Super Famicom set](https://github.com/thebezelproject/bezelproject-SFC) (Japan, Europe and the other regions),
+  downloaded on the console, not included; only the list of its file names is built in
+  (`ps5/frontend/data/snes-border-index.txt`, from `ps5/tools/make_border_index.py`). No licence is stated for its
+  pictures.
 - **Covers:** [libretro-thumbnails](https://github.com/libretro-thumbnails), downloaded on the console, not
   included. **Names and CRCs:** [libretro-database](https://github.com/libretro/libretro-database) (No-Intro).
   **CRCs of fan-translation dumps, and covers libretro-thumbnails lacks:** the public SNES dump of
