@@ -309,7 +309,8 @@ int main()
         assert(fe::artaliases::Canonical("Secret of Mana 2 (English)") == "Seiken Densetsu 3 (Japan)");
         assert(fe::artaliases::Canonical("Secret of Mana").empty());
         // a retranslation that fits a game's USA and Japanese entries alike: the cover matcher declines, the border matcher
-        // (usa_on_tie) takes the USA one; a name that is not a tie, or whose ties have no USA release, is unchanged
+        // (usa_on_tie) takes the USA one; a name that is not a tie is unchanged, and so is a tie of anything but two games
+        // with one main title, one of them released in the USA (a franchise is not one game)
         for (const char* name : {"Breath of Fire II - Retranslation (U)", "Super Mario RPG - Relocalized T-Eng v2.0 (2023)(CoolCatBomberMan)"})
         {
             assert(am::Resolve(ix, name).empty());
@@ -318,6 +319,9 @@ int main()
         for (const char* name : {"Star Ocean (English)", "Mortal Kombat II (Europe)", "Super Robot Wars 4 (English)",
                                  "Dragon Ball Z - Chou Gokuuden - Totsugeki Hen T-Eng v0.98 (2016)(Kakkoii Translations)"})
             assert(am::Resolve(ix, name, "", true) == am::Resolve(ix, name));
+        for (const std::string& name : {by_crc.at("00D047EA"), std::string("Looney Tunes - Acme Animation Factory"),
+                                        std::string("Legend of Zelda, The (World) (REV-F) (Digital) (NES Conversion)")})
+            assert(am::Resolve(ix, name, "", true).empty()); // DBZ Super Densetsu, Looney Tunes, Zelda for the NES
         // the Ranma 1/2 patch that names the game by the gang is the Japan-only Akanekodan Teki Hihou, not Hard Battle
         assert(fe::artaliases::Canonical("Ranma 1-2 - Treasure of the Red Cat Gang T-Eng (2000)(Dynamic-Designs)") ==
                "Ranma 1-2 - Akanekodan Teki Hihou (Japan)" && has("Ranma 1-2 - Akanekodan Teki Hihou (Japan)"));

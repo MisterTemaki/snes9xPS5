@@ -506,28 +506,34 @@ inline std::string Pick(const Index& ix, const std::vector<int>& group, const st
     }
     return (*ix.names)[size_t(ix.entries[size_t(best)].pos)];
 }
-// Of the games that tie for the best fit, the one that has a USA release when exactly one does, else -1. A retranslation of
-// a game that came out in the USA ("Breath of Fire II - Retranslation") fits its USA entry and its Japanese one ("Breath of
-// Fire II - Shimei no Ko") alike; the USA one is the answer wanted.
-inline int OnlyUsa(const Index& ix, const std::vector<std::pair<int, double>>& scored, double best_fit)
+// Of the games that tie for the best fit, the USA one when the tie is exactly two games with one main title, one released in the
+// USA and one not, else -1. A retranslation of a game that came out in the USA ("Breath of Fire II - Retranslation") fits its
+// USA entry and its Japanese one ("Breath of Fire II - Shimei no Ko") alike; the USA one is the answer wanted. Any other tie (a
+// franchise of unrelated games that happen to have one USA release) is not told apart.
+inline int UsaOfTwo(const Index& ix, const std::vector<std::pair<int, double>>& scored, double best_fit)
 {
-    int found = -1;
+    int games[2] = {-1, -1};
     for (const auto& s : scored)
     {
         if (best_fit - s.second >= 0.05) continue;
         const std::string& joined = ix.entries[size_t(s.first)].joined;
-        if (found >= 0 && joined == ix.entries[size_t(found)].joined) continue;
-        bool usa = false;
-        for (int k : ix.by_joined.at(joined)) usa = usa || ix.entries[size_t(k)].p.region == "USA";
-        if (!usa) continue;
-        if (found >= 0) return -1; // two games with a USA release: not told apart
-        found = s.first;
+        if (games[0] >= 0 && joined == ix.entries[size_t(games[0])].joined) continue;
+        if (games[1] >= 0 && joined == ix.entries[size_t(games[1])].joined) continue;
+        if (games[0] < 0) games[0] = s.first;
+        else if (games[1] < 0) games[1] = s.first;
+        else return -1; // a third game
     }
-    return found;
+    if (games[1] < 0 || ix.entries[size_t(games[0])].head != ix.entries[size_t(games[1])].head) return -1;
+    int usa[2] = {-1, -1};
+    for (int i = 0; i < 2; ++i)
+        for (int k : ix.by_joined.at(ix.entries[size_t(games[i])].joined))
+            if (ix.entries[size_t(k)].p.region == "USA") usa[i] = k;
+    if ((usa[0] >= 0) == (usa[1] >= 0)) return -1;
+    return usa[0] >= 0 ? games[0] : games[1];
 }
 // The art name of the game this file name means, or "" when it cannot be told from others.
 // region_hint: the region to prefer when the name carries none.
-// usa_on_tie: when games fit equally well, take the one with a USA release if only one has (OnlyUsa), instead of none.
+// usa_on_tie: when games fit equally well, take the USA one of two games that share a main title (UsaOfTwo), instead of none.
 inline std::string Resolve(const Index& ix, const std::string& requested, const std::string& region_hint = "", bool usa_on_tie = false)
 {
     Parsed q = Parse(requested);
@@ -582,7 +588,7 @@ inline std::string Resolve(const Index& ix, const std::string& requested, const 
     else if (best < 0 || best_fit < 0.85) return "";
     else if (best_fit - second_fit < 0.05)
     {
-        best = usa_on_tie ? OnlyUsa(ix, scored, best_fit) : -1;
+        best = usa_on_tie ? UsaOfTwo(ix, scored, best_fit) : -1;
         if (best < 0) return "";
     }
     return Pick(ix, ix.by_joined.at(ix.entries[size_t(best)].joined), q.region);
