@@ -93,14 +93,36 @@ int main()
 		const size_t len = strlen(msg);
 		snprintf(msg + len, sizeof(msg) - len, " Home screen art updated (restart the PS5 if it doesn't show).");
 	}
-	const std::string old_ids = migrate::FindOldInstalls();
-	if (!old_ids.empty())
+	std::string old_ids, old_folders, same_title_folders;
+	size_t old_count = 0;
+	for (const migrate::OtherInstall& o : migrate::FindOtherInstalls())
+	{
+		if (o.title_id == SNES9X_TITLE_ID)
+		{
+			same_title_folders += (same_title_folders.empty() ? "" : ", ") + std::string("/data/homebrew/") + o.folder;
+			continue;
+		}
+		old_ids += (old_ids.empty() ? "" : ", ") + o.title_id;
+		old_folders += (old_folders.empty() ? "" : ", ") + std::string("/data/homebrew/") + o.folder;
+		old_count++;
+	}
+	if (old_count > 0)
 	{
 		const size_t len = strlen(msg);
 		snprintf(msg + len, sizeof(msg) - len,
-			" Its title ID is now %s. The old version (%s) is left alone: to remove it, delete its folder "
-			"/data/homebrew/%s (FTP), then its icon (OPTIONS, Delete). Games, saves and settings are shared.",
-			SNES9X_TITLE_ID, old_ids.c_str(), old_ids.c_str());
+			" Its title ID is now %s. The old %s (%s) %s left alone: to remove %s, delete %s %s (FTP), then %s "
+			"(OPTIONS, Delete). Games, saves and settings are shared.",
+			SNES9X_TITLE_ID, old_count == 1 ? "version" : "versions", old_ids.c_str(), old_count == 1 ? "is" : "are",
+			old_count == 1 ? "it" : "them", old_count == 1 ? "its folder" : "their folders", old_folders.c_str(),
+			old_count == 1 ? "its icon" : "their icons");
+	}
+	if (!same_title_folders.empty())
+	{
+		const size_t len = strlen(msg);
+		snprintf(msg + len, sizeof(msg) - len,
+			" Another folder holds this app too (%s): two folders for %s give a second icon. Delete it (FTP), then "
+			"the extra icon (OPTIONS, Delete).",
+			same_title_folders.c_str(), SNES9X_TITLE_ID);
 	}
 	OrbisLog("[installer] %s", msg);
 	g_ready_message = msg;
