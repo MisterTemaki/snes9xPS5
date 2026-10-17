@@ -24,6 +24,7 @@
 #include "ProsperoSce.h"
 #include "ProsperoVideo.h"
 
+#include "netfs.h"
 #include "snes9x.h"
 #include "apu/apu.h"
 #include "cheats.h"
@@ -603,9 +604,11 @@ bool LoadGame(const std::string& path)
 	CloseGame();
 	g.rom_path = path;
 	OrbisLog("[emu] loading %s", path.c_str());
+	netfs_prepare_game(path); // a ROM on a share: its MSU-1 files first (nothing for any other path)
 	if (!Memory.LoadROM(path.c_str()))
 	{
 		OrbisLog("[emu] LoadROM failed");
+		netfs_end_game();
 		g.rom_path.clear();
 		return false;
 	}
@@ -627,6 +630,7 @@ bool LoadGame(const std::string& path)
 	ApplySettings();
 	OrbisLog("[emu] \"%s\" %s, %d fps, %s", Memory.ROMName, Memory.ROMFilename.c_str(), Memory.ROMFramesPerSecond,
 		Settings.PAL ? "PAL" : "NTSC");
+	netfs_set_realtime(true); // from here nothing on this thread waits for a share
 	return true;
 }
 
@@ -640,6 +644,8 @@ void CloseGame()
 		SaveCheats();
 	g.loaded = false;
 	g.rom_path.clear();
+	netfs_set_realtime(false);
+	netfs_end_game();
 }
 
 bool GameLoaded()

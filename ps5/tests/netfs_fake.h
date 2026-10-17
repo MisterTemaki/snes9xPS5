@@ -33,6 +33,7 @@ struct FakeServer
 	netfs::Status connect_status;      // what Connect() returns
 	std::atomic<bool> hang{false};     // the next call waits until its backend is aborted
 	std::atomic<bool> fail_reads{false}; // Pread() returns -EIO
+	std::atomic<int> drop_err{0};      // every Stat/List/Open/Pread fails with this errno at once (a dropped connection)
 	std::atomic<bool> gate{false};     // Pread() waits until Release() (a slow link) or its backend is aborted
 	std::atomic<int> gated{0};         // reads waiting at the gate
 	std::vector<std::string> offered;  // Enumerate()
@@ -100,6 +101,8 @@ public:
 	netfs::Status Stat(const std::string& path, netfs::Attr& out) override
 	{
 		m_s->stats++;
+		if (int e = m_s->drop_err.load())
+			return netfs::Status::Errno(e);
 		if (Parked())
 			return netfs::Status::Errno(EIO);
 		std::lock_guard<std::mutex> lk(m_s->mu);
@@ -109,6 +112,8 @@ public:
 	netfs::Status List(const std::string& path, std::vector<netfs::DirEntry>& out) override
 	{
 		m_s->lists++;
+		if (int e = m_s->drop_err.load())
+			return netfs::Status::Errno(e);
 		if (Parked())
 			return netfs::Status::Errno(EIO);
 		std::lock_guard<std::mutex> lk(m_s->mu);
@@ -151,6 +156,8 @@ public:
 	netfs::Status Open(const std::string& path, netfs::Handle& out) override
 	{
 		m_s->opens++;
+		if (int e = m_s->drop_err.load())
+			return netfs::Status::Errno(e);
 		if (Parked())
 			return netfs::Status::Errno(EIO);
 		std::lock_guard<std::mutex> lk(m_s->mu);
@@ -166,6 +173,8 @@ public:
 	int64_t Pread(netfs::Handle h, void* buf, size_t len, uint64_t offset) override
 	{
 		m_s->reads++;
+		if (int e = m_s->drop_err.load())
+			return -e;
 		if (Parked() || AtGate() || m_s->fail_reads)
 			return -EIO;
 		std::lock_guard<std::mutex> lk(m_s->mu);
