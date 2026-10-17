@@ -3,8 +3,10 @@
 
 #include "fe_borderimg.h"
 
+#include <algorithm>
 #include <cstdarg>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <new>
 #include <utility>
@@ -42,7 +44,184 @@ inline uint32_t Mul255(uint32_t c, uint32_t a)
 {
 	return (c * a + 127) / 255;
 }
+
+bool SameRect(const ps5video::Rect& a, const ps5video::Rect& b)
+{
+	return a.x == b.x && a.y == b.y && a.w == b.w && a.h == b.h;
+}
+
+// Where one output row or column reads from: the pixels i0 and i1 of the source, i1 with weight f / 256.
+struct Tap
+{
+	int i0, i1, f;
+};
+
+// One axis of RefitImage. 'src' and 'dst' are the cut points of the five pieces (margin, corner, middle, corner, margin);
+// piece k of the output shows piece k of the source, 1:1 or stretched, and never reads outside its piece.
+void AxisTaps(const int (&src)[6], const int (&dst)[6], int size, std::vector<Tap>* taps)
+{
+	taps->resize(size_t(size));
+	for (int k = 0; k < 5; k++)
+	{
+		const int64_t len_s = src[k + 1] - src[k], len_d = dst[k + 1] - dst[k];
+		const int last = src[k + 1] - 1;
+		for (int d = dst[k]; d < dst[k + 1]; d++)
+		{
+			Tap& t = (*taps)[size_t(d)];
+			if (len_s <= 0) // nothing to show here (a window that touches the edge): the nearest pixel
+			{
+				const int i = std::min(std::max(src[k], 0), size - 1);
+				t = {i, i, 0};
+				continue;
+			}
+			// the output pixel's centre in the source, minus the half pixel taps are counted from, scaled by 2 * len_d
+			const int64_t pos = (2 * int64_t(d - dst[k]) + 1) * len_s - len_d;
+			const int64_t den = 2 * len_d;
+			const int i0 = pos <= 0 ? src[k] : src[k] + int(pos / den);
+			if (pos <= 0 || i0 >= last)
+				t = {std::min(i0, last), std::min(i0, last), 0};
+			else
+				t = {i0, i0 + 1, int((pos % den) * 256 / den)};
+		}
+	}
+}
+
+// Four pixels (0xAABBGGRR, straight alpha) mixed with weights that add up to 65536; the colours count by their alpha.
+uint32_t Bilerp(const uint32_t (&p)[4], int fx, int fy)
+{
+	const uint32_t w[4] = {uint32_t((256 - fx) * (256 - fy)), uint32_t(fx * (256 - fy)), uint32_t((256 - fx) * fy), uint32_t(fx * fy)};
+	if ((p[0] & p[1] & p[2] & p[3]) >> 24 == 0xff) // all opaque: a plain average
+	{
+		uint32_t out = 0xff000000u;
+		for (int sh = 0; sh < 24; sh += 8)
+		{
+			uint32_t sum = 32768;
+			for (int i = 0; i < 4; i++)
+				sum += w[i] * ((p[i] >> sh) & 0xff);
+			out |= (sum >> 16) << sh;
+		}
+		return out;
+	}
+	uint64_t a_sum = 0, c_sum[3] = {0, 0, 0};
+	for (int i = 0; i < 4; i++)
+	{
+		const uint64_t wa = uint64_t(w[i]) * (p[i] >> 24);
+		a_sum += wa;
+		for (int c = 0; c < 3; c++)
+			c_sum[c] += wa * ((p[i] >> (8 * c)) & 0xff);
+	}
+	if (a_sum == 0)
+		return 0;
+	uint32_t out = uint32_t((a_sum + 32768) >> 16) << 24;
+	for (int c = 0; c < 3; c++)
+		out |= uint32_t((c_sum[c] + a_sum / 2) / a_sum) << (8 * c);
+	return out;
+}
 } // namespace
+
+bool OpeningRatio(ps5video::Aspect aspect, int* rw, int* rh)
+{
+	switch (aspect)
+	{
+		case ps5video::Aspect::Ratio4x3:
+			*rw = 4;
+			*rh = 3;
+			return true;
+		case ps5video::Aspect::PixelPerfect:
+			*rw = 8;
+			*rh = 7;
+			return true;
+		case ps5video::Aspect::Stretch:
+			*rw = 16;
+			*rh = 9;
+			return true;
+		default:
+			return false;
+	}
+}
+
+ps5video::Rect FitOpening(const ps5video::Rect& win, int rw, int rh)
+{
+	const int64_t diff = std::llabs(int64_t(win.w) * rh - int64_t(win.h) * rw); // as the renderer's FitRatio
+	if (diff * 100 <= 3 * int64_t(win.h) * rw)
+		return win;
+	int th = win.h;
+	int tw = int((int64_t(th) * rw + rh / 2) / rh);
+	const int max_w = kWidth - (kWidth - win.w) * kMinMarginPct / 100;
+	if (tw > max_w)
+	{
+		tw = max_w;
+		th = int((int64_t(tw) * rh + rw / 2) / rw);
+	}
+	tw &= ~1; // the renderer keeps the picture's width even
+	if (tw < 2 || th < 1)
+		return win;
+	const int mw = kWidth - win.w, mh = kHeight - win.h; // the margins together keep the proportions they had
+	const int nx = mw > 0 ? int((int64_t(win.x) * (kWidth - tw) + mw / 2) / mw) : (kWidth - tw) / 2;
+	const int ny = mh > 0 ? int((int64_t(win.y) * (kHeight - th) + mh / 2) / mh) : (kHeight - th) / 2;
+	return ps5video::Rect{nx, ny, tw, th};
+}
+
+bool RefitImage(Image* img, const ps5video::Rect& from, const ps5video::Rect& to, std::string* why)
+{
+	if (img->w != kWidth || img->h != kHeight || img->px.size() != size_t(kWidth) * kHeight)
+	{
+		Fail(why, "the picture is not 1920 x 1080");
+		return false;
+	}
+	const int c = std::min({kOpeningCorner, from.w / 4, from.h / 4, to.w / 4, to.h / 4});
+	const int sx[6] = {0, from.x, from.x + c, from.x + from.w - c, from.x + from.w, kWidth};
+	const int dx[6] = {0, to.x, to.x + c, to.x + to.w - c, to.x + to.w, kWidth};
+	const int sy[6] = {0, from.y, from.y + c, from.y + from.h - c, from.y + from.h, kHeight};
+	const int dy[6] = {0, to.y, to.y + c, to.y + to.h - c, to.y + to.h, kHeight};
+	std::vector<Tap> tx, ty;
+	std::vector<uint32_t> out;
+	try
+	{
+		AxisTaps(sx, dx, kWidth, &tx);
+		AxisTaps(sy, dy, kHeight, &ty);
+		out.resize(img->px.size());
+	}
+	catch (const std::bad_alloc&)
+	{
+		Fail(why, "out of memory");
+		return false;
+	}
+	for (int y = 0; y < kHeight; y++)
+	{
+		const Tap& v = ty[size_t(y)];
+		const uint32_t* r0 = &img->px[size_t(v.i0) * kWidth];
+		const uint32_t* r1 = &img->px[size_t(v.i1) * kWidth];
+		uint32_t* o = &out[size_t(y) * kWidth];
+		for (int x = 0; x < kWidth; x++)
+		{
+			const Tap& h = tx[size_t(x)];
+			if (h.f == 0 && v.f == 0)
+			{
+				o[x] = r0[h.i0];
+				continue;
+			}
+			const uint32_t p[4] = {r0[h.i0], r0[h.i1], r1[h.i0], r1[h.i1]};
+			o[x] = Bilerp(p, h.f, v.f);
+		}
+	}
+	img->px.swap(out);
+	return true;
+}
+
+bool FitToAspect(Image* img, ps5video::Rect* window, ps5video::Aspect aspect, std::string* why)
+{
+	int rw = 0, rh = 0;
+	if (!OpeningRatio(aspect, &rw, &rh))
+		return true;
+	const ps5video::Rect to = FitOpening(*window, rw, rh);
+	if (SameRect(to, *window))
+		return true;
+	if (!RefitImage(img, *window, to, why))
+		return false;
+	*window = to;
+	return true;
+}
 
 bool DecodePng(const uint8_t* data, size_t size, Image* out, std::string* why)
 {

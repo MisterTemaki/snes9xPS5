@@ -17,6 +17,10 @@
 //   5. the frame built into the ELF
 // Default frame uses 4 and 5 only; Off sets none.
 //
+// The window follows the Aspect ratio setting: the art is stretched so the window has the picture's shape (4:3, 8:7 for
+// Pixel perfect, 16:9 for Stretch), which is how a bezel drawn for a 4:3 game fits any of them. Integer scale keeps the art
+// as drawn and centres the picture in the window. See FitToAspect in fe_borderimg.h.
+//
 // SPDX-License-Identifier: MIT
 #pragma once
 
@@ -36,8 +40,8 @@ namespace fe::border
 // Picks and loads the border for the game that was just loaded (its ROM path and the CRC the core computed), or clears it
 // when the setting is Off. Calls ps5video::SetBorder. Never throws, never fails the game: a problem is one OrbisLog line.
 void Select(const std::string& rom_path, uint32_t rom_crc);
-// The setting changed while a game is loaded: re-pick for the same game. No-op with no game, and while the setting is the
-// one already applied (every other settings change comes through here too).
+// The Border or Aspect ratio setting changed while a game is loaded: re-pick (and re-fit) for the same game. No-op with no
+// game, and while the settings are the ones already applied (every other settings change comes through here too).
 void Reselect();
 // The game was closed.
 void Release();
@@ -49,6 +53,7 @@ struct Pick
 	std::string source; // "own file", "matched", "default.png", "built-in", "off" (an .ini says so), "" (nothing usable)
 	std::string file; // the picture's file name inside the pack
 };
-// pack: the borders folder; setting: 1 Auto or 2 Default frame (0 is the caller's: no border); game: named as ScanGames does.
-Pick Choose(const std::string& pack, int setting, const GameInfo& game);
+// pack: the borders folder; setting: 1 Auto or 2 Default frame (0 is the caller's: no border); game: named as ScanGames does;
+// aspect: the Aspect ratio setting the window is fitted to (the default, Integer scale, keeps the art as drawn).
+Pick Choose(const std::string& pack, int setting, const GameInfo& game, ps5video::Aspect aspect = ps5video::Aspect::Integer);
 } // namespace fe::border
