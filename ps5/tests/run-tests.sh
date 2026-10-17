@@ -1225,7 +1225,7 @@ bordercase() { # ROM file name: starts the game and quits from the pause menu
 expect "[ -d $B/games ]" "the app creates /data/snes9x/borders/games at boot"
 rc=$(bordercase "Super Mario World.sfc")
 expect "[ $rc = 0 ] && ! grep -q '\[border\]' $T/root/logs/boot.log" "Border Off (the default): the pack is not read, nothing is logged"
-echo "border=1" >>"$T/root/snes9x-ps5.ini"
+printf 'border=1\naspect=2\n' >>"$T/root/snes9x-ps5.ini" # Integer scale: the windows are used as drawn (group 35 f fits them)
 rc=$(bordercase "Super Mario World.sfc")
 expect "[ $rc = 0 ]" "Auto: exit code 0 (got $rc)"
 expect "grep -q '\[border\] Super Mario World -> Super Mario World (USA).png (matched): window 261,21 1398x1038' $T/root/logs/boot.log" "a ROM named loosely finds its game's border through the cover matcher"
@@ -1325,6 +1325,41 @@ rc=$(run "$T" "$pad;$((t + 6)):$RIGHT;$((t + 8)):0;$((t + 16)):$CIRCLE;$((t + 18
 expect "[ $rc = 0 ] && grep -q '^border=1$' $T/root/snes9x-ps5.ini" "the pause menu's Border row sets Auto (border=1, saved)"
 expect "$CHECK $T/dump/flip00050.ppm 100 540 0 0 0 >/dev/null" "before: no border"
 expect "border_around $T/dump/flip$(printf %05d $((t + 60))).ppm" "after Resume the game's border is there, without restarting the game"
+expect "! grep -q 'runtime error\|AddressSanitizer' $T/out.txt" "no sanitizer reports"
+
+# f. the window follows the Aspect ratio setting: the game's border is stretched so its window has the picture's shape, and the
+# picture fills it. The test border is 261,21 1398x1038 (4:3); Stretch (aspect=3) makes it 104,59 1712x963 (16:9: the side margins
+# squeeze to 40%), Pixel perfect (aspect=1) 367,21 1186x1038 (8:7). Blue outside the window, the red picture inside, ten pixels either side.
+border_fits() { # dump x0 y0 x1 y1 (the window, x1 and y1 just past its end)
+	local f=$1 x0=$2 y0=$3 x1=$4 y1=$5
+	$CHECK "$f" $((x0 - 10)) 540 0 0 255 >/dev/null && $CHECK "$f" $((x0 + 10)) 540 255 0 0 >/dev/null \
+		&& $CHECK "$f" $((x1 - 10)) 540 255 0 0 >/dev/null && $CHECK "$f" $((x1 + 10)) 540 0 0 255 >/dev/null \
+		&& $CHECK "$f" 960 $((y0 - 10)) 0 0 255 >/dev/null && $CHECK "$f" 960 $((y0 + 10)) 255 0 0 >/dev/null \
+		&& $CHECK "$f" 960 $((y1 - 10)) 255 0 0 >/dev/null && $CHECK "$f" 960 $((y1 + 10)) 0 0 255 >/dev/null
+}
+for mode in "3 104 59 1816 1022 16:9" "1 367 21 1553 1059 8:7"; do
+	set -- $mode
+	T=$(newroot t35f$1)
+	python3 tests/make_test_rom.py "$T/root/roms/test.sfc" ntsc >/dev/null
+	mkborder "$T/root/borders/games/test.png"
+	printf 'border=1\naspect=%s\n' "$1" >>"$T/root/snes9x-ps5.ini"
+	rc=$(run "$T" "0:0;$(QUITAT 120)" "90" "$T/root/roms/test.sfc")
+	expect "[ $rc = 0 ] && border_fits $T/dump/flip00090.ppm $2 $3 $4 $5" "aspect=$1: the border's window is $6 ($2,$3 to $4,$5) and the picture fills it"
+	expect "grep -q '\[border\] test -> test.png (own file): window $2,$3 $(($4 - $2))x$(($5 - $3))' $T/root/logs/boot.log" "aspect=$1: boot.log names the fitted window"
+	expect "! grep -q 'runtime error\|AddressSanitizer' $T/out.txt" "no sanitizer reports"
+done
+# g. the pause menu's Aspect ratio row (Down seven times) changes it while the game runs: 4:3 -> 8:7 (Right, one flip: picking the border
+# takes longer than the key repeat's delay on the host, which would step again), the border follows at once
+T=$(newroot t35g)
+python3 tests/make_test_rom.py "$T/root/roms/test.sfc" ntsc >/dev/null
+mkborder "$T/root/borders/games/test.png"
+echo "border=1" >>"$T/root/snes9x-ps5.ini"
+pad="0:0;60:$L3R3;65:0"; t=80
+for i in 1 2 3 4 5 6 7; do pad="$pad;$t:$DOWN;$((t + 2)):0"; t=$((t + 6)); done
+rc=$(run "$T" "$pad;$((t + 6)):$RIGHT;$((t + 7)):0;$((t + 16)):$CIRCLE;$((t + 18)):0;$(QUITAT $((t + 70)))" "50,$((t + 60))" "$T/root/roms/test.sfc")
+expect "[ $rc = 0 ] && grep -q '^aspect=1$' $T/root/snes9x-ps5.ini" "the pause menu's Aspect ratio row sets 8:7 (aspect=1, saved)"
+expect "border_around $T/dump/flip00050.ppm" "before: the 4:3 window"
+expect "border_fits $T/dump/flip$(printf %05d $((t + 60))).ppm 367 21 1553 1059" "after Resume the border's window is 8:7 and the picture fills it, without restarting the game"
 expect "! grep -q 'runtime error\|AddressSanitizer' $T/out.txt" "no sanitizer reports"
 
 echo "== 36. border downloads: Auto asks the helper for the game's border, it lands in borders/games and goes up while the game runs; Settings, Download all borders queues the library"

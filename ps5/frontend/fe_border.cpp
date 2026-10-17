@@ -170,8 +170,10 @@ std::vector<PackFile> ListPack(const std::string& games_dir)
 }
 
 // ---- one picture ----
-// From the bytes of a PNG to a border; null (one log line) when it cannot be used. label: what the log calls the file.
-std::shared_ptr<const ps5video::Border> Build(const std::string& label, const uint8_t* data, size_t size, const Ini& ini)
+// From the bytes of a PNG to a border; null (one log line) when it cannot be used. label: what the log calls the file. The art
+// is stretched so its window has the shape of `aspect` (FitToAspect); Integer scale leaves it as drawn.
+std::shared_ptr<const ps5video::Border> Build(const std::string& label, const uint8_t* data, size_t size, const Ini& ini,
+	ps5video::Aspect aspect)
 {
 	Image img;
 	std::string why;
@@ -188,13 +190,16 @@ std::shared_ptr<const ps5video::Border> Build(const std::string& label, const ui
 		OrbisLog("[border] %s: %s", label.c_str(), why.c_str());
 		return nullptr;
 	}
+	if (!FitToAspect(&img, &window, aspect, &why))
+		OrbisLog("[border] %s: not fitted to %s, drawn as it is: %s", label.c_str(), ps5video::AspectName(aspect), why.c_str());
 	auto border = BuildBorder(img, window, &why);
 	if (!border)
 		OrbisLog("[border] %s: %s", label.c_str(), why.c_str());
 	return border;
 }
 
-std::shared_ptr<const ps5video::Border> LoadFile(const std::string& label, const std::string& path, const Ini& ini)
+std::shared_ptr<const ps5video::Border> LoadFile(const std::string& label, const std::string& path, const Ini& ini,
+	ps5video::Aspect aspect)
 {
 	std::vector<uint8_t> bytes;
 	std::string why;
@@ -203,11 +208,11 @@ std::shared_ptr<const ps5video::Border> LoadFile(const std::string& label, const
 		OrbisLog("[border] %s: %s", label.c_str(), why.c_str());
 		return nullptr;
 	}
-	return Build(label, bytes.data(), bytes.size(), ini);
+	return Build(label, bytes.data(), bytes.size(), ini, aspect);
 }
 } // namespace
 
-Pick Choose(const std::string& pack, int setting, const GameInfo& game)
+Pick Choose(const std::string& pack, int setting, const GameInfo& game, ps5video::Aspect aspect)
 {
 	Pick pick;
 	const std::string games_dir = pack + "/games";
@@ -228,7 +233,7 @@ Pick Choose(const std::string& pack, int setting, const GameInfo& game)
 				pick.file = f.file;
 				return true;
 			}
-			pick.border = LoadFile("games/" + f.file, games_dir + "/" + f.file, ini);
+			pick.border = LoadFile("games/" + f.file, games_dir + "/" + f.file, ini, aspect);
 			if (!pick.border)
 				return false;
 			pick.source = how;
@@ -263,7 +268,7 @@ Pick Choose(const std::string& pack, int setting, const GameInfo& game)
 	}
 	if (IsFile(pack + "/default.png"))
 	{
-		pick.border = LoadFile("default.png", pack + "/default.png", ReadIni(pack + "/default.ini"));
+		pick.border = LoadFile("default.png", pack + "/default.png", ReadIni(pack + "/default.ini"), aspect);
 		if (pick.border)
 		{
 			pick.source = "default.png";
@@ -271,7 +276,7 @@ Pick Choose(const std::string& pack, int setting, const GameInfo& game)
 			return pick;
 		}
 	}
-	pick.border = Build("the built-in frame", s9x_border_default_begin, size_t(s9x_border_default_end - s9x_border_default_begin), Ini());
+	pick.border = Build("the built-in frame", s9x_border_default_begin, size_t(s9x_border_default_end - s9x_border_default_begin), Ini(), aspect);
 	if (pick.border)
 	{
 		pick.source = "built-in";
@@ -289,6 +294,7 @@ struct Current
 	std::string rom_path;
 	uint32_t crc = 0;
 	int setting = 0; // the setting the border on screen was picked for
+	int aspect = 0; // and the aspect ratio it was fitted to (ps5video::Aspect)
 	bool shown = false; // SetBorder has been given a border (s_lock)
 } s_cur;
 
@@ -334,7 +340,7 @@ void StopWatch()
 
 // The helper is downloading `file` into the pack for the game that was just loaded: waits for it (a stat twice a second, on
 // this thread), loads it and puts it up in place of the frame the game started with. Never on the emulation thread.
-void Watch(uint64_t gen, std::string pack, std::string file, std::string game_name)
+void Watch(uint64_t gen, std::string pack, std::string file, std::string game_name, ps5video::Aspect aspect)
 {
 	try
 	{
@@ -360,7 +366,7 @@ void Watch(uint64_t gen, std::string pack, std::string file, std::string game_na
 		const Ini ini = ReadIni(pack + "/games/" + stem + ".ini");
 		if (ini.off)
 			return;
-		auto border = LoadFile("games/" + file, path, ini);
+		auto border = LoadFile("games/" + file, path, ini, aspect);
 		if (!border)
 			return;
 		const long ms = long(std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - t0).count());
@@ -382,7 +388,7 @@ void Watch(uint64_t gen, std::string pack, std::string file, std::string game_na
 
 // Auto, and the game has only the default or the built-in frame: asks the helper for The Bezel Project's border (borders/
 // priority.txt, fe_borderfetch.h) and starts watching for it.
-void RequestDownload(const std::string& pack, const GameInfo& game)
+void RequestDownload(const std::string& pack, const GameInfo& game, ps5video::Aspect aspect)
 {
 	WantedCover want;
 	if (!BorderWanted(pack, game, &want))
@@ -394,13 +400,15 @@ void RequestDownload(const std::string& pack, const GameInfo& game)
 		std::lock_guard<std::mutex> lock(s_lock);
 		gen = s_gen;
 	}
-	s_watch = ps5::BigThread([gen, pack, file = want.file, name = game.file_base] { Watch(gen, pack, file, name); }, 1024 * 1024);
+	s_watch = ps5::BigThread([gen, pack, file = want.file, name = game.file_base, aspect] { Watch(gen, pack, file, name, aspect); }, 1024 * 1024);
 }
 
 void Apply()
 {
 	StopWatch();
 	s_cur.setting = Config().border;
+	s_cur.aspect = Config().aspect;
+	const ps5video::Aspect aspect = ps5video::Aspect(s_cur.aspect);
 	if (s_cur.setting <= 0)
 	{
 		Show(nullptr);
@@ -411,13 +419,13 @@ void Apply()
 		const auto t0 = std::chrono::steady_clock::now();
 		const GameInfo game = DescribeGame(s_cur.rom_path, s_cur.crc);
 		const std::string pack = OrbisDir("borders");
-		Pick pick = Choose(pack, s_cur.setting, game);
+		Pick pick = Choose(pack, s_cur.setting, game, aspect);
 		const long ms = long(std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - t0).count());
 		if (pick.border)
 		{
 			const ps5video::Rect& w = pick.border->window;
-			OrbisLog("[border] %s -> %s (%s): window %d,%d %dx%d, rim %zu pixels, %ld ms", game.file_base.c_str(), pick.file.c_str(),
-				pick.source.c_str(), w.x, w.y, w.w, w.h, pick.border->rim.size(), ms);
+			OrbisLog("[border] %s -> %s (%s): window %d,%d %dx%d, rim %zu pixels, %ld ms, aspect ratio %s", game.file_base.c_str(),
+				pick.file.c_str(), pick.source.c_str(), w.x, w.y, w.w, w.h, pick.border->rim.size(), ms, ps5video::AspectName(aspect));
 		}
 		else if (pick.source == "off")
 			OrbisLog("[border] %s: none, an .ini says off=1", game.file_base.c_str());
@@ -426,7 +434,7 @@ void Apply()
 		const bool no_own = pick.source != "own file" && pick.source != "matched" && pick.source != "bezel name" && pick.source != "off";
 		Show(std::move(pick.border));
 		if (s_cur.setting == 1 && no_own && Config().border_download)
-			RequestDownload(pack, game);
+			RequestDownload(pack, game, aspect);
 	}
 	catch (const std::exception& e)
 	{
@@ -451,7 +459,8 @@ void Select(const std::string& rom_path, uint32_t rom_crc)
 
 void Reselect()
 {
-	if (!s_cur.game || Config().border == s_cur.setting)
+	// the aspect ratio counts too: the window is stretched to its shape (an Off border has nothing to fit)
+	if (!s_cur.game || (Config().border == s_cur.setting && (s_cur.setting <= 0 || Config().aspect == s_cur.aspect)))
 		return;
 	Apply();
 }

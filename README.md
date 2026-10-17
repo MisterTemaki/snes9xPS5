@@ -510,8 +510,16 @@ The picture sits in a window of the art (a rounded glass, for the built-in one).
 | **Default frame** | `borders/default.png` if you put one there, else the built-in frame, for every game. |
 
 It is saved as `border=0`, `1` or `2` in `snes9x-ps5.ini`. Changing it in the pause menu applies when you resume. The
-Aspect ratio setting works inside the window. The border is Off until you have seen it on your console: how it looks
-at 1080p and 720p and what it costs a frame with the shaders have only been tested on the Linux host, not on a PS5.
+border is Off until you have seen it on your console: how it looks at 1080p and 720p and what it costs a frame with the
+shaders have only been tested on the Linux host, not on a PS5.
+
+**The window follows Aspect ratio.** Borders are drawn for a 4:3 picture, so the app stretches the art until its window has
+the shape you picked, and the picture fills it: **4:3** as drawn; **8:7 (pixel perfect)** a narrower window, the side art
+stretched wider; **Stretch 16:9** a wider window, the side art squeezed to 40% at most and the top and bottom art stretched
+taller (the picture is about 1712x963 instead of 1920x1080, the frame stays). The corners of the window stay as drawn.
+**Integer scale** leaves the art as it is and centres a whole-multiple picture in the window, so black shows around it.
+A window that already has the shape (within 3%) is not touched. It changes at once when you change Aspect ratio in
+the pause menu.
 
 **Your own borders.** Put PNG files in `/data/snes9x/borders` (over FTP, like the covers):
 
