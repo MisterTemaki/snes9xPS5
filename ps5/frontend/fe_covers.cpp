@@ -4,6 +4,7 @@
 #include "fe_covers.h"
 #include "fe_titlematch.h"
 #include "fe_artaliases.h"
+#include "fe_artmatch.h"
 
 #include "fe_coverworker.h"
 #include "fe_text.h"
@@ -107,12 +108,29 @@ std::string MatchArtName(const std::vector<std::string>& names, const GameInfo& 
     auto exact = std::find(names.begin(), names.end(), requested);
     if (exact != names.end()) return *exact; // preserve revisions and git symlinks
     const titles::Index& index = titles::IndexOf(names); // names: one of the built-in art lists
-    std::string result = titles::Best(index, requested);
+    const artmatch::Index& words = artmatch::IndexOf(names);
+    // What the ROM's CRC is called in the extra table (a fan translation, a hack): the database knows this very file.
+    std::string result;
+    if (!game.crc_name.empty())
+        result = artmatch::Resolve(words, game.crc_name);
+    // Close in spelling, unless the numbers disagree ("Dragon Quest III" is not "Dragon Quest I & II").
+    if (result.empty())
+    {
+        result = titles::Best(index, requested);
+        if (artmatch::NumbersConflict(requested, result)) result.clear();
+    }
     if (result.empty())
     {
         const std::string cleaned = artaliases::TrimFrontendSuffix(game.file_base);
         result = titles::Best(index, cleaned);
+        if (artmatch::NumbersConflict(cleaned, result)) result.clear();
     }
+    // A renamed or fan-translated ROM: the same words as an art name ("Super Robot Wars 4 (English)" is
+    // "Dai-4-ji Super Robot Taisen (Japan)"), then the title inside the ROM itself (fe_artmatch.h).
+    if (result.empty())
+        result = artmatch::Resolve(words, requested);
+    if (result.empty() && !game.header_title.empty())
+        result = artmatch::ResolveHeader(words, game.header_title, game.header_japan);
     return result;
 }
 std::string MatchFallbackArt(const std::vector<std::string>& names, const GameInfo& game)
@@ -122,7 +140,7 @@ std::string MatchFallbackArt(const std::vector<std::string>& names, const GameIn
     static std::mutex match_mutex;
     static std::unordered_map<std::string, std::string> cache;
     // The lookup cache is shared safely by the cover thread and the menu.
-    const std::string key = (&names == &TitleArtNames() ? "T:" : "S:") + requested + "|" + game.file_base;
+    const std::string key = (&names == &TitleArtNames() ? "T:" : "S:") + requested + "|" + game.file_base + "|" + game.crc_name + "|" + game.header_title;
     {
         std::lock_guard<std::mutex> lock(match_mutex);
         auto it = cache.find(key);
@@ -404,7 +422,7 @@ std::string CoverNameFor(const GameInfo& game)
 {
     const std::string requested = artaliases::DistinctBootleg(game.file_base) || game.nointro.empty()
         ? game.file_base : game.nointro;
-    const std::string cache_key = requested + "|" + game.file_base;
+    const std::string cache_key = requested + "|" + game.file_base + "|" + game.crc_name + "|" + game.header_title;
     static std::mutex mutex;
     static std::unordered_map<std::string,std::string> cache;
     {
