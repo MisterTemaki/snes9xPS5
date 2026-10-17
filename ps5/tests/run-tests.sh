@@ -501,10 +501,10 @@ expect "$CHECK $T/dump/flip00090.ppm 960 540 255 0 0 >/dev/null" "the game runs"
 expect "[ \"\$(cat $T/root/logs/boot.log)\" = 'OLD RUN' ] && [ ! -e $T/root/logs/boot.prev.log ]" "the earlier boot.log is kept as it was, nothing new written"
 expect "! grep -q '^\[snes9x-ps5' $T/out.txt" "nothing on stdout either"
 expect "! grep -q 'runtime error\|AddressSanitizer' $T/out.txt" "no sanitizer reports"
-# Settings (Triangle) -> Debug logs (Up five times from Shader: Back, Repair missing covers, Controller shortcuts, Updates, Debug logs) -> Off
+# Settings (Triangle) -> Debug logs (Up six times from Shader: Back, Repair missing covers, Controller shortcuts, Network shares, Updates, Debug logs) -> Off
 T=$(newroot t18b)
 python3 tests/make_test_rom.py "$T/root/roms/test.sfc" ntsc >/dev/null
-rc=$(run "$T" "0:0;30:$TRIANGLE;32:0;50:$UP;52:0;60:$UP;62:0;70:$UP;72:0;80:$UP;82:0;90:$UP;92:0;100:$CROSS;102:0;120:$CIRCLE;122:0;$(SHELFQUIT_AT 150)" "")
+rc=$(run "$T" "0:0;30:$TRIANGLE;32:0;50:$UP;52:0;60:$UP;62:0;70:$UP;72:0;80:$UP;82:0;90:$UP;92:0;100:$UP;102:0;110:$CROSS;112:0;130:$CIRCLE;132:0;$(SHELFQUIT_AT 160)" "")
 expect "[ $rc = 0 ]" "exit code 0 (got $rc)"
 expect "grep -q '^debug_logs=0' $T/root/snes9x-ps5.ini" "Debug logs Off saved"
 expect "tail -1 $T/root/logs/boot.log | grep -q 'debug logs turned off'" "the last line of boot.log says the logs were turned off"
@@ -512,7 +512,7 @@ expect "tail -1 $T/root/logs/boot.log | grep -q 'debug logs turned off'" "the la
 T=$(newroot t18c)
 python3 tests/make_test_rom.py "$T/root/roms/test.sfc" ntsc >/dev/null
 echo "debug_logs=0" >>"$T/root/snes9x-ps5.ini"
-rc=$(run "$T" "0:0;30:$TRIANGLE;32:0;50:$UP;52:0;60:$UP;62:0;70:$UP;72:0;80:$UP;82:0;90:$UP;92:0;100:$CROSS;102:0;120:$CIRCLE;122:0;$(SHELFQUIT_AT 150)" "")
+rc=$(run "$T" "0:0;30:$TRIANGLE;32:0;50:$UP;52:0;60:$UP;62:0;70:$UP;72:0;80:$UP;82:0;90:$UP;92:0;100:$UP;102:0;110:$CROSS;112:0;130:$CIRCLE;132:0;$(SHELFQUIT_AT 160)" "")
 expect "grep -q '^debug_logs=1' $T/root/snes9x-ps5.ini" "Debug logs On saved"
 expect "head -1 $T/root/logs/boot.log | grep -q 'debug logs turned on'" "boot.log starts at the switch (nothing from before it)"
 expect "! grep -q 'runtime error\|AddressSanitizer' $T/out.txt" "no sanitizer reports"
@@ -890,7 +890,7 @@ expect "waitfor22 $T/inst2.txt 'a newer version is installed'" "an older payload
 expect "grep -q 'eboot v9.9' $T/homebrew/PPSA99922/eboot.bin && grep -q 'new art' $T/appmeta/PPSA99922/icon0.png" "and leaves the update (and its art) as they are"
 expect "$UPD check 9.9 --until uptodate,available,failed | grep -q '^uptodate|9.9|'" "the app says which version it is: an older helper finds it up to date"
 stop22
-# the app: at start the daily check (the helper finds 9.9); Settings (Triangle), Up four times to "Updates" (Back, Repair missing covers, Controller shortcuts) (it shows
+# the app: at start the daily check (the helper finds 9.9); Settings (Triangle), Up five times to "Updates" (Back, Repair missing covers, Controller shortcuts, Network shares) (it shows
 # "Install 9.9"), Cross: the helper installs it
 T2=$(newroot t22b)
 (cd "$SRV" && exec python3 -m http.server $SPORT --bind 127.0.0.1 >/dev/null 2>&1) &
@@ -898,7 +898,7 @@ SNES9X_UPDATE_API=http://127.0.0.1:$SPORT/latest.json SNES9X_PS5_ROOT=$T2/root S
 	ASAN_OPTIONS=detect_leaks=0 timeout 120 "$INSTALLER" >"$T2/inst.txt" 2>&1 &
 waitfor22 $T2/root/logs/installer.log 'listening on 127.0.0.1'
 python3 tests/make_test_rom.py "$T2/root/roms/test.sfc" ntsc >/dev/null
-rc=$(SNES9X_HOST_REALTIME=1 SNES9X_PS5_APPMETA=$T2/appmeta run "$T2" "0:0;30:$TRIANGLE;32:0;40:$UP;42:0;46:$UP;48:0;52:$UP;54:0;58:$UP;60:0;66:$CROSS;68:0;150:$CIRCLE;152:0;170:$OPTIONS;172:0;180:$CROSS;182:0" "64,140")
+rc=$(SNES9X_HOST_REALTIME=1 SNES9X_PS5_APPMETA=$T2/appmeta run "$T2" "0:0;30:$TRIANGLE;32:0;40:$UP;42:0;46:$UP;48:0;52:$UP;54:0;58:$UP;60:0;64:$UP;66:0;72:$CROSS;74:0;150:$CIRCLE;152:0;170:$OPTIONS;172:0;180:$CROSS;182:0" "70,140")
 expect "grep -q 'daily check asked of the helper' $T2/root/logs/boot.log && [ -f $T2/root/update-check.txt ]" "at start: the daily check asked of the helper"
 expect "grep -q 'update install' $T2/root/logs/installer.log && grep -q 'eboot v9.9' $T2/homebrew/PPSA99922/eboot.bin" "Cross on \"Install 9.9\": the helper installs it"
 expect "grep -q 'is available: Settings, Updates' $T2/inst.txt $T2/root/logs/installer.log" "the daily check found 9.9: a notification says so"
@@ -995,6 +995,100 @@ expect "grep -q 'dkc.sfc -> \"Donkey Kong Country (USA) (Rev 2)\" (by CRC)' $T/r
 expect "grep -q '/smb/10.0.0.5/games/dkc.sfc' $T/root/covers/crc-cache.txt" "and the CRC is kept for the next start"
 expect "[ -f '$T/root/covers/Donkey Kong Country (USA) (Rev 2).png' ]" "the cover of the game that came late was downloaded"
 expect "$CHECK $T/dump/flip00400.ppm 960 420 0 255 0 >/dev/null" "the shelf shows that cover (green)"
+expect "! grep -q 'runtime error\|AddressSanitizer' $T/out.txt" "no sanitizer reports"
+
+echo "== 31. the Network shares screen: add, change, test and remove a share with the on-screen keyboard (Settings, Network shares)"
+# tests/osk_pad.py turns the steps into a pad script (the keyboard's layout is its model). Settings is Triangle on the shelf; Up four times from
+# Shader reaches Network shares (Back, Repair missing covers, Controller shortcuts, Network shares). Every run ends: Circle twice, OPTIONS, Cross.
+net_pad() { python3 tests/osk_pad.py 2>/dev/null; }
+net_quit='press CIRCLE 2
+press OPTIONS
+wait 8
+press CROSS'
+# a. a new share: server, share, folder with a space, user, a password that needs Shift and both kinds of symbols
+T=$(newroot t31)
+mkdir -p "$T/share"
+PAD=$(net_pad <<STEPS
+frame 40
+press TRIANGLE
+press UP 4
+press CROSS
+press CROSS
+field 10.0.0.5
+press DOWN
+field games
+press DOWN
+field Super Nintendo
+press DOWN
+field jason
+press DOWN
+field Zq9@pw&1
+press DOWN 6
+press CROSS
+wait 20
+$net_quit
+STEPS
+)
+rc=$(SNES9X_HOST_NETFS_DIR="$T/share" run "$T" "$PAD" "")
+expect "[ $rc = 0 ]" "exit code 0 (got $rc)"
+expect "[ \"\$(tail -n 1 $T/root/shares.txt)\" = 'smb://jason@10.0.0.5/games/Super%20Nintendo?password=Zq9%40pw%261' ]" "the share is written as one escaped line"
+expect "grep -q '^# Snes9x PS5 network shares' $T/root/shares.txt" "after the comments the app wrote"
+expect "grep -q '\[net\] shares.txt: saved smb://jason@10.0.0.5/games/Super%20Nintendo' $T/root/logs/boot.log" "the log says what was saved"
+expect "grep -q '\[net\] Connected to smb://jason@10.0.0.5/games/Super%20Nintendo' $T/root/logs/boot.log" "and the share connects at once, without a restart"
+expect "! grep -rqE 'Zq9|pw%26' $T/root/logs $T/out.txt" "the password is in no log and not on stdout"
+expect "! grep -q 'runtime error\|AddressSanitizer' $T/out.txt" "no sanitizer reports"
+# b. change one share (its note stays), test the connection, remove the other
+T=$(newroot t31b)
+mkdir -p "$T/share/Sub" && echo x >"$T/share/a.sfc"
+printf '# my shares\nsmb://old/x   # my note\nnfs://nas/export/snes\n' >"$T/root/shares.txt"
+PAD=$(net_pad <<STEPS
+frame 40
+press TRIANGLE
+press UP 4
+press CROSS
+press CROSS
+press DOWN 3
+field bob
+press DOWN 6
+press CROSS
+wait 120
+press DOWN
+press CROSS
+wait 20
+press DOWN
+press CROSS
+press DOWN 7
+press CROSS
+wait 8
+press UP
+press CROSS
+wait 20
+$net_quit
+STEPS
+)
+rc=$(SNES9X_HOST_REALTIME=1 SNES9X_HOST_NETFS_DIR="$T/share" run "$T" "$PAD" "")
+expect "[ $rc = 0 ]" "exit code 0 (got $rc)"
+expect "[ \"\$(cat $T/root/shares.txt)\" = \"\$(printf '# my shares\nsmb://bob@old/x   # my note')\" ]" "one line changed (note kept), the other was removed, the comment stays"
+expect "grep -q '\[net\] test of smb://bob@old/x: Connected. The folder has 1 file and 1 folder.' $T/root/logs/boot.log" "Test connection reports what is in the folder"
+expect "grep -q '\[net\] shares.txt: removed nfs://nas/export/snes' $T/root/logs/boot.log" "the removal is logged"
+expect "! grep -q 'runtime error\|AddressSanitizer' $T/out.txt" "no sanitizer reports"
+# c. Save with nothing filled in changes nothing
+T=$(newroot t31c)
+PAD=$(net_pad <<STEPS
+frame 40
+press TRIANGLE
+press UP 4
+press CROSS
+press CROSS
+press DOWN 10
+press CROSS
+wait 8
+press CIRCLE
+$net_quit
+STEPS
+)
+rc=$(run "$T" "$PAD" "")
+expect "[ $rc = 0 ] && ! grep -q '^smb://\|^nfs://' $T/root/shares.txt" "an empty form is not saved (and Circle on a form with no changes leaves it at once)"
 expect "! grep -q 'runtime error\|AddressSanitizer' $T/out.txt" "no sanitizer reports"
 
 echo

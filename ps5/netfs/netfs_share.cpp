@@ -404,11 +404,12 @@ bool netfs_parse_share(const std::string& address, ShareConfig& out, std::string
 	return true;
 }
 
-NetfsShareFile netfs_parse_shares(const std::string& text)
+std::vector<NetfsShareLine> netfs_scan_shares(const std::string& text)
 {
-	NetfsShareFile f;
+	std::vector<NetfsShareLine> out;
 	std::vector<std::string> mounts;
 	std::vector<int> mount_line;
+	int used = 0;
 	size_t pos = 0;
 	if (text.compare(0, 3, "\xEF\xBB\xBF") == 0)
 		pos = 3;
@@ -425,32 +426,42 @@ NetfsShareFile netfs_parse_shares(const std::string& text)
 		size_t b = line.find_last_not_of(" \t\r");
 		line = line.substr(a, b - a + 1);
 
-		std::string prefix = "shares.txt line " + std::to_string(line_no) + ": ";
-		ShareConfig cfg;
-		std::string err;
-		if (!netfs_parse_share(line, cfg, err))
+		NetfsShareLine l;
+		l.line = line_no;
+		l.ok = netfs_parse_share(line, l.cfg, l.error);
+		if (l.ok)
 		{
-			f.notices.push_back(prefix + err);
-			continue;
-		}
-		std::string mp = netfs_mount_point(cfg);
-		bool dup = false;
-		for (size_t i = 0; i < mounts.size(); i++)
-			if (mounts[i] == mp)
+			std::string mp = netfs_mount_point(l.cfg);
+			for (size_t i = 0; i < mounts.size(); i++)
+				if (mounts[i] == mp)
+					l.ignored = "same folder as line " + std::to_string(mount_line[i]) + ", ignored";
+			if (l.ignored.empty() && used >= kNetfsMaxShares)
+				l.ignored = "only " + std::to_string(kNetfsMaxShares) + " shares are used, this one is ignored";
+			if (l.ignored.empty())
 			{
-				f.notices.push_back(prefix + "same folder as line " + std::to_string(mount_line[i]) + ", ignored");
-				dup = true;
+				l.used = true;
+				used++;
+				mounts.push_back(mp);
+				mount_line.push_back(line_no);
 			}
-		if (dup)
-			continue;
-		if ((int)f.shares.size() >= kNetfsMaxShares)
-		{
-			f.notices.push_back(prefix + "only " + std::to_string(kNetfsMaxShares) + " shares are used, this one is ignored");
-			continue;
 		}
-		mounts.push_back(mp);
-		mount_line.push_back(line_no);
-		f.shares.push_back(cfg);
+		out.push_back(std::move(l));
+	}
+	return out;
+}
+
+NetfsShareFile netfs_parse_shares(const std::string& text)
+{
+	NetfsShareFile f;
+	for (const NetfsShareLine& l : netfs_scan_shares(text))
+	{
+		std::string prefix = "shares.txt line " + std::to_string(l.line) + ": ";
+		if (!l.ok)
+			f.notices.push_back(prefix + l.error);
+		else if (!l.used)
+			f.notices.push_back(prefix + l.ignored);
+		else
+			f.shares.push_back(l.cfg);
 	}
 	return f;
 }
@@ -571,7 +582,7 @@ std::string netfs_error_text(const Status& st, const ShareConfig& c)
 		t = host + " only speaks SMB1, which is not supported. Turn on SMB 2 or 3 on the server.";
 		break;
 	case ErrKind::SigningRequired:
-		t = host + " requires signing. Add ?sign to the address.";
+		t = host + " requires signing. Turn on Signing for this share (?sign in shares.txt).";
 		break;
 	case ErrKind::NotBuilt:
 		t = st.text.empty() ? "This protocol is not built into this release." : st.text + ".";
@@ -584,4 +595,269 @@ std::string netfs_error_text(const Status& st, const ShareConfig& c)
 		break;
 	}
 	return Scrub(t, c.password);
+}
+
+// ---- writing shares.txt ----
+
+namespace
+{
+// Everything but letters, digits and - . _ ~ as %XX (UTF-8 bytes), for a name that goes into an address.
+std::string PctEncodeName(const std::string& s)
+{
+	static const char* hex = "0123456789ABCDEF";
+	std::string out;
+	for (unsigned char c : s)
+	{
+		if (isalnum(c) || c == '-' || c == '.' || c == '_' || c == '~')
+			out.push_back((char)c);
+		else
+		{
+			out.push_back('%');
+			out.push_back(hex[c >> 4]);
+			out.push_back(hex[c & 15]);
+		}
+	}
+	return out;
+}
+
+std::string EncodePath(const std::string& path)
+{
+	std::string out;
+	size_t i = 0;
+	while (i <= path.size())
+	{
+		size_t e = path.find('/', i);
+		if (e == std::string::npos)
+			e = path.size();
+		if (e > i)
+			out += (out.empty() ? "" : "/") + PctEncodeName(path.substr(i, e - i));
+		i = e + 1;
+	}
+	return out;
+}
+} // namespace
+
+std::string netfs_format_share(const ShareConfig& c)
+{
+	bool smb = c.scheme == Scheme::Smb;
+	std::string s = smb ? "smb://" : "nfs://";
+	if (smb && (!c.user.empty() || !c.domain.empty()))
+	{
+		if (!c.domain.empty())
+			s += PctEncodeName(c.domain) + ";";
+		s += PctEncodeName(c.user) + "@";
+	}
+	s += HostPort(c) + "/";
+	s += EncodePath(smb ? c.share + (c.path.empty() ? "" : "/" + c.path) : c.path);
+	std::string opts;
+	auto add = [&](const std::string& o) { opts += (opts.empty() ? "?" : "&") + o; };
+	if (smb)
+	{
+		if (!c.password.empty())
+			add("password=" + PctEncodeName(c.password));
+		if (!c.vers.empty())
+			add("vers=" + c.vers);
+		if (c.sign)
+			add("sign");
+		if (c.seal)
+			add("seal");
+	}
+	else
+	{
+		if (c.nfs_version != 3)
+			add("version=" + std::to_string(c.nfs_version));
+		if (c.nfsport)
+			add("nfsport=" + std::to_string(c.nfsport));
+		if (c.mountport)
+			add("mountport=" + std::to_string(c.mountport));
+		if (c.uid >= 0)
+			add("uid=" + std::to_string(c.uid));
+		if (c.gid >= 0)
+			add("gid=" + std::to_string(c.gid));
+	}
+	return s + opts;
+}
+
+NetfsShareFields netfs_fields_from_config(const ShareConfig& c)
+{
+	NetfsShareFields f;
+	f.scheme = c.scheme;
+	f.server = HostPort(c);
+	f.share = c.share;
+	f.folder = c.path;
+	f.user = c.user;
+	f.domain = c.domain;
+	f.password = c.password;
+	f.vers = c.vers;
+	f.sign = c.sign;
+	f.seal = c.seal;
+	f.nfs_version = c.nfs_version;
+	if (c.uid >= 0)
+		f.uid = std::to_string(c.uid);
+	if (c.gid >= 0)
+		f.gid = std::to_string(c.gid);
+	f.nfsport = c.nfsport;
+	f.mountport = c.mountport;
+	return f;
+}
+
+namespace
+{
+std::string Trim(const std::string& s)
+{
+	size_t a = s.find_first_not_of(" \t");
+	if (a == std::string::npos)
+		return std::string();
+	return s.substr(a, s.find_last_not_of(" \t") - a + 1);
+}
+
+// Typed folder text: SMB takes either kind of slash between folders (Windows habit).
+std::string TypedPath(const std::string& typed, bool smb)
+{
+	std::string t = Trim(typed);
+	if (smb)
+		for (char& ch : t)
+			if (ch == '\\')
+				ch = '/';
+	return t;
+}
+} // namespace
+
+bool netfs_config_from_fields(const NetfsShareFields& f, ShareConfig& out, std::string& error)
+{
+	bool smb = f.scheme == Scheme::Smb;
+
+	// the server: the one field whose text goes into the address unescaped, so it may not smuggle a delimiter in
+	std::string server = Trim(f.server);
+	if (server.empty())
+		return Fail(error, "Enter the server's IP address, like 192.168.1.50.");
+	for (unsigned char ch : server)
+		if (!isalnum(ch) && ch != '.' && ch != '-' && ch != '_' && ch != ':' && ch != '[' && ch != ']')
+			return Fail(error, "The server is an IP address or a name, like 192.168.1.50, with no slashes or spaces.");
+
+	std::string path;
+	if (smb)
+	{
+		std::string share = TypedPath(f.share, true);
+		while (!share.empty() && share[0] == '/')
+			share.erase(0, 1);
+		if (share.empty())
+			return Fail(error, "Enter the share's name, as the server calls it.");
+		std::string folder = TypedPath(f.folder, true);
+		path = share + (folder.empty() ? "" : "/" + folder);
+	}
+	else
+	{
+		path = TypedPath(f.folder, false);
+		if (path.find_first_not_of("/") == std::string::npos)
+			return Fail(error, "Enter the export path, like /export/snes.");
+	}
+
+	std::string address = smb ? "smb://" : "nfs://";
+	std::string user = Trim(f.user), domain = Trim(f.domain);
+	if (smb && (!user.empty() || !domain.empty()))
+		address += (domain.empty() ? "" : PctEncodeName(domain) + ";") + PctEncodeName(user) + "@";
+	address += server + "/" + EncodePath(path);
+	std::string opts;
+	auto add = [&](const std::string& o) { opts += (opts.empty() ? "?" : "&") + o; };
+	if (smb)
+	{
+		if (!f.password.empty())
+			add("password=" + PctEncodeName(f.password));
+		if (!f.vers.empty())
+			add("vers=" + f.vers);
+		if (f.sign)
+			add("sign");
+		if (f.seal)
+			add("seal");
+	}
+	else
+	{
+		if (f.nfs_version != 3)
+			add("version=" + std::to_string(f.nfs_version));
+		if (f.nfsport)
+			add("nfsport=" + std::to_string(f.nfsport));
+		if (f.mountport)
+			add("mountport=" + std::to_string(f.mountport));
+		std::string uid = Trim(f.uid), gid = Trim(f.gid);
+		if (!uid.empty())
+			add("uid=" + PctEncodeName(uid));
+		if (!gid.empty())
+			add("gid=" + PctEncodeName(gid));
+	}
+
+	std::string why;
+	ShareConfig parsed;
+	if (!netfs_parse_share(address + opts, parsed, why))
+	{
+		// The reason is plain words without any part of the address (netfs_parse_share's rule), so it is safe to show.
+		error = why;
+		if (!error.empty())
+			error[0] = (char)toupper((unsigned char)error[0]);
+		error += ".";
+		return false;
+	}
+	out = parsed;
+	return true;
+}
+
+namespace
+{
+// The byte range [start, end) of line `line` (end is before its '\n'); false when there is no such line.
+bool LineRange(const std::string& text, int line, size_t& start, size_t& end)
+{
+	size_t pos = 0;
+	if (text.compare(0, 3, "\xEF\xBB\xBF") == 0)
+		pos = 3;
+	for (int n = 1; pos <= text.size(); n++)
+	{
+		size_t e = text.find('\n', pos);
+		if (e == std::string::npos)
+			e = text.size();
+		if (n == line)
+		{
+			start = pos;
+			end = e;
+			return true;
+		}
+		pos = e + 1;
+	}
+	return false;
+}
+
+bool IsAddressLine(const std::string& text, size_t start, size_t end)
+{
+	size_t a = text.find_first_not_of(" \t\r", start);
+	return a != std::string::npos && a < end && text[a] != '#';
+}
+} // namespace
+
+bool netfs_shares_text_set(std::string& text, int line, const std::string& address)
+{
+	if (line <= 0)
+	{
+		std::string eol = text.find("\r\n") != std::string::npos ? "\r\n" : "\n";
+		if (!text.empty() && text.back() != '\n')
+			text += eol;
+		text += address + eol;
+		return true;
+	}
+	size_t start = 0, end = 0;
+	if (!LineRange(text, line, start, end) || !IsAddressLine(text, start, end))
+		return false;
+	size_t a = text.find_first_not_of(" \t\r", start);
+	size_t tok_end = text.find_first_of(" \t\r", a);
+	if (tok_end == std::string::npos || tok_end > end)
+		tok_end = end;
+	text.replace(a, tok_end - a, address);
+	return true;
+}
+
+bool netfs_shares_text_remove(std::string& text, int line)
+{
+	size_t start = 0, end = 0;
+	if (line <= 0 || !LineRange(text, line, start, end) || !IsAddressLine(text, start, end))
+		return false;
+	text.erase(start, (end < text.size() ? end + 1 : end) - start);
+	return true;
 }

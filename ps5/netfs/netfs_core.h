@@ -78,6 +78,13 @@ struct Route
 bool Resolve(const char* path, Route& out);
 
 int64_t NowMs();
+
+// For netfs_edit.cpp: the backend factory in use (netfs_set_backend_factory), the shares file netfs_load was
+// given ("" before that), and whole-file read and write (the write goes through <path>.part).
+std::unique_ptr<Backend> MakeBackendFor(Scheme scheme);
+std::string SharesFilePath();
+bool ReadWholeFile(const std::string& path, std::string& out, int& err);
+bool WriteFileAtomic(const std::string& path, const std::string& text);
 void SetLastError(const std::string& text);
 // One line for the frontend's log (netfs_set_log); a no-op when none is set. Never has a password in it.
 void Log(const std::string& line);

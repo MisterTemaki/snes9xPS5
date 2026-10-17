@@ -718,6 +718,267 @@ static void TestLoad()
 }
 
 
+// ---------------------------------------------------------------- the Network screen's side: writing shares.txt
+
+static std::string Slurp(const std::string& path);
+
+static bool SameCfg(const ShareConfig& a, const ShareConfig& b)
+{
+	return a.scheme == b.scheme && a.host == b.host && a.port == b.port && a.share == b.share && a.path == b.path &&
+		   a.user == b.user && a.domain == b.domain && a.password == b.password && a.vers == b.vers && a.sign == b.sign &&
+		   a.seal == b.seal && a.nfs_version == b.nfs_version && a.nfsport == b.nfsport && a.mountport == b.mountport &&
+		   a.uid == b.uid && a.gid == b.gid;
+}
+
+static ShareConfig Parse(const std::string& address)
+{
+	ShareConfig c;
+	std::string err;
+	if (!netfs_parse_share(address, c, err))
+		printf("  (could not parse a test address: %s)\n", err.c_str());
+	return c;
+}
+
+static void TestFormat()
+{
+	const char* odd[] = {"p@ss&word=1", "100%", "a b", "#hash;semi/slash?q", "caf\xC3\xA9 \xE2\x82\xAC", "~._-", "0", "\\back\\"};
+	bool all = true, none_leaks = true;
+	for (const char* pw : odd)
+	{
+		ShareConfig c = Parse("smb://WORKGROUP;jason@192.168.1.50:4455/games/Super%20Nintendo/RPG?vers=3.1.1&sign&seal");
+		c.user = std::string("us@r ") + pw;
+		c.password = std::string("Zq7x") + pw; // the prefix keeps a one-character password from matching the host's digits
+		std::string line = netfs_format_share(c);
+		ShareConfig back;
+		std::string err;
+		all = all && netfs_parse_share(line, back, err) && SameCfg(back, c);
+		none_leaks = none_leaks && !Has(netfs_redact(c), PctAll(c.password)) && !Has(netfs_redact(c), c.password);
+	}
+	CHECK(all, "an address written by netfs_format_share reads back to the same share, whatever the password holds");
+	CHECK(none_leaks, "and netfs_redact still never shows a password");
+
+	ShareConfig c = Parse("smb://jason@nas/games");
+	c.password = "p@ss&word=1";
+	CHECK(netfs_format_share(c) == "smb://jason@nas/games?password=p%40ss%26word%3D1", "the password is escaped as the spec's example");
+	c = Parse("smb://nas/games/snes");
+	CHECK(netfs_format_share(c) == "smb://nas/games/snes", "a guest share needs no options");
+	c = Parse("nfs://nas/export/snes?version=4&uid=1000&gid=100&nfsport=3049&mountport=3050");
+	CHECK(netfs_format_share(c) == "nfs://nas/export/snes?version=4&nfsport=3049&mountport=3050&uid=1000&gid=100" && SameCfg(Parse(netfs_format_share(c)), c),
+		"NFS options are kept");
+	c = Parse("smb://[::1]:445/s");
+	CHECK(SameCfg(Parse(netfs_format_share(c)), c), "an IPv6 host");
+}
+
+static void TestFields()
+{
+	NetfsShareFields f;
+	f.server = " 192.168.1.50 ";
+	f.share = "games";
+	f.folder = "snes";
+	f.user = "jason";
+	f.password = "p@ss&word=1 ";
+	ShareConfig c;
+	std::string err;
+	CHECK(netfs_config_from_fields(f, c, err) && c.host == "192.168.1.50" && c.share == "games" && c.path == "snes" && c.user == "jason" &&
+			  c.password == "p@ss&word=1 ",
+		"fields become a share; the password is kept exactly, a space at its end too");
+
+	f.share = "\\games\\Super Nintendo";
+	f.folder = "RPG/Chrono";
+	CHECK(netfs_config_from_fields(f, c, err) && c.share == "games" && c.path == "Super Nintendo/RPG/Chrono", "an SMB path may use \\ or /; the first part is the share");
+
+	NetfsShareFields n = netfs_fields_from_config(c);
+	ShareConfig again;
+	CHECK(netfs_config_from_fields(n, again, err) && SameCfg(again, c), "a config round trips through the fields");
+
+	f.server = "nas/games";
+	CHECK(!netfs_config_from_fields(f, c, err) && Has(err, "IP address") && !Has(err, "p@ss"), "a / in the server is refused with a sentence");
+	f.server = "nas";
+	f.share = "";
+	CHECK(!netfs_config_from_fields(f, c, err) && Has(err, "share"), "a missing share name");
+	f.share = "games";
+	f.server = "";
+	CHECK(!netfs_config_from_fields(f, c, err) && Has(err, "server"), "a missing server");
+	f.server = "nas:99999";
+	CHECK(!netfs_config_from_fields(f, c, err) && Has(err, "port") && !Has(err, "p@ss"), "a bad port says so, without the password");
+
+	NetfsShareFields nf;
+	nf.scheme = Scheme::Nfs;
+	nf.server = "10.0.0.2";
+	nf.folder = "/volume1/snes/";
+	nf.nfs_version = 4;
+	nf.uid = "1000";
+	CHECK(netfs_config_from_fields(nf, c, err) && c.scheme == Scheme::Nfs && c.path == "volume1/snes" && c.nfs_version == 4 && c.uid == 1000 && c.gid == -1,
+		"an NFS share");
+	nf.uid = "root";
+	CHECK(!netfs_config_from_fields(nf, c, err), "a user ID that is not a number is refused");
+	nf.uid = "";
+	nf.folder = "/";
+	CHECK(!netfs_config_from_fields(nf, c, err) && Has(err, "export"), "NFS needs an export path");
+}
+
+static void TestTextEdit()
+{
+	std::string t = "\xEF\xBB\xBF# my shares\r\n\r\n  smb://a/b   # the NAS\r\n#smb://old/x\r\nsmb://c/d";
+	std::vector<NetfsShareLine> l = netfs_scan_shares(t);
+	CHECK(l.size() == 2 && l[0].line == 3 && l[1].line == 5 && l[0].used && l[1].used, "the scan numbers lines as the notices do (BOM, CRLF, comments)");
+
+	std::string e = t;
+	CHECK(netfs_shares_text_set(e, 3, "smb://new/b") && e == "\xEF\xBB\xBF# my shares\r\n\r\n  smb://new/b   # the NAS\r\n#smb://old/x\r\nsmb://c/d",
+		"a replaced line keeps its indent, its note and its line ending");
+	e = t;
+	CHECK(netfs_shares_text_remove(e, 5) && e == "\xEF\xBB\xBF# my shares\r\n\r\n  smb://a/b   # the NAS\r\n#smb://old/x\r\n", "the last line goes, no newline needed");
+	e = t;
+	CHECK(netfs_shares_text_remove(e, 3) && e == "\xEF\xBB\xBF# my shares\r\n\r\n#smb://old/x\r\nsmb://c/d", "a middle line goes with its line ending");
+	e = t;
+	CHECK(netfs_shares_text_set(e, 0, "smb://e/f") && e == t + "\r\nsmb://e/f\r\n", "an appended line adds the missing newline and matches CRLF");
+	CHECK(!netfs_shares_text_set(e, 1, "smb://x/y") && !netfs_shares_text_set(e, 2, "smb://x/y") && !netfs_shares_text_remove(e, 4) &&
+			  !netfs_shares_text_remove(e, 99),
+		"a comment, a blank line or a line past the end is not an address line");
+	e = "";
+	CHECK(netfs_shares_text_set(e, 0, "smb://e/f") && e == "smb://e/f\n", "into an empty file");
+
+	std::string dup = "smb://a/b\nsmb://a/b\n";
+	l = netfs_scan_shares(dup);
+	CHECK(l.size() == 2 && l[0].used && !l[1].used && Has(l[1].ignored, "line 1"), "a second line for the same folder is ignored");
+	CHECK(netfs_parse_shares(dup).notices.size() == 1 && netfs_parse_shares(dup).notices[0] == "shares.txt line 2: same folder as line 1, ignored",
+		"and the notice reads as before");
+}
+
+static std::string WriteTemp(const std::string& path, const std::string& text)
+{
+	if (FILE* f = fopen(path.c_str(), "wb"))
+	{
+		fwrite(text.data(), 1, text.size(), f);
+		fclose(f);
+	}
+	return path;
+}
+
+static void TestFileEdit()
+{
+	char dir[] = "/tmp/netfs-edit-XXXXXX";
+	if (!mkdtemp(dir))
+		return;
+	std::string path = std::string(dir) + "/shares.txt";
+	Rig rig(""); // fake servers for the reload
+	CHECK(netfs_load(path) == 0, "a new file");
+	NetfsFileView v = netfs_file_shares();
+	CHECK(v.error.empty() && v.shares.empty(), "the template holds no share");
+
+	ShareConfig a = Parse("smb://jason@192.168.1.50/games/snes?password=p%40ss%26word%3D1");
+	CHECK(netfs_file_save_share(0, "", a).empty(), "a new share is added");
+	std::string text = Slurp(path);
+	CHECK(Has(text, netfs_shares_template()) && Has(text, "\nsmb://jason@192.168.1.50/games/snes?password=p%40ss%26word%3D1\n"),
+		"as one line after the template's comments, the password escaped");
+	CHECK(access((path + ".part").c_str(), F_OK) == -1, "no .part left");
+	v = netfs_file_shares();
+	CHECK(v.shares.size() == 1 && SameCfg(v.shares[0].cfg, a) && v.shares[0].used, "it is listed with its password for the form");
+
+	ShareConfig b = Parse("nfs://nas/export/snes");
+	CHECK(netfs_file_save_share(0, "", b).empty() && netfs_file_shares().shares.size() == 2, "a second share");
+	CHECK(Has(netfs_file_save_share(0, "", b), "already uses"), "the same folder twice is refused");
+
+	// edit the first
+	v = netfs_file_shares();
+	ShareConfig a2 = a;
+	a2.path = "snes/RPG";
+	CHECK(netfs_file_save_share(v.shares[0].line, v.shares[0].mount_point, a2).empty(), "a share is edited");
+	std::string edited = Slurp(path);
+	CHECK(!Has(edited, "\nsmb://jason@192.168.1.50/games/snes?password") && Has(edited, "games/snes/RPG?password=p%40ss%26word%3D1") && Has(edited, "nfs://nas/export/snes\n") &&
+			  Has(edited, "# Snes9x PS5 network shares"),
+		"only its line changed; the comments and the other share are as they were");
+
+	// the file is changed behind the screen's back (FTP): stale lines are refused
+	std::string old_mp = v.shares[0].mount_point;
+	WriteTemp(path, "# edited\nsmb://other/x\n" + edited);
+	CHECK(Has(netfs_file_save_share(v.shares[0].line, old_mp, a2), "changed") && Slurp(path) == "# edited\nsmb://other/x\n" + edited,
+		"a line that moved is not overwritten");
+	CHECK(Has(netfs_file_remove_share(v.shares[0].line, old_mp), "changed"), "nor removed");
+	WriteTemp(path, edited);
+
+	// the limit
+	std::string many;
+	for (int i = 0; i < kNetfsMaxShares; i++)
+		many += "smb://h" + std::to_string(i) + "/s\n";
+	WriteTemp(path, many);
+	CHECK(Has(netfs_file_save_share(0, "", Parse("smb://extra/s")), "Up to 8"), "a ninth share is refused");
+	v = netfs_file_shares();
+	CHECK(v.shares.size() == 8 && netfs_file_save_share(v.shares[3].line, v.shares[3].mount_point, Parse("smb://moved/s")).empty(), "editing one of eight is fine");
+	v = netfs_file_shares();
+	CHECK(netfs_file_remove_share(v.shares[0].line, v.shares[0].mount_point).empty() && netfs_file_shares().shares.size() == 7, "a share is removed");
+	CHECK(netfs_file_save_share(0, "", Parse("smb://extra/s")).empty(), "and there is room again");
+
+	// a line that does not parse is left alone and counted
+	WriteTemp(path, "smb://ok/s\nthis is not an address\n");
+	v = netfs_file_shares();
+	CHECK(v.shares.size() == 1 && v.invalid == 1, "a bad line is not a share");
+	CHECK(netfs_file_save_share(0, "", Parse("smb://two/s")).empty() && Slurp(path) == "smb://ok/s\nthis is not an address\nsmb://two/s\n", "and stays where it is");
+
+	// reload
+	CHECK(netfs_reload() == 2, "netfs_reload loads the file again");
+	netfs_stop();
+	unlink(path.c_str());
+	rmdir(dir);
+}
+
+static void TestConnectionTest()
+{
+	std::atomic<int64_t> now{5000};
+	Rig rig("");
+	netfs_set_clock([&] { return now.load(); });
+	FakeServer& s = *rig.srv[0];
+	s.Put("a.sfc", "x");
+	s.Put("b.sfc", "y");
+	s.Put("Sub/c.sfc", "z");
+	ShareConfig c = Parse("smb://u@h/s?password=SECRETPW");
+
+	{
+		NetfsConnectionTest t(c);
+		while (!t.Poll())
+			std::this_thread::yield();
+		CHECK(t.Result().ok && t.Result().text == "Connected. The folder has 2 files and 1 folder.", "a good share says what is in its folder");
+	}
+	s.connect_status = Status::Kind(ErrKind::AccessDenied, "NT_STATUS_LOGON_FAILURE SECRETPW");
+	{
+		NetfsConnectionTest t(c);
+		while (!t.Poll())
+			std::this_thread::yield();
+		CHECK(!t.Result().ok && Has(t.Result().text, "denied") && !Has(t.Result().text, "SECRETPW"), "a wrong password says so, without the password");
+	}
+	s.connect_status = Status::Kind(ErrKind::ShareNotFound);
+	s.offered = {"games", "isos"};
+	{
+		NetfsConnectionTest t(c);
+		while (!t.Poll())
+			std::this_thread::yield();
+		CHECK(!t.Result().ok && Has(t.Result().text, "games, isos"), "a wrong share name lists the shares there");
+	}
+	s.connect_status = Status();
+
+	// a server that never answers: the deadline aborts it
+	s.hang = true;
+	{
+		NetfsConnectionTest t(c);
+		s.WaitParked(1);
+		CHECK(!t.Poll(), "still waiting before the limit");
+		now += kNetfsConnectLimitMs;
+		CHECK(!t.Poll(), "the limit itself is still allowed");
+		now += 1;
+		while (!t.Poll())
+			std::this_thread::yield();
+		CHECK(!t.Result().ok && Has(t.Result().text, "did not answer"), "after the limit: the server did not answer");
+	}
+	// leaving the screen while a test hangs releases it
+	{
+		NetfsConnectionTest t(c);
+		s.WaitParked(1);
+		t.Cancel();
+	}
+	CHECK(true, "a test that is cancelled or destroyed while stuck returns");
+	s.hang = false;
+}
+
 // ---------------------------------------------------------------- cache
 
 static std::string Msu1Track(size_t bytes, uint32_t loop_samples, uint32_t seed)
@@ -1009,6 +1270,11 @@ int main()
 	TestWatchdog();
 	TestThreads();
 	TestLoad();
+	TestFormat();
+	TestFields();
+	TestTextEdit();
+	TestFileEdit();
+	TestConnectionTest();
 	TestCacheListings();
 	TestNfsNamesExact();
 	TestLostConnection();
