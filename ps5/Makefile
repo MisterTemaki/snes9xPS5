@@ -431,6 +431,19 @@ test-tabs: $(TABS_TEST)
 
 test: test-nfs test-tabs
 
+# the border in the renderer (ProsperoVideo.cpp): picture rectangle in a window, backdrop restore, rim blend; runs against the host's stub video output
+BORDER_RENDER_TEST := $(HOST_OUT)/border-render-test
+$(BORDER_RENDER_TEST): tests/test_border_render.cpp coreorbis/orbis-shims/ProsperoVideo.h \
+	$(addprefix $(HOST_OUT)/port/,coreorbis/orbis-shims/ProsperoVideo.o coreorbis/orbis-shims/ProsperoCrt.o coreorbis/orbis-shims/ProsperoCrash.o coreorbis/orbis-shims/orbis_paths.o host/sce_host.o)
+	@mkdir -p $(dir $@)
+	$(HOST_CXX) -std=c++17 $(HOST_OPT) $(HOST_SAN) $(PORT_WARN) $(INCS) -o $@ $(filter-out %.h,$^) -lpthread
+
+test-border-render: $(BORDER_RENDER_TEST)
+	$(BORDER_RENDER_TEST)
+
+test: test-border-render
+.PHONY: test-border-render
+
 clean:
 	rm -rf build
 
