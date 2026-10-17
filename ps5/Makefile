@@ -43,7 +43,7 @@ CORE_C_SRC := unzip/unzip.c unzip/ioapi.c
 # in by the backend work: backend_smb.cpp / backend_nfs.cpp replace the stubs (which fail with "not built in").
 NETFS_CORE_SRC :=
 NETFS_SMB_SRC := netfs/backend_smb_stub.cpp
-NETFS_NFS_SRC := netfs/backend_nfs_stub.cpp
+NETFS_NFS_SRC := netfs/backend_nfs.cpp
 NETFS_SRC := $(NETFS_CORE_SRC) $(NETFS_SMB_SRC) $(NETFS_NFS_SRC)
 # libsmb2 and libnfs (LGPL-2.1) are vendored into these folders, with their notices. While a folder is absent
 # its list is empty and nothing is built. The flags are a start: the backend work tunes them (PS4_PLATFORM,
@@ -53,7 +53,8 @@ LIBNFS := third_party/libnfs
 LIBSMB2_SRC := $(sort $(wildcard $(LIBSMB2)/lib/*.c))
 LIBNFS_SRC := $(sort $(foreach d,lib mount nfs nfs4 portmap nlm nsm rquota,$(wildcard $(LIBNFS)/$(d)/*.c)))
 LIBSMB2_FLAGS := -I$(LIBSMB2)/include -I$(LIBSMB2)/include/smb2 -I$(LIBSMB2)/lib
-LIBNFS_FLAGS := -I$(LIBNFS)/include -I$(LIBNFS)/include/nfsc -I$(LIBNFS)
+LIBNFS_FLAGS := -DHAVE_CONFIG_H -I$(LIBNFS) -I$(LIBNFS)/include -I$(LIBNFS)/include/nfsc \
+	$(addprefix -I$(LIBNFS)/,mount nfs nfs4 nlm nsm portmap rquota)
 %/port/netfs/backend_smb.o: EXTRA_FLAGS = $(LIBSMB2_FLAGS)
 %/port/netfs/backend_nfs.o: EXTRA_FLAGS = $(LIBNFS_FLAGS)
 
@@ -364,8 +365,28 @@ $(HOST_OUT)/snes9x-ps5-host: $(HOST_CORE_OBJ) $(HOST_EMU_OBJ) $(HOST_ZLIB_OBJ) $
 test: host
 	bash tests/run-tests.sh
 
+# NFS backend unit test: backend_nfs.cpp against an in-memory libnfs (tests/libnfs_mock.cpp), no network
+NFS_TEST := $(HOST_OUT)/nfs-backend-test
+$(NFS_TEST): tests/nfs_backend_test.cpp tests/libnfs_mock.cpp tests/libnfs_mock.h netfs/backend_nfs.cpp netfs/backend_nfs.h netfs/netfs_backend.h
+	@mkdir -p $(dir $@)
+	$(HOST_CXX) -std=c++17 $(HOST_OPT) $(HOST_SAN) $(PORT_WARN) $(LIBNFS_FLAGS) -Inetfs -Itests -o $@ \
+		tests/nfs_backend_test.cpp tests/libnfs_mock.cpp netfs/backend_nfs.cpp -lpthread
+
+# the same backend on real libnfs (the objects of the host build), against loopback sockets that misbehave
+NFS_LOOP_TEST := $(HOST_OUT)/nfs-loopback-test
+$(NFS_LOOP_TEST): tests/nfs_loopback_test.cpp netfs/backend_nfs.cpp netfs/backend_nfs.h netfs/netfs_backend.h $(HOST_LIBNFS_OBJ)
+	@mkdir -p $(dir $@)
+	$(HOST_CXX) -std=c++17 $(HOST_OPT) $(HOST_SAN) $(PORT_WARN) $(LIBNFS_FLAGS) -Inetfs -o $@ \
+		tests/nfs_loopback_test.cpp netfs/backend_nfs.cpp $(HOST_LIBNFS_OBJ) -lpthread
+
+test-nfs: $(NFS_TEST) $(NFS_LOOP_TEST)
+	ASAN_OPTIONS=detect_leaks=1 $(NFS_TEST)
+	ASAN_OPTIONS=detect_leaks=1 $(NFS_LOOP_TEST)
+
+test: test-nfs
+
 clean:
 	rm -rf build
 
-.PHONY: ps5 host test send strip app dist clean
+.PHONY: ps5 host test test-nfs send strip app dist clean
 .SECONDARY:
