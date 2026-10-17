@@ -213,11 +213,12 @@ bool EditText(const std::string& title, std::string& text, bool secret, size_t m
 			row = to;
 			col = best;
 		};
-		const int row_len = row == kFnRow ? int(FnCount) : int(strlen(page[row]));
 		if (n.up)
 			move_row((row + kFnRow) % (kFnRow + 1));
 		if (n.down)
 			move_row((row + 1) % (kFnRow + 1));
+		// after the vertical move: Down+Right in one poll must wrap within the row it landed on
+		const int row_len = row == kFnRow ? int(FnCount) : int(strlen(page[row]));
 		if (n.left)
 			col = (col + row_len - 1) % row_len;
 		if (n.right)
