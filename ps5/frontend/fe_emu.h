@@ -18,7 +18,10 @@ int CheatCount();
 std::string RomBase();
 std::string RomNoIntro();
 std::string CheatStatus(); // Which file was found, or why codes could not be loaded.
-bool ReloadDownloadedCheats();
+// Reads the cheat file again when it changed on disk and puts its cheats in the running game; true when the list
+// changed. now: at once (the cheat menu just opened); otherwise at most once a second, and a file that is still being
+// copied waits for the next look. Called by the cheat menu; RunFrame does the same for a game being played.
+bool RefreshCheats(bool now);
 std::string CheatName(int index);
 bool CheatEnabled(int index);
 bool ToggleCheat(int index);

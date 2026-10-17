@@ -85,6 +85,29 @@ uint32_t MakeId(int player, int btn)
 	return uint32_t(((player + 1) << 4) | btn);
 }
 
+// A file as it was when looked at: path, size and time, to tell whether someone has changed it since. size -1: not there.
+struct FileStamp
+{
+	std::string path;
+	long long size = -1;
+	long long mtime = 0;
+	bool operator==(const FileStamp& o) const { return path == o.path && size == o.size && mtime == o.mtime; }
+	bool operator!=(const FileStamp& o) const { return !(*this == o); }
+};
+
+FileStamp StampOf(const std::string& path)
+{
+	FileStamp s;
+	s.path = path;
+	struct stat st = {};
+	if (stat(path.c_str(), &st) == 0 && S_ISREG(st.st_mode))
+	{
+		s.size = st.st_size;
+		s.mtime = st.st_mtime;
+	}
+	return s;
+}
+
 struct State
 {
 	bool core_ok = false;
@@ -99,6 +122,9 @@ struct State
 	// did it (Cross, Circle, L3 + R3) are let go: Resume with Cross must not press B in the game.
 	bool wait_release = true;
 	std::string cheat_status = "No cheat file checked";
+	// The file the cheats in the game came from (or were last saved to) as it was then, and a different state of it
+	// seen once: reloaded when the next look finds it unchanged, so a file that is still being copied is left alone.
+	FileStamp cheat_file, cheat_seen;
 	std::vector<int16_t> mix;
 	// last frame, for the pause menu
 	std::vector<uint16_t> last;
@@ -295,6 +321,8 @@ std::string FindManualCheatFile()
 }
 bool ImportCheatsFromFile(const std::string& path)
 {
+    g.cheat_file = StampOf(path); // before the read: a change made while it runs is seen by the next look
+    g.cheat_seen = FileStamp();
     std::ifstream in(path, std::ios::binary);
     if (!in)
     {
@@ -346,6 +374,60 @@ bool LoadManualCheatsForRom()
         return false;
     }
     return ImportCheatsFromFile(file);
+}
+
+// Puts the cheats of src in the game in place of the ones it runs. A file with no cheat Snes9x can use (half a copy, a
+// file that was emptied) changes nothing: the cheats that run stay.
+bool ReplaceCheatsFromFile(const std::string& src)
+{
+    struct Kept
+    {
+        std::string name, code;
+        bool enabled;
+    };
+    std::vector<Kept> kept;
+    for (const SCheatGroup& group : Cheat.group)
+        kept.push_back({group.name, S9xCheatGroupToText(group), group.enabled != 0});
+    S9xDeleteCheats(); // gives the game back the bytes the cheats had changed
+    if (ImportCheatsFromFile(src))
+        return true;
+    for (const Kept& k : kept)
+    {
+        const int group = S9xAddCheatGroup(k.name, k.code);
+        if (group >= 0 && k.enabled) S9xEnableCheatGroup(uint32(group));
+    }
+    return false;
+}
+
+// A cheat file changed on disk (a code added over FTP) replaces the cheats in the game, no restart needed. The disk is
+// the truth: every toggle is saved at once, so only a toggle that could not be written is lost. True: the cheats
+// were replaced. immediate: reload at the first look that sees a change (the cheat menu was just opened, a toggle is
+// about to be saved); otherwise the file must look the same on two looks. search: look through the cheats folder for
+// a file when <rom>.cht does not exist (a directory scan, for the menu only).
+bool SyncCheatsFromFile(bool immediate, bool search = false)
+{
+    if (!g.loaded) return false;
+    std::string src = CheatPathForRom(); // what a toggle writes, so it wins once it exists
+    if (!OrbisIsFile(src)) src = search ? FindManualCheatFile() : g.cheat_file.path;
+    const FileStamp now = StampOf(src);
+    if (now == g.cheat_file)
+    {
+        g.cheat_seen = FileStamp();
+        return false;
+    }
+    if (now.size <= 0) return false; // gone or empty: the cheats that run stay
+    if (!immediate && now != g.cheat_seen)
+    {
+        g.cheat_seen = now;
+        return false;
+    }
+    g.cheat_seen = FileStamp();
+    const bool ok = ReplaceCheatsFromFile(src);
+    if (ok)
+        OrbisLog("[cheats] reloaded: %zu cheat groups from %s", Cheat.group.size(), S9xBasename(src).c_str());
+    else
+        OrbisLog("[cheats] %s has no usable cheat: the %zu that run stay", S9xBasename(src).c_str(), Cheat.group.size());
+    return ok;
 }
 
 std::string StatePath(int slot)
@@ -617,6 +699,7 @@ bool LoadGame(const std::string& path)
 
 	S9xDeleteCheats();
 	S9xCheatsEnable();
+	g.cheat_file = g.cheat_seen = FileStamp();
 	// Manual .cht files are matched by ROM and official titles. No downloads.
 	LoadManualCheatsForRom();
 
@@ -670,16 +753,16 @@ std::string CheatStatus()
 {
 	return g.cheat_status;
 }
-bool ReloadDownloadedCheats()
+bool RefreshCheats(bool now)
 {
-	if (!g.loaded || !Cheat.group.empty()) return false; // never replace user's current cheat selections
-	// CheatMenu is redrawn at 60 Hz; scanning a 2,773-file library
-	// every frame would stall input and waste CPU.
-	static double next_attempt = 0;
-	const double now = Now();
-	if (now < next_attempt) return false;
-	next_attempt = now + 1.0;
-	return LoadManualCheatsForRom();
+	// The cheat menu is redrawn at 60 Hz; looking at the files once a second is enough (searching a 2,773-file
+	// library every frame would stall input and waste CPU). The first look comes the moment the menu opens.
+	static double next_look = 0;
+	const double t = Now();
+	if (!g.loaded || (!now && t < next_look)) return false;
+	next_look = t + 1.0;
+	// Without cheats the folder is searched too: a file named after the game's official title may have been added.
+	return SyncCheatsFromFile(now, Cheat.group.empty());
 }
 
 std::string CheatName(int index)
@@ -697,6 +780,8 @@ bool SaveCheats()
 {
 	if (!g.loaded) return false;
 	if (Cheat.group.empty()) return true;
+	// A file changed since it was read is newer than these cheats: it is read instead of overwritten.
+	if (SyncCheatsFromFile(true)) return true;
 	const std::string path = CheatPathForRom();
 	const std::string tmp = path + ".part";
 	if (!S9xSaveCheatFile(tmp) || !CommitPart(tmp, path, 0))
@@ -705,12 +790,15 @@ bool SaveCheats()
 		OrbisLog("[cheats] save failed: %s", path.c_str());
 		return false;
 	}
+	g.cheat_file = StampOf(path); // our own write is not a change
+	g.cheat_seen = FileStamp();
 	OrbisLog("[cheats] saved %zu groups to %s", Cheat.group.size(), path.c_str());
 	return true;
 }
 
 bool ToggleCheat(int index)
 {
+	if (SyncCheatsFromFile(true)) return true; // the file was changed: the list is new, so nothing is toggled
 	if (!g.loaded || index < 0 || index >= CheatCount()) return false;
 	if (Cheat.group[size_t(index)].enabled)
 		S9xDisableCheatGroup(uint32(index));
@@ -722,6 +810,7 @@ bool ToggleCheat(int index)
 void SetAllCheats(bool enabled)
 {
 	if (!g.loaded) return;
+	SyncCheatsFromFile(true); // all of the file's cheats, not of the ones it replaced
 	for (int i = 0; i < CheatCount(); ++i)
 	{
 		if (enabled && !Cheat.group[size_t(i)].enabled) S9xEnableCheatGroup(uint32(i));
@@ -901,6 +990,9 @@ FrameResult RunFrame()
 	IPPU.RenderThisFrame = !g.fast_forward || (g.frame % 4) == 0;
 	S9xMainLoop();
 	g.frame++;
+	// A cheat added to the file while the game runs is picked up within a few seconds: one stat a second, no search.
+	if (g.frame % 60 == 0 && SyncCheatsFromFile(false))
+		Osd("Cheats updated: %d", CheatCount());
 	if (g.frame == 60 || g.frame == 240 || g.frame % 3600 == 0)
 		OrbisLog("[emu] frame %u: audio queued %d, underruns %llu, shader %.1f ms", g.frame, ps5audio::Queued(),
 			(unsigned long long)ps5audio::Underruns(), ps5video::TakeShaderMs());

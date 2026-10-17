@@ -1146,6 +1146,40 @@ expect "grep -q '\[shelf\] network tab: scan again, reconnecting' $T/root/logs/b
 expect "[ \$(grep -c 'The folder games is not on 10.0.0.5' $T/root/logs/boot.log) -ge 2 ]" "and says why each time"
 expect "! grep -q 'runtime error\|AddressSanitizer' $T/out.txt" "no sanitizer reports"
 
+echo "== 33. cheats follow their file: a code added while the game runs is applied at once, with no restart"
+# the game keeps running (paced, SNES9X_HOST_REALTIME) while this script writes <rom>.cht as an FTP upload would: all of
+# it at once. The cheats write to the battery RAM ($70:0000, 1, 2), which the exit saves, so the .srm shows what ran.
+T=$(newroot t33)
+python3 tests/make_test_rom.py "$T/root/roms/save.sfc" sram >/dev/null # writes $42 to $70:0000 at boot
+mkdir -p "$T/root/cheats"
+CHT=$T/root/cheats/save.cht
+putcht() { cat >"$T/new.cht" && mv "$T/new.cht" "$CHT"; }
+waitlog() { for i in $(seq 1 300); do grep -q "$1" "$T/root/logs/boot.log" 2>/dev/null && return 0; sleep 0.1; done; return 1; }
+cht() { printf 'cheat\n  name: %s\n  code: %s\n  enable\n\n' "$1" "$2"; }
+L2R3=104
+( SNES9X_HOST_REALTIME=1 MAXFLIPS=2000 run "$T" "0:0;450:$L2R3;453:0;700:$CIRCLE;703:0;780:$L3R3;785:0;800:$UP;802:0;810:$CROSS;812:0" "" "$T/root/roms/save.sfc" >"$T/rc.txt" ) &
+GAME=$!
+waitlog '\[emu\] frame 60:'
+expect "! grep -q '\[cheats\]' $T/root/logs/boot.log" "the game started with no cheat file"
+cht "Byte 0" "700000=99" | putcht
+waitlog 'reloaded: 1 cheat groups'
+expect "grep -q 'reloaded: 1 cheat groups from save.cht' $T/root/logs/boot.log" "a cheat file that appeared while the game runs was loaded"
+{ cht "Byte 0" "700000=99"; cht "Byte 1" "700001=77"; } | putcht
+waitlog 'reloaded: 2 cheat groups'
+expect "grep -q 'reloaded: 2 cheat groups from save.cht' $T/root/logs/boot.log" "a cheat added to the file was loaded"
+echo "this is not a cheat file" | putcht
+waitlog 'has no usable cheat'
+expect "grep -q 'save.cht has no usable cheat: the 2 that run stay' $T/root/logs/boot.log" "a file with no usable cheat leaves the running cheats alone"
+{ cht "Byte 0" "700000=99"; cht "Byte 1" "700001=77"; cht "Byte 2" "700002=55"; } | putcht
+waitlog 'reloaded: 3 cheat groups'
+expect "grep -q 'reloaded: 3 cheat groups from save.cht' $T/root/logs/boot.log" "and the file written next is loaded too"
+wait $GAME
+rc=$(cat "$T/rc.txt")
+expect "[ $rc = 0 ]" "exit code 0 (got $rc)"
+expect "[ \"\$(head -c3 $T/root/saves/save.srm | od -An -tx1 | tr -d ' ')\" = 997755 ]" "the three cheats ran in the game (battery RAM \$99 \$77 \$55)"
+expect "grep -q 'name: Byte 2' $CHT" "the cheat file still holds all three after the game closed"
+expect "! grep -q 'runtime error\|AddressSanitizer' $T/out.txt" "no sanitizer reports"
+
 echo
 echo "passed $PASS, failed $FAIL  (work dir $WORK)"
 [ $FAIL = 0 ]
