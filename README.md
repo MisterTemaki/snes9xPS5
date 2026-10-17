@@ -458,6 +458,8 @@ Use the server's IP address. Inside a user name, password or folder, write `& = 
 - A share is read-only. Saves, states, cheats, covers and settings stay on the console.
 - A game is read into memory when it starts. MSU-1 music is fetched before the first frame, and a slow or lost
   connection never stalls the picture or the sound: a track that has not arrived is silent, and the game goes on.
+  This covers loose files beside the ROM (`<rom>.msu`, `<rom>-1.pcm`...). An MSU-1 pack (`<rom>.msu1`, a zip) is not
+  fetched ahead and can make the game wait for the network; unpack its tracks beside the ROM.
 - If a share cannot be reached, a notification says why (no answer, wrong password, share not found...) and the
   same sentence is in `/data/snes9x/logs/boot.log` (`[net]`).
 - The SMB and NFS libraries arrive in separate changes. Until a release has one, its shares report that the
