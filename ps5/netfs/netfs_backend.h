@@ -135,8 +135,8 @@ public:
 	// a worker thread, before any other call. `cfg` stays valid until the backend is destroyed.
 	virtual Status Connect(const ShareConfig& cfg) = 0;
 
-	// Closes the connection. Not called concurrently with any other call; the destructor must also be safe
-	// after a failed Connect() or after Abort().
+	// Closes the connection and frees any handle still open. Not called concurrently with any other call; the
+	// destructor must do the same and be safe after a failed Connect() or after Abort().
 	virtual void Disconnect() = 0;
 
 	// Size, type and mtime of one file or folder. "" is the location itself.
@@ -153,7 +153,8 @@ public:
 	// 1 MiB, split it if your protocol's limit is lower.
 	virtual int64_t Pread(Handle h, void* buf, size_t len, uint64_t offset) = 0;
 
-	// Closes a handle from Open(). Never fails.
+	// Closes a handle from Open(). Never fails. Not called once the share is dead (Abort() was called): the
+	// handle is freed by Disconnect() or the destructor.
 	virtual void Close(Handle h) = 0;
 
 	// The watchdog's kill switch. Callable from ANY thread at ANY time, WITHOUT the serialising lock, while
