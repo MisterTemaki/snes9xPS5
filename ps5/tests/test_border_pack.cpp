@@ -71,7 +71,7 @@ struct PackMatcher::Impl
 {
 	std::vector<std::string> names;
 };
-PackMatcher::PackMatcher(const std::vector<std::string>& names) : m_i(new Impl)
+PackMatcher::PackMatcher(const std::vector<std::string>& names, bool) : m_i(new Impl)
 {
 	m_i->names = names;
 }

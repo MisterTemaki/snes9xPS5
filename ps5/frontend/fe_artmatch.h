@@ -506,9 +506,29 @@ inline std::string Pick(const Index& ix, const std::vector<int>& group, const st
     }
     return (*ix.names)[size_t(ix.entries[size_t(best)].pos)];
 }
+// Of the games that tie for the best fit, the one that has a USA release when exactly one does, else -1. A retranslation of
+// a game that came out in the USA ("Breath of Fire II - Retranslation") fits its USA entry and its Japanese one ("Breath of
+// Fire II - Shimei no Ko") alike; the USA one is the answer wanted.
+inline int OnlyUsa(const Index& ix, const std::vector<std::pair<int, double>>& scored, double best_fit)
+{
+    int found = -1;
+    for (const auto& s : scored)
+    {
+        if (best_fit - s.second >= 0.05) continue;
+        const std::string& joined = ix.entries[size_t(s.first)].joined;
+        if (found >= 0 && joined == ix.entries[size_t(found)].joined) continue;
+        bool usa = false;
+        for (int k : ix.by_joined.at(joined)) usa = usa || ix.entries[size_t(k)].p.region == "USA";
+        if (!usa) continue;
+        if (found >= 0) return -1; // two games with a USA release: not told apart
+        found = s.first;
+    }
+    return found;
+}
 // The art name of the game this file name means, or "" when it cannot be told from others.
 // region_hint: the region to prefer when the name carries none.
-inline std::string Resolve(const Index& ix, const std::string& requested, const std::string& region_hint = "")
+// usa_on_tie: when games fit equally well, take the one with a USA release if only one has (OnlyUsa), instead of none.
+inline std::string Resolve(const Index& ix, const std::string& requested, const std::string& region_hint = "", bool usa_on_tie = false)
 {
     Parsed q = Parse(requested);
     if (q.region.empty()) q.region = region_hint;
@@ -544,10 +564,12 @@ inline std::string Resolve(const Index& ix, const std::string& requested, const 
     const std::vector<std::string> head = Tokens(MainOf(q.title));
     int best = -1, whole = -1;
     double best_fit = 0, second_fit = 0, whole_fit = 0, second_whole = 0;
+    std::vector<std::pair<int, double>> scored;
     for (int k : candidates)
     {
         const Entry& e = ix.entries[size_t(k)];
         const double f = Score(ix, words, head, e);
+        scored.emplace_back(k, f);
         if (f > best_fit) { second_fit = best_fit; best_fit = f; best = k; }
         else if (f > second_fit) second_fit = f;
         // what the whole query says, apart from the main-title tiers: a game that explains all of it comes first
@@ -557,7 +579,12 @@ inline std::string Resolve(const Index& ix, const std::string& requested, const 
         else if (w > second_whole) second_whole = w;
     }
     if (whole >= 0 && whole_fit >= 0.85 && whole_fit - second_whole >= 0.05) best = whole;
-    else if (best < 0 || best_fit < 0.85 || best_fit - second_fit < 0.05) return "";
+    else if (best < 0 || best_fit < 0.85) return "";
+    else if (best_fit - second_fit < 0.05)
+    {
+        best = usa_on_tie ? OnlyUsa(ix, scored, best_fit) : -1;
+        if (best < 0) return "";
+    }
     return Pick(ix, ix.by_joined.at(ix.entries[size_t(best)].joined), q.region);
 }
 // The entries of a sorted key list that equal key, and those that only start with it.
@@ -571,7 +598,7 @@ inline void Find(const std::vector<std::pair<std::string, int>>& sorted, const s
 // The art name for a ROM's internal header title ("ZELDANODENSETSU", "FINAL FANTASY 6"): its letters, or its words,
 // equal an art name's; or, for a title cut short (headers hold 21 characters), start exactly one game's; or Resolve
 // finds it by its words. Country byte 0 (Japan) prefers (Japan).
-inline std::string ResolveHeader(const Index& ix, const std::string& header_title, bool japan)
+inline std::string ResolveHeader(const Index& ix, const std::string& header_title, bool japan, bool usa_on_tie = false)
 {
     const std::string letters = RawKey(header_title);
     std::string words;
@@ -594,6 +621,6 @@ inline std::string ResolveHeader(const Index& ix, const std::string& header_titl
         return Pick(ix, ix.by_joined.at(game), japan ? "Japan" : "");
     }
     // a title that leaves words out ("SUPER ROBOT TAISEN4" for "Dai-4-ji Super Robot Taisen"): the words, in any order
-    return Resolve(ix, header_title, japan ? "Japan" : "");
+    return Resolve(ix, header_title, japan ? "Japan" : "", usa_on_tie);
 }
 }} // namespace fe::artmatch

@@ -91,7 +91,7 @@ const std::vector<std::string>& SnapArtNames()
     return names;
 }
 std::string MatchArtName(const std::vector<std::string>& names, const titles::Index& index, const artmatch::Index& words,
-    const GameInfo& game)
+    const GameInfo& game, bool usa_on_tie = false)
 {
     if (artaliases::DistinctBootleg(game.file_base))
     {
@@ -112,7 +112,7 @@ std::string MatchArtName(const std::vector<std::string>& names, const titles::In
     // What the ROM's CRC is called in the extra table (a fan translation, a hack): the database knows this very file.
     std::string result;
     if (!game.crc_name.empty())
-        result = artmatch::Resolve(words, game.crc_name);
+        result = artmatch::Resolve(words, game.crc_name, "", usa_on_tie);
     // Close in spelling, unless the numbers disagree ("Dragon Quest III" is not "Dragon Quest I & II").
     if (result.empty())
     {
@@ -128,9 +128,9 @@ std::string MatchArtName(const std::vector<std::string>& names, const titles::In
     // A renamed or fan-translated ROM: the same words as an art name ("Super Robot Wars 4 (English)" is
     // "Dai-4-ji Super Robot Taisen (Japan)"), then the title inside the ROM itself (fe_artmatch.h).
     if (result.empty())
-        result = artmatch::Resolve(words, requested);
+        result = artmatch::Resolve(words, requested, "", usa_on_tie);
     if (result.empty() && !game.header_title.empty())
-        result = artmatch::ResolveHeader(words, game.header_title, game.header_japan);
+        result = artmatch::ResolveHeader(words, game.header_title, game.header_japan, usa_on_tie);
     return result;
 }
 // names: one of the built-in art lists, which live as long as the program (their indexes are cached by address)
@@ -451,11 +451,13 @@ struct PackMatcher::Impl
     std::vector<std::string> names;
     titles::Index index;
     artmatch::Index words;
+    bool usa_on_tie = false;
 };
 
-PackMatcher::PackMatcher(const std::vector<std::string>& names) : m_i(new Impl)
+PackMatcher::PackMatcher(const std::vector<std::string>& names, bool usa_on_tie) : m_i(new Impl)
 {
     m_i->names = names;
+    m_i->usa_on_tie = usa_on_tie;
     titles::Build(m_i->index, m_i->names);
     artmatch::Build(m_i->words, m_i->names);
 }
@@ -464,7 +466,7 @@ PackMatcher::~PackMatcher() = default;
 
 std::string PackMatcher::Match(const GameInfo& game) const
 {
-    return MatchArtName(m_i->names, m_i->index, m_i->words, game);
+    return MatchArtName(m_i->names, m_i->index, m_i->words, game, m_i->usa_on_tie);
 }
 
 std::string MatchPackName(const std::vector<std::string>& names, const GameInfo& game)
