@@ -213,8 +213,11 @@ author's line with the GitHub mark: **github.com/MisterTemaki** (PS5SX2 shows it
 - the others are tilted on both sides, in perspective, reflected on the floor;
 - the shelf slides when you change games.
 
-- **All your games at once:** the shelf gathers the ROMs in `/data/snes9x/roms` and on USB drives
-  (`snes9x/roms`), subfolders included, sorted by game name.
+- **All your games, in tabs:** the shelf gathers the ROMs in `/data/snes9x/roms` and on USB drives
+  (`snes9x/roms`), subfolders included, sorted by game name. A bar at the top keeps them apart, as PSFlycast's
+  library does: **Internal** (the console's drive), **USB** (only while a game is on a USB drive) and **Network**
+  (games on a share). **L1 / R1** go round the tabs; each tab keeps its place, and the shelf opens on the tab
+  you used last.
 - **Official names:** SNES ROMs have no serial. A game is identified by its file name or, when that doesn't
   match, by the ROM's CRC32, looked up in a No-Intro table of 4268 games built into the app.
   - The CRC is taken without a copier header; for a `.zip`, the CRC stored in the zip is used.
@@ -301,10 +304,11 @@ On the test PC a frame takes about 15 ms on 2 cores.
 | Button | Does |
 |---|---|
 | Left / Right (D-pad or stick) | change game (hold to speed up) |
-| L1 / R1 | skip 10 games |
+| L1 / R1 | next / previous tab (Internal, USB, Network) |
+| L2 / R2 | skip 10 games |
 | Cross | play |
 | Triangle | settings |
-| Square | download this game's cover again (the cover it has stays until the new one has arrived) |
+| Square | download this game's cover again (the cover it has stays until the new one has arrived); on the Network tab: scan the shares again |
 | OPTIONS | quit Snes9x (asks first) |
 
 **In a game** (buttons by position, as on the SNES pad)
@@ -458,7 +462,10 @@ nfs://192.168.1.50/export/snes
 Use the server's IP address. Inside a user name, password or folder, write `& = % # @ ; / ? ` and spaces as `%XX`
 (`p@ss` is `p%40ss`). The password sits in this file in plain text.
 
-- The shelf shows the share's games (badge `NET`) as soon as it has connected; the others do not wait for it.
+- The share's games appear on the **Network** tab as soon as it has connected; the other tabs do not wait for it.
+  While a share is connecting, or cannot be reached, the tab says so (and why, in a sentence), and with no share
+  set up it points to Settings > Network shares. **Square** on the tab scans again: it forgets the folder
+  listings and connects the shares that were down once more.
   Network games are first named from their file names; a background pass then reads each ROM once to name it
   by checksum (the answer is remembered), and a cover for a game that shows up late is fetched when it does.
 - A share is read-only. Saves, states, cheats, covers and settings stay on the console.

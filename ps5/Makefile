@@ -420,7 +420,16 @@ test-nfs: $(NFS_TEST) $(NFS_LOOP_TEST)
 	ASAN_OPTIONS=detect_leaks=1 $(NFS_TEST)
 	ASAN_OPTIONS=detect_leaks=1 $(NFS_LOOP_TEST)
 
-test: test-nfs
+# the shelf's tab rules (frontend/fe_tabs.h): header only, so no app code is linked
+TABS_TEST := $(HOST_OUT)/tabs-test
+$(TABS_TEST): tests/test_tabs.cpp frontend/fe_tabs.h frontend/fe_games.h
+	@mkdir -p $(dir $@)
+	$(HOST_CXX) -std=c++17 $(HOST_OPT) $(HOST_SAN) $(PORT_WARN) -Ifrontend -o $@ tests/test_tabs.cpp
+
+test-tabs: $(TABS_TEST)
+	$(TABS_TEST)
+
+test: test-nfs test-tabs
 
 clean:
 	rm -rf build
@@ -428,5 +437,5 @@ clean:
 # the SMB backend against a real Samba (adds `smb-test`, run before the other tests; skipped without smbd)
 include tests/smb/smb.mk
 
-.PHONY: ps5 host test test-nfs test-nfs-server send strip app dist clean
+.PHONY: ps5 host test test-nfs test-nfs-server test-tabs send strip app dist clean
 .SECONDARY:
