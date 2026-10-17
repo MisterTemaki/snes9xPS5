@@ -53,6 +53,8 @@ void Settings::Load()
 			shader = Clamp(atoi(val), 0, kShaderCount - 1);
 		else if (key == "aspect")
 			aspect = Clamp(atoi(val), 0, 3);
+		else if (key == "border")
+			border = Clamp(atoi(val), 0, 2);
 		else if (key == "scanlines")
 			scanlines = atoi(val) != 0;
 		else if (key == "show_fps")
@@ -105,6 +107,7 @@ void Settings::Save() const
 	fprintf(f, "# Snes9x PS5\n");
 	fprintf(f, "shader=%d\n", shader);
 	fprintf(f, "aspect=%d\n", aspect);
+	fprintf(f, "border=%d\n", border);
 	fprintf(f, "scanlines=%d\n", scanlines ? 1 : 0);
 	fprintf(f, "show_fps=%d\n", show_fps ? 1 : 0);
 	fprintf(f, "audio=%d\n", audio ? 1 : 0);

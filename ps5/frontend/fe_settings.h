@@ -10,6 +10,7 @@ struct Settings
 {
 	int shader = 1; // ps5crt::Shader: CRT Easymode style unless another is picked (0 = Off)
 	int aspect = 0; // ps5video::Aspect
+	int border = 0; // art around the picture: 0 Off, 1 Auto (the game's own, else default), 2 Default frame
 	bool scanlines = false; // with the shader Off
 	bool show_fps = false;
 	bool audio = true;

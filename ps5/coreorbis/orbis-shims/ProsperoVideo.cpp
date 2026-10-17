@@ -28,6 +28,8 @@
 #include <cstdlib>
 #include <cstring>
 #include <ctime>
+#include <memory>
+#include <mutex>
 #include <vector>
 
 namespace ps5video
@@ -509,6 +511,8 @@ std::vector<uint32_t> s_argb; // the frame in A8R8G8B8, for the shaders
 double s_shader_ms = 0;
 int s_shader_frames = 0;
 uint64_t s_frame_no = 0;
+std::mutex s_border_lock; // SetBorder and DrawSnes run on one thread today; the pointer is read once per DrawSnes
+std::shared_ptr<const Border> s_border;
 
 void BuildColorLut()
 {
@@ -568,6 +572,15 @@ const char* AspectName(Aspect a)
 		case Aspect::Stretch: return "Stretch 16:9";
 		default: return "?";
 	}
+}
+
+void SetBorder(std::shared_ptr<const Border> border)
+{
+	{
+		std::lock_guard<std::mutex> lock(s_border_lock);
+		s_border = std::move(border);
+	}
+	InvalidateSnes();
 }
 
 Rect LastSnesRect()
