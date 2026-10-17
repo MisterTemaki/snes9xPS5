@@ -47,8 +47,8 @@ bool WindowFits(const ps5video::Rect& window);
 // (an RGB picture has no hole of its own; a soft glass edge is lost).
 void PunchWindow(Image* img, const ps5video::Rect& window);
 
-// The shape the window takes for an aspect ratio setting (a ratio rw:rh); false for Integer scale, which keeps the window
-// as the art draws it and centres a whole-multiple picture in it. Pixel perfect is 8:7 (the NTSC picture).
+// The shape the window takes for an aspect ratio setting (a ratio rw:rh); false for Integer scale, whose window is a size,
+// not a shape (IntegerOpening), and for no setting at all (Aspect::Count). Pixel perfect is 8:7 (the NTSC picture).
 bool OpeningRatio(ps5video::Aspect aspect, int* rw, int* rh);
 
 // Where the window goes to take the shape rw:rh: the same window when it is within 3% of that shape (what the renderer
@@ -58,6 +58,12 @@ bool OpeningRatio(ps5video::Aspect aspect, int* rw, int* rh);
 ps5video::Rect FitOpening(const ps5video::Rect& window, int rw, int rh);
 constexpr int kMinMarginPct = 40;
 
+// Where the window goes for Integer scale: exactly the largest whole multiple of the 256 x 224 picture that fits the drawn
+// window (4x, 1024x896, for the usual 1398x1038), so the picture has no black around it; the margins stretch to fill the
+// rest and keep the proportions they had. The same window when it is that size already, or too small for 1x. The renderer
+// fills a window of this kind with a 239-line picture too (ComputeRect).
+ps5video::Rect IntegerOpening(const ps5video::Rect& window);
+
 // Stretches the art so its window is 'to' (from FitOpening) instead of 'from': the margins stretch or squeeze, the window
 // is cut in five pieces per axis (kOpeningCorner pixels at each end stay as drawn, so rounded corners stay round; the
 // middle follows), nothing is blended across a cut. Bilinear, with the colours weighted by alpha. false (img unchanged)
@@ -66,7 +72,8 @@ constexpr int kOpeningCorner = 64;
 bool RefitImage(Image* img, const ps5video::Rect& from, const ps5video::Rect& to, std::string* why);
 
 // The two together for the border of a game: 'window' is where FindWindow (or an .ini) put it; on return it is the window
-// of the stretched art, or untouched when the aspect keeps it. false only when memory runs out (img and window unchanged).
+// of the stretched art, or untouched when it has the shape already (or the aspect is Aspect::Count: the art as drawn, which
+// only tests ask for). false only when memory runs out (img and window unchanged).
 bool FitToAspect(Image* img, ps5video::Rect* window, ps5video::Aspect aspect, std::string* why);
 
 // null with the reason when the image is not surface-sized, the rim is over kMaxRim or memory runs out.

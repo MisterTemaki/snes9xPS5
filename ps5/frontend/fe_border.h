@@ -18,8 +18,8 @@
 // Default frame uses 4 and 5 only; Off sets none.
 //
 // The window follows the Aspect ratio setting: the art is stretched so the window has the picture's shape (4:3, 8:7 for
-// Pixel perfect, 16:9 for Stretch), which is how a bezel drawn for a 4:3 game fits any of them. Integer scale keeps the art
-// as drawn and centres the picture in the window. See FitToAspect in fe_borderimg.h.
+// Pixel perfect, 16:9 for Stretch), which is how a bezel drawn for a 4:3 game fits any of them. Integer scale cuts it to the
+// whole-multiple picture (1024x896 at 4x). See FitToAspect in fe_borderimg.h.
 //
 // SPDX-License-Identifier: MIT
 #pragma once
@@ -54,6 +54,6 @@ struct Pick
 	std::string file; // the picture's file name inside the pack
 };
 // pack: the borders folder; setting: 1 Auto or 2 Default frame (0 is the caller's: no border); game: named as ScanGames does;
-// aspect: the Aspect ratio setting the window is fitted to (the default, Integer scale, keeps the art as drawn).
-Pick Choose(const std::string& pack, int setting, const GameInfo& game, ps5video::Aspect aspect = ps5video::Aspect::Integer);
+// aspect: the Aspect ratio setting the window is fitted to (the default, Aspect::Count, keeps the art as drawn).
+Pick Choose(const std::string& pack, int setting, const GameInfo& game, ps5video::Aspect aspect = ps5video::Aspect::Count);
 } // namespace fe::border

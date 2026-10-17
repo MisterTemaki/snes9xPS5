@@ -50,6 +50,16 @@ bool SameRect(const ps5video::Rect& a, const ps5video::Rect& b)
 	return a.x == b.x && a.y == b.y && a.w == b.w && a.h == b.h;
 }
 
+// A window of tw x th for the art whose window is 'win': the margins together keep the proportions they had (a window that
+// touches the edge on one axis is centred on it).
+ps5video::Rect PlaceOpening(const ps5video::Rect& win, int tw, int th)
+{
+	const int mw = kWidth - win.w, mh = kHeight - win.h;
+	const int nx = mw > 0 ? int((int64_t(win.x) * (kWidth - tw) + mw / 2) / mw) : (kWidth - tw) / 2;
+	const int ny = mh > 0 ? int((int64_t(win.y) * (kHeight - th) + mh / 2) / mh) : (kHeight - th) / 2;
+	return ps5video::Rect{nx, ny, tw, th};
+}
+
 // Where one output row or column reads from: the pixels i0 and i1 of the source, i1 with weight f / 256.
 struct Tap
 {
@@ -156,10 +166,15 @@ ps5video::Rect FitOpening(const ps5video::Rect& win, int rw, int rh)
 	tw &= ~1; // the renderer keeps the picture's width even
 	if (tw < 2 || th < 1)
 		return win;
-	const int mw = kWidth - win.w, mh = kHeight - win.h; // the margins together keep the proportions they had
-	const int nx = mw > 0 ? int((int64_t(win.x) * (kWidth - tw) + mw / 2) / mw) : (kWidth - tw) / 2;
-	const int ny = mh > 0 ? int((int64_t(win.y) * (kHeight - th) + mh / 2) / mh) : (kHeight - th) / 2;
-	return ps5video::Rect{nx, ny, tw, th};
+	return PlaceOpening(win, tw, th);
+}
+
+ps5video::Rect IntegerOpening(const ps5video::Rect& win)
+{
+	const int k = std::min(win.w / ps5video::kPictureW, win.h / ps5video::kPictureH);
+	if (k < 1)
+		return win;
+	return PlaceOpening(win, k * ps5video::kPictureW, k * ps5video::kPictureH);
 }
 
 bool RefitImage(Image* img, const ps5video::Rect& from, const ps5video::Rect& to, std::string* why)
@@ -212,9 +227,13 @@ bool RefitImage(Image* img, const ps5video::Rect& from, const ps5video::Rect& to
 bool FitToAspect(Image* img, ps5video::Rect* window, ps5video::Aspect aspect, std::string* why)
 {
 	int rw = 0, rh = 0;
-	if (!OpeningRatio(aspect, &rw, &rh))
+	ps5video::Rect to;
+	if (OpeningRatio(aspect, &rw, &rh))
+		to = FitOpening(*window, rw, rh);
+	else if (aspect == ps5video::Aspect::Integer)
+		to = IntegerOpening(*window);
+	else
 		return true;
-	const ps5video::Rect to = FitOpening(*window, rw, rh);
 	if (SameRect(to, *window))
 		return true;
 	if (!RefitImage(img, *window, to, why))

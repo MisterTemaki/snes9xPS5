@@ -35,6 +35,8 @@ void FillRect(int x, int y, int w, int h, uint32_t color);
 void DarkenRect(int x, int y, int w, int h); // halves every channel
 
 // The SNES picture: how GFX.Screen (RGB565) is scaled into the surface.
+// The NTSC picture the whole-multiple sizes count in (Integer scale: 4x is 1024x896).
+constexpr int kPictureW = 256, kPictureH = 224;
 enum class Aspect : int
 {
 	Ratio4x3 = 0, // 1440x1080, what a CRT showed
@@ -71,7 +73,9 @@ void SetBorder(std::shared_ptr<const Border> border);
 
 // Where the picture goes inside 'bounds' (the whole surface, or a border's window): centred, width kept even.
 // 4:3 and 8:7 fit by the limiting side, or fill 'bounds' when it has that ratio within 3%; Integer is the largest whole
-// multiple that fits; Stretch fills 'bounds'. src_w / src_h are the picture's size as the core draws it.
+// multiple that fits (and when 'bounds' is itself a whole multiple of 256 x 224, as a border's window is for Integer
+// scale, a picture of another height, 239 lines, fills it like 8:7 would instead of dropping to a smaller multiple);
+// Stretch fills 'bounds'. src_w / src_h are the picture's size as the core draws it.
 Rect ComputeRect(int src_w, int src_h, Aspect aspect, const Rect& bounds);
 
 // Scales a w x h RGB565 picture (pitch in bytes) into the surface (nearest neighbour); returns the

@@ -604,7 +604,12 @@ Rect ComputeRect(int src_w, int src_h, Aspect aspect, const Rect& bounds)
 		case Aspect::Integer:
 		{
 			const int k = std::min(bounds.w / base_w, bounds.h / lines);
-			if (k < 1) // a window smaller than the picture: no whole multiple fits
+			// a window cut to a whole multiple of the 256 x 224 picture (fe_borderimg.cpp, IntegerOpening) and a picture of
+			// another height: it fills the window, not a smaller multiple with black around it
+			if (lines != kPictureH && bounds.w % kPictureW == 0 && bounds.h % kPictureH == 0 &&
+				bounds.w / kPictureW == bounds.h / kPictureH)
+				FitRatio(bounds, base_w, lines, dw, dh);
+			else if (k < 1) // a window smaller than the picture: no whole multiple fits
 				FitRatio(bounds, 4, 3, dw, dh);
 			else
 			{

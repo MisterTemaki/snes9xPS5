@@ -99,6 +99,17 @@ static void TestComputeRect()
 	CHECK_RECT(ComputeRect(256, 224, Aspect::Integer, win), 448, 92, 1024, 896); // 4x, centred in the window
 	CHECK_RECT(ComputeRect(512, 448, Aspect::Integer, win), 448, 92, 1024, 896);
 
+	// the window Integer scale cuts the art to (IntegerOpening in fe_borderimg.cpp) is exactly 4x: the picture fills it, and a
+	// 239-line picture, which has no whole multiple there (3x would leave black around it), fills it like 8:7; on the bare
+	// screen it is still the whole multiple
+	const Rect win4x = {448, 92, 1024, 896};
+	CHECK_RECT(ComputeRect(256, 224, Aspect::Integer, win4x), 448, 92, 1024, 896);
+	CHECK_RECT(ComputeRect(512, 448, Aspect::Integer, win4x), 448, 92, 1024, 896);
+	CHECK_RECT(ComputeRect(256, 239, Aspect::Integer, win4x), 480, 92, 960, 896);
+	CHECK_RECT(ComputeRect(512, 478, Aspect::Integer, win4x), 480, 92, 960, 896);
+	CHECK_RECT(ComputeRect(256, 239, Aspect::Integer, kScreen), 448, 62, 1024, 956);
+	CHECK_RECT(ComputeRect(256, 224, Aspect::Integer, Rect{100, 100, 768, 672}), 100, 100, 768, 672); // 3x window
+
 	// the 3% edge of the fill rule: 1480x1080 is 2.8% off 4:3 and fills, 1490x1080 is 3.5% off and is fitted by height
 	CHECK_RECT(ComputeRect(256, 224, Aspect::Ratio4x3, Rect{0, 0, 1480, 1080}), 0, 0, 1480, 1080);
 	CHECK_RECT(ComputeRect(256, 224, Aspect::Ratio4x3, Rect{0, 0, 1490, 1080}), 25, 0, 1440, 1080);
