@@ -903,6 +903,33 @@ expect "[ $rc = 0 ] && grep -q '\[games\] 0 ROM(s)' $T/root/logs/boot.log" "a sh
 expect "grep -q '\[net\] The folder games is not on 10.0.0.5' $T/root/logs/boot.log" "and says why"
 expect "! grep -q 'runtime error\|AddressSanitizer' $T/out.txt" "no sanitizer reports"
 
+echo "== 29. netfs: a ROM on a share with a made-up file name is named by its CRC in the background, and its cover follows"
+T=$(newroot t29)
+SRV=$T/srv/Named_Boxarts; mkdir -p "$SRV" "$T/share"
+python3 - "$SRV" <<'PY'
+import sys
+from PIL import Image
+srv = sys.argv[1]
+Image.new('RGB', (512, 357), (0, 255, 0)).save(srv + '/Donkey Kong Country (USA).png')
+open(srv + '/Donkey Kong Country (USA) (Rev 2).png', 'w').write('Donkey Kong Country (USA).png')
+PY
+python3 tests/make_test_rom.py "$T/share/dkc.sfc" ntsc >/dev/null
+python3 tests/forge_crc.py "$T/share/dkc.sfc" $(grep -P "\tDonkey Kong Country \(USA\) \(Rev 2\)$" frontend/data/snes-nointro.tsv | cut -f1) >/dev/null
+echo "smb://10.0.0.5/games" >"$T/root/shares.txt"
+PORT=18081
+(cd "$T/srv" && exec python3 -m http.server $PORT --bind 127.0.0.1 >/dev/null 2>&1) &
+SRVPID=$!
+sleep 1
+OFFLINE= COVER_URL="http://127.0.0.1:$PORT/Named_Boxarts/\${name}.png" SNES9X_HOST_REALTIME=1 MAXFLIPS=420 SNES9X_HOST_NETFS_DIR="$T/share" \
+	run "$T" "0:0" "400" >/dev/null
+kill $SRVPID 2>/dev/null
+expect "grep -q '\[games\] naming 1 network ROM(s) by CRC' $T/root/logs/boot.log" "the pass was started for the ROM the file name could not name"
+expect "grep -q 'dkc.sfc -> \"Donkey Kong Country (USA) (Rev 2)\" (by CRC)' $T/root/logs/boot.log" "the next scan names it by its CRC"
+expect "grep -q '/smb/10.0.0.5/games/dkc.sfc' $T/root/covers/crc-cache.txt" "and the CRC is kept for the next start"
+expect "[ -f '$T/root/covers/Donkey Kong Country (USA) (Rev 2).png' ]" "the cover of the game that came late was downloaded"
+expect "$CHECK $T/dump/flip00400.ppm 960 420 0 255 0 >/dev/null" "the shelf shows that cover (green)"
+expect "! grep -q 'runtime error\|AddressSanitizer' $T/out.txt" "no sanitizer reports"
+
 echo "== 31. the Network shares screen: add, change, test and remove a share with the on-screen keyboard (Settings, Network shares)"
 # tests/osk_pad.py turns the steps into a pad script (the keyboard's layout is its model). Settings is Triangle on the shelf; Up four times from
 # Shader reaches Network shares (Back, Repair missing covers, Controller shortcuts, Network shares). Every run ends: Circle twice, OPTIONS, Cross.

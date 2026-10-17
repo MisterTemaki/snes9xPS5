@@ -661,6 +661,10 @@ std::string Shelf()
 		st.started = true;
 	}
 	int n = int(st.games.size());
+	NetNaming naming; // names the games on shares by CRC while the shelf is up; stops with it
+	naming.Add(st.games);
+	int naming_seen = 0;
+	double naming_refreshed = Now();
 
 	int sel = 0;
 	for (int i = 0; i < n; i++)
@@ -704,14 +708,22 @@ std::string Shelf()
 				ProsperoNotify("Snes9x: %s", ev.c_str());
 			}
 			std::vector<std::string> mounts = netfs_mount_points();
-			if (mounts != net_seen)
+			// names from the CRC pass count when it is done, or a minute after the last look
+			const int resolved = naming.Resolved();
+			const bool named = resolved != naming_seen && (!naming.Busy() || now - naming_refreshed >= 60.0);
+			if (mounts != net_seen || named)
 			{
 				net_seen = mounts;
+				naming_seen = resolved;
+				naming_refreshed = now;
 				const std::string keep = n > 0 ? st.games[size_t(sel)].path : std::string();
 				std::vector<GameInfo> fresh = ScanGames();
+				if (!ShelfDownloads()) // the console: covers of games that came late are fetched by the prefetch of a restart
+					CoversRestartIfNeeded(fresh, cfg.covers_download, false, Loading);
 				st.games = std::move(fresh);
 				st.slots.assign(st.games.size(), nullptr);
 				st.covers.Start(st.games, cfg.covers_download && ShelfDownloads(), cfg.covers_download && BackgroundCovers());
+				naming.Add(st.games);
 				n = int(st.games.size());
 				sel = std::min(sel, std::max(0, n - 1));
 				for (int i = 0; i < n; i++)

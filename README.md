@@ -446,7 +446,8 @@ Use the server's IP address. Inside a user name, password or folder, write `& = 
 (`p@ss` is `p%40ss`). The password sits in this file in plain text.
 
 - The shelf shows the share's games (badge `NET`) as soon as it has connected; the others do not wait for it.
-  Network games are named from their file names, without reading every ROM.
+  Network games are first named from their file names; a background pass then reads each ROM once to name it
+  by checksum (the answer is remembered), and a cover for a game that shows up late is fetched when it does.
 - A share is read-only. Saves, states, cheats, covers and settings stay on the console.
 - A game is read into memory when it starts. MSU-1 music is fetched before the first frame, and a slow or lost
   connection never stalls the picture or the sound: a track that has not arrived is silent, and the game goes on.
