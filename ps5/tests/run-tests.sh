@@ -1199,6 +1199,60 @@ expect "[ \"\$(head -c3 $T/root/saves/save.srm | od -An -tx1 | tr -d ' ')\" = 99
 expect "grep -q 'name: Byte 2' $CHT" "the cheat file still holds all three after the game closed"
 expect "! grep -q 'runtime error\|AddressSanitizer' $T/out.txt" "no sanitizer reports"
 
+echo "== 34. border packs: a game finds its border (own file name, the cover matcher), then default.png, then the built-in frame"
+T=$(newroot t34)
+B=$T/root/borders
+python3 - "$T" <<'PY'
+import sys
+from PIL import Image
+root = sys.argv[1] + "/root"
+def border(path, win=(261, 21, 1659, 1059)):
+    im = Image.new("RGBA", (1920, 1080), (0, 0, 255, 255))
+    im.paste((0, 0, 0, 0), win)
+    im.save(path)
+import os
+os.makedirs(root + "/borders/games", exist_ok=True)
+border(root + "/borders/games/Super Mario World (USA).png")
+border(root + "/borders/games/Super Robot Taisen EX (Japan).png", (300, 60, 1600, 1000))
+border(root + "/borders/default.png", (200, 40, 1700, 1040))
+PY
+python3 tests/make_test_rom.py "$T/root/roms/Super Mario World.sfc" ntsc >/dev/null
+python3 tests/make_test_rom.py "$T/root/roms/Super Robot Wars EX (English).sfc" ntsc >/dev/null
+python3 tests/make_test_rom.py "$T/root/roms/Unknown Game.sfc" ntsc >/dev/null
+bordercase() { # ROM file name: starts the game and quits from the pause menu
+	run "$T" "0:0;60:$L3R3;62:0;70:$UP;72:0;80:$CROSS;82:0" "" "$T/root/roms/$1"
+}
+expect "[ -d $B/games ]" "the app creates /data/snes9x/borders/games at boot"
+rc=$(bordercase "Super Mario World.sfc")
+expect "[ $rc = 0 ] && ! grep -q '\[border\]' $T/root/logs/boot.log" "Border Off (the default): the pack is not read, nothing is logged"
+echo "border=1" >>"$T/root/snes9x-ps5.ini"
+rc=$(bordercase "Super Mario World.sfc")
+expect "[ $rc = 0 ]" "Auto: exit code 0 (got $rc)"
+expect "grep -q '\[border\] Super Mario World -> Super Mario World (USA).png (matched): window 261,21 1398x1038' $T/root/logs/boot.log" "a ROM named loosely finds its game's border through the cover matcher"
+rc=$(bordercase "Super Robot Wars EX (English).sfc")
+expect "grep -q '\[border\] Super Robot Wars EX (English) -> Super Robot Taisen EX (Japan).png (matched): window 300,60 1300x940' $T/root/logs/boot.log" "a translation finds the Japanese game's border by its words"
+rc=$(bordercase "Unknown Game.sfc")
+expect "grep -q '\[border\] Unknown Game -> default.png (default.png): window 200,40 1500x1000' $T/root/logs/boot.log" "a game with no border of its own gets default.png"
+cp "$B/games/Super Mario World (USA).png" "$B/games/Super Mario World.png"
+echo "window=100,100,900,600" >"$B/games/Super Mario World.ini"
+rc=$(bordercase "Super Mario World.sfc")
+expect "grep -q '\[border\] Super Mario World -> Super Mario World.png (own file): window 100,100 900x600' $T/root/logs/boot.log" "games/<ROM name>.png wins, and its .ini gives the window"
+echo "off=1" >"$B/games/Super Mario World.ini"
+rc=$(bordercase "Super Mario World.sfc")
+expect "grep -q '\[border\] Super Mario World: none, an .ini says off=1' $T/root/logs/boot.log" "off=1 in the .ini: no border for that game"
+rm "$B/games/Super Mario World.ini" "$B/games/Super Mario World.png"
+echo "garbage" >"$B/games/Super Mario World (USA).png"
+rc=$(bordercase "Super Mario World.sfc")
+expect "grep -q '\[border\] games/Super Mario World (USA).png: not a PNG' $T/root/logs/boot.log && grep -q 'Super Mario World -> default.png (default.png)' $T/root/logs/boot.log" "a broken file is logged and skipped: default.png"
+rm "$B/default.png"
+rc=$(bordercase "Unknown Game.sfc")
+expect "[ $rc = 0 ] && grep -q '\[border\] Unknown Game -> built-in (built-in): window ' $T/root/logs/boot.log" "no default.png: the frame built into the app"
+sed -i 's/^border=1/border=2/' "$T/root/snes9x-ps5.ini"
+cp "$T/root/borders/games/Super Robot Taisen EX (Japan).png" "$B/default.png"
+rc=$(bordercase "Super Robot Wars EX (English).sfc")
+expect "grep -q '\[border\] Super Robot Wars EX (English) -> default.png (default.png)' $T/root/logs/boot.log" "Default frame: the game's own border is not looked for"
+expect "! grep -q 'runtime error\|AddressSanitizer' $T/out.txt" "no sanitizer reports"
+
 echo
 echo "passed $PASS, failed $FAIL  (work dir $WORK)"
 [ $FAIL = 0 ]

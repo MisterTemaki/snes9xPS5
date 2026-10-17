@@ -83,7 +83,7 @@ EMU_SRC := coreorbis/main-boot.cpp \
 	coreorbis/orbis-shims/ProsperoInput.cpp coreorbis/orbis-shims/ProsperoJailbreak.cpp \
 	coreorbis/orbis-shims/ProsperoCrash.cpp coreorbis/orbis-shims/ProsperoCrt.cpp coreorbis/orbis-shims/ProsperoUpdate.cpp \
 	frontend/fe_emu.cpp frontend/fe_menu.cpp frontend/fe_netscreen.cpp frontend/fe_osk.cpp frontend/fe_ui.cpp frontend/fe_settings.cpp frontend/fe_text.cpp \
-	frontend/fe_games.cpp frontend/fe_http.cpp frontend/fe_covers.cpp frontend/fe_shelf.cpp frontend/fe_border.cpp \
+	frontend/fe_games.cpp frontend/fe_http.cpp frontend/fe_covers.cpp frontend/fe_shelf.cpp frontend/fe_border.cpp frontend/fe_borderimg.cpp \
 	frontend/fe_prefetch.cpp frontend/fe_coverfetch.cpp frontend/fe_coverworker.cpp $(NETFS_SRC)
 # the payloads: the helper, and the installer (= helper + install)
 # (the helper also downloads the covers in the background: fe_coverworker.cpp, with the app's HTTPS code)
@@ -113,6 +113,10 @@ GAMEDB_DEFS := -DGAMEDB_TSV='"$(abspath frontend/data/snes-nointro.tsv)"' -DEXTR
 %/port/frontend/fe_covers.o: EXTRA_FLAGS = -Wno-error -Wno-sign-compare -Wno-unused-but-set-variable -Wno-implicit-fallthrough -DCOVER_MANIFEST_TXT='"$(abspath frontend/data/snes-cover-index.txt)"' -DTITLE_MANIFEST_TXT='"$(abspath frontend/data/snes-title-index.txt)"' -DSNAP_MANIFEST_TXT='"$(abspath frontend/data/snes-snap-index.txt)"'
 %/port/frontend/fe_covers.o: frontend/data/snes-cover-index.txt frontend/data/snes-title-index.txt frontend/data/snes-snap-index.txt
 %/port/frontend/fe_games.o: frontend/data/snes-nointro.tsv frontend/data/snes-extra-crc.tsv frontend/data/snes-db-art.tsv
+# the border pack code: the built-in frame is embedded in fe_border.o; stb_image in fe_borderimg.o has warnings of its own
+%/port/frontend/fe_border.o: EXTRA_FLAGS = -DBORDER_DEFAULT_PNG='"$(abspath frontend/assets/borders/default.png)"'
+%/port/frontend/fe_border.o: frontend/assets/borders/default.png
+%/port/frontend/fe_borderimg.o: EXTRA_FLAGS = -Wno-error -Wno-sign-compare -Wno-unused-but-set-variable -Wno-implicit-fallthrough
 # the UI fonts (PS5SX2's: PCSX2's Roboto Regular and PromptFont) built into fe_text.o
 %/port/frontend/fe_text.o: EXTRA_FLAGS = -DFE_FONT_DIR='"$(abspath frontend/assets/fonts)"' -Wno-error -Wno-sign-compare -Wno-unused-function
 %/port/frontend/fe_text.o: frontend/assets/fonts/Roboto-Regular.ttf frontend/assets/fonts/promptfont.otf \
@@ -429,7 +433,18 @@ $(TABS_TEST): tests/test_tabs.cpp frontend/fe_tabs.h frontend/fe_games.h
 test-tabs: $(TABS_TEST)
 	$(TABS_TEST)
 
-test: test-nfs test-tabs
+# the border pack code (fe_border.cpp, fe_borderimg.cpp) with the renderer, the cover matcher and the game naming
+# stood in for by the test: generated PNGs through the lookup order, the window, the backdrop and the rim
+BORDER_TEST := $(HOST_OUT)/border-pack-test
+BORDER_TEST_OBJ := $(patsubst %.cpp,$(HOST_OUT)/port/%.o,tests/test_border_pack.cpp frontend/fe_border.cpp frontend/fe_borderimg.cpp \
+	frontend/fe_settings.cpp coreorbis/orbis-shims/orbis_paths.cpp)
+$(BORDER_TEST): $(BORDER_TEST_OBJ) $(HOST_ZLIB_OBJ)
+	$(HOST_CXX) $(HOST_SAN) -o $@ $^ -lpthread
+
+test-border: $(BORDER_TEST)
+	ASAN_OPTIONS=detect_leaks=1 $(BORDER_TEST)
+
+test: test-nfs test-tabs test-border
 
 clean:
 	rm -rf build
@@ -437,5 +452,5 @@ clean:
 # the SMB backend against a real Samba (adds `smb-test`, run before the other tests; skipped without smbd)
 include tests/smb/smb.mk
 
-.PHONY: ps5 host test test-nfs test-nfs-server test-tabs send strip app dist clean
+.PHONY: ps5 host test test-nfs test-nfs-server test-tabs test-border send strip app dist clean
 .SECONDARY:
