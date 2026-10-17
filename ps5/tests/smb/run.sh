@@ -5,9 +5,9 @@ set -u
 cd "$(dirname "$0")/../.."
 BIN=$PWD/build/host/smb-backend-test
 SMBD=$(command -v smbd || ls /usr/sbin/smbd 2>/dev/null || true)
-SMBPASSWD=$(command -v smbpasswd || ls /usr/bin/smbpasswd 2>/dev/null || true)
-if [ -z "$SMBD" ] || [ -z "$SMBPASSWD" ]; then
-	echo "SMB backend tests: skipped (install Samba: smbd and smbpasswd)"
+PDBEDIT=$(command -v pdbedit || ls /usr/bin/pdbedit 2>/dev/null || true)
+if [ -z "$SMBD" ] || [ -z "$PDBEDIT" ]; then
+	echo "SMB backend tests: skipped (install Samba: smbd and pdbedit)"
 	exit 0
 fi
 [ -x "$BIN" ] || { echo "SMB backend tests: $BIN is not built"; exit 1; }
@@ -86,7 +86,9 @@ start_smbd() { # extra [global] lines
 	guest ok = no
 	read only = yes
 CONF
-	printf '%s\n%s\n' "$PASS" "$PASS" | "$SMBPASSWD" -c "$T/smb.conf" -a -s "$USER_NAME" >/dev/null 2>&1
+	# pdbedit, not smbpasswd: smbpasswd -a refuses to run as anyone but root, and CI does not
+	printf '%s\n%s\n' "$PASS" "$PASS" | "$PDBEDIT" -s "$T/smb.conf" -a -t -u "$USER_NAME" >"$T/pdbedit.log" 2>&1 \
+		|| { echo "cannot create the Samba user:"; cat "$T/pdbedit.log"; return 1; }
 	"$SMBD" --foreground -s "$T/smb.conf" >"$T/smbd.log" 2>&1 &
 	SMBD_PID=$!
 	for _ in $(seq 100); do
