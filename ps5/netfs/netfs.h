@@ -52,6 +52,10 @@ void netfs_mount_all_blocking();
 // Aborts every connection, joins the workers and forgets the shares. Files and folders still open fail with EIO.
 void netfs_stop();
 
+// Stops everything and loads the file netfs_load was given again, then mounts. Returns the number of shares (0
+// when netfs_load was never called). The Network screen calls it after it changed the file.
+int netfs_reload();
+
 // ---- what the frontend asks ----
 
 // The virtual folders to scan for ROMs: the shares that are Ready. In memory only: no stat, no network.
@@ -75,6 +79,54 @@ bool netfs_is_network_path(const char* path);
 // inside an MSU-1 data file (<rom>.msu, msu1.rom) that did not fit the prefetch budget; see netfs_cache.h.
 void netfs_set_realtime(bool on);
 bool netfs_realtime();
+
+// ---- the Network screen: editing the shares file ----
+
+// An address line of the shares file, read again at each call (the file may have been edited over FTP).
+struct NetfsFileShare
+{
+	int line = 0;           // 1-based line in the file
+	netfs::ShareConfig cfg; // WITH the password: for the edit form only, never for display or a log
+	std::string mount_point;
+	bool used = true;       // false: the loader ignores the line (same folder as an earlier line, or more than 8)
+	std::string note;       // why it is ignored
+};
+struct NetfsFileView
+{
+	std::string error; // one sentence when the file cannot be used ("" = fine)
+	std::vector<NetfsFileShare> shares;
+	int invalid = 0;   // lines that are not valid addresses (netfs_notices says which; they are left alone)
+};
+NetfsFileView netfs_file_shares();
+// Saves `cfg` over the share that was shown at `line` (its mount point, `old_mount_point`, must still be there),
+// or as a new line at the end when line <= 0. Every other byte of the file stays. Does not reload. Returns ""
+// or one sentence about why not (the file changed meanwhile, the folder is used by another share, 8 are in
+// use, the file cannot be written). Never has a password in it.
+std::string netfs_file_save_share(int line, const std::string& old_mount_point, const netfs::ShareConfig& cfg);
+std::string netfs_file_remove_share(int line, const std::string& old_mount_point);
+
+// A one-off check of a share that is not necessarily in the file: connects on its own thread, lists the
+// configured folder, disconnects. Call Poll() every frame; it enforces kNetfsConnectLimitMs.
+struct NetfsTestResult
+{
+	bool ok = false;
+	std::string text; // one or two sentences for the player; never a password
+};
+class NetfsConnectionTest
+{
+public:
+	explicit NetfsConnectionTest(const netfs::ShareConfig& cfg);
+	~NetfsConnectionTest(); // aborts a test that still runs and waits for its thread
+	NetfsConnectionTest(const NetfsConnectionTest&) = delete;
+	NetfsConnectionTest& operator=(const NetfsConnectionTest&) = delete;
+	bool Poll();   // true once the result is there
+	void Cancel(); // stop now; Result() then holds nothing
+	const NetfsTestResult& Result() const;
+
+private:
+	struct Impl;
+	std::unique_ptr<Impl> m;
+};
 
 // ---- cache ----
 

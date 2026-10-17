@@ -41,6 +41,7 @@ struct Registry
 	std::mutex mu; // guards everything below
 	std::shared_ptr<const ShareList> shares = std::make_shared<const ShareList>();
 	std::vector<std::string> notices;
+	std::string shares_file; // what netfs_load was given
 	std::string last_error;
 	std::deque<std::string> events;
 	NetfsBackendFactory factory[2];
@@ -128,6 +129,28 @@ bool WriteNew(const std::string& path, const std::string& text)
 
 namespace netfs
 {
+std::unique_ptr<Backend> MakeBackendFor(Scheme scheme)
+{
+	return MakeBackend(scheme);
+}
+
+std::string SharesFilePath()
+{
+	Registry& r = R();
+	std::lock_guard<std::mutex> lk(r.mu);
+	return r.shares_file;
+}
+
+bool ReadWholeFile(const std::string& path, std::string& out, int& err)
+{
+	return ReadFile(path, out, err);
+}
+
+bool WriteFileAtomic(const std::string& path, const std::string& text)
+{
+	return WriteNew(path, text);
+}
+
 int64_t NowMs()
 {
 	Registry& r = R();
@@ -420,6 +443,11 @@ int netfs_load_text(const std::string& text)
 
 int netfs_load(const std::string& shares_file)
 {
+	{
+		Registry& r = R();
+		std::lock_guard<std::mutex> lk(r.mu);
+		r.shares_file = shares_file;
+	}
 	std::string text;
 	int err = 0;
 	if (ReadFile(shares_file, text, err))
@@ -438,6 +466,16 @@ int netfs_load(const std::string& shares_file)
 	r.notices = notices;
 	r.last_error.clear();
 	return 0;
+}
+
+int netfs_reload()
+{
+	const std::string file = netfs::SharesFilePath();
+	if (file.empty())
+		return 0;
+	const int n = netfs_load(file);
+	netfs_start();
+	return n;
 }
 
 void netfs_start()
