@@ -929,6 +929,7 @@ std::string Shelf()
 			CenterText(420, "Copy your SNES ROMs (.sfc .smc .zip ...) to", 3, Rgb(200, 200, 220));
 			CenterText(470, "/data/snes9x/roms   or   snes9x/roms  on a USB drive", 4, Rgb(200, 190, 255));
 			CenterText(560, "and open Snes9x PS5 again.", 3, Rgb(200, 200, 220));
+			CenterText(660, std::string("Games on a NAS or PC?  ") + icon::Triangle + "  Settings > Network shares", 3, Rgb(200, 190, 255));
 		}
 		// download status
 		if (st.covers.ToDownload() > 0 && !st.covers.Offline() && cfg.covers_download)

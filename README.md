@@ -427,8 +427,14 @@ Good to know:
 
 ## Network shares (SMB and NFS)
 
-Games can be read from a Windows, Samba, NAS or router share instead of a drive. The first run writes
-`/data/snes9x/shares.txt` with examples; put one address per line (up to 8):
+Games can be read from a Windows, Samba, NAS or router share instead of a drive. Add one on the console:
+**Settings (Triangle) > Network shares > Add a share**. Pick SMB or NFS, type the server's IP address, the share
+(or export) and, if it needs them, a user name and password with the on-screen keyboard (D-pad and Cross; Square
+deletes, Triangle is a space, L2 is Shift, R2 the symbols page, OPTIONS is Done). **Test connection** says what
+is in the folder, or why it cannot be reached, before you save. Open a share in the list to change or remove it.
+
+The screen keeps its shares in `/data/snes9x/shares.txt` (the first run writes it with examples). You can edit the
+file instead, one address per line (up to 8); the screen changes only the line you edit and keeps your comments:
 
 ```
 smb://192.168.1.50/games/snes

@@ -25,6 +25,9 @@ void ShortcutMenu();
 // The settings screen (Triangle on the shelf).
 void SettingsMenu();
 
+// Settings > Network shares: the SMB and NFS shares games are read from (fe_netscreen.cpp).
+void NetworkMenu();
+
 // Shows a message box until Cross / Circle is pressed (errors such as a ROM that won't load).
 void MessageBox(const std::string& title, const std::string& text);
 } // namespace fe
