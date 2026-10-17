@@ -162,6 +162,11 @@ expect "cmp -s $META/pic0.dds app/sce_sys/pic0.dds && cmp -s $META/pic1.dds app/
 expect "[ ! -f $META/pic0.png ] && [ ! -f $APP/sce_sys/pic0.png ]" "the old pic0.png is removed"
 expect "grep -q 'Home screen art updated' $T/inst.txt" "the notification says the home screen art changed"
 expect "grep -q 'updated to $VER' $T/inst.txt" "update notification"
+# a new build is sent over the old one: the same folder is updated, nothing new appears for the home screen
+echo older-build > "$APP/eboot.bin"
+inst "$T"
+expect "cmp -s $APP/eboot.bin tests/fake-eboot.bin && [ \"\$(ls $T/homebrew)\" = PPSA99922 ] && [ \"\$(ls $T/appmeta)\" = PPSA99922 ]" "a new build updates /data/homebrew/PPSA99922 in place: no second title folder"
+expect "grep -c 'wrote' $T/root/logs/installer.log | grep -q '^1$' && grep -q 'wrote .*eboot.bin' $T/root/logs/installer.log && ! grep -q 'wrote .*param.json' $T/root/logs/installer.log" "only eboot.bin was rewritten; param.json (title, content ID, version) was left as it is"
 stop_helpers
 expect "[ \$(find $T -path '*PPSA99203*' | wc -l) = 0 ]" "nothing written for PS5SX2 (PPSA99203)"
 
@@ -836,7 +841,21 @@ T=$(newroot t21c)
 inst21 "$T" &
 expect "waitfor21 $T/root/logs/installer.log 'listening on 127.0.0.1'" "installed"
 expect "[ ! -e $T/homebrew/$OLDID ] && ! grep -q 'title ID is now' $T/inst.txt" "no old version: nothing made or said under $OLDID"
-expect "! grep -q 'runtime error\|AddressSanitizer' $WORK/t21a/inst.txt $WORK/t21b/inst.txt $T/inst.txt" "no sanitizer reports"
+stop21
+# d: our other copies under any folder name: two other title IDs, and a second folder for the same title; untouched, named
+T=$(newroot t21d)
+for id in PPSA99010 PPSA99011; do
+	mkdir -p "$T/homebrew/$id/sce_sys"; sed "s/$NEWID/$id/g" app/sce_sys/param.json >"$T/homebrew/$id/sce_sys/param.json"
+done
+mkdir -p "$T/homebrew/snes9x-copy/sce_sys"; cp app/sce_sys/param.json "$T/homebrew/snes9x-copy/sce_sys/param.json"
+snapd() { (cd "$1/homebrew" && find PPSA99010 PPSA99011 snes9x-copy -type f -exec md5sum {} + | sort); }
+snapd "$T" >"$T/before.txt"
+inst21 "$T" &
+expect "waitfor21 $T/root/logs/installer.log 'listening on 127.0.0.1'" "installed"
+expect "snapd $T | cmp -s - $T/before.txt" "the other copies' folders: untouched"
+expect "grep -q 'The old versions (PPSA99010, PPSA99011) are left alone: to remove them, delete their folders /data/homebrew/PPSA99010, /data/homebrew/PPSA99011 (FTP), then their icons' $T/inst.txt" "the notification names both old versions"
+expect "grep -q 'Another folder holds this app too (/data/homebrew/snes9x-copy)' $T/inst.txt" "the notification names the second folder for the same title"
+expect "! grep -q 'runtime error\|AddressSanitizer' $WORK/t21a/inst.txt $WORK/t21b/inst.txt $WORK/t21c/inst.txt $T/inst.txt" "no sanitizer reports"
 stop21
 
 echo "== 25. updates from GitHub's releases (Settings, Updates): the helper checks, downloads, checks every file, installs"

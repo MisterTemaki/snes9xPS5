@@ -106,6 +106,13 @@ only let PPSA99009 out.
 **Replace the old ELF in your autoload** with the new ELF, or the old version keeps
 being installed beside the new one.
 
+**Sending a new build updates the app in place.** Every build carries the same title ID (PPSA99922), content ID and
+folder, so the installer only rewrites the files that changed (in practice `eboot.bin`); `param.json` is not touched, so
+the home screen has nothing new to register. A second Snes9x icon means a second folder under `/data/homebrew/`
+whose `param.json` is ours (an old version under another title ID, a copy of the folder, or an old ELF in your
+autoload that installs it again). The installer lists every such folder in its notification and in
+`/data/snes9x/logs/installer.log`; it never removes them itself.
+
 ## Updates
 
 From 2.6 on, the app updates itself from this repository's GitHub releases, as
