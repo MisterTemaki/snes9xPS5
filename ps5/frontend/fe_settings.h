@@ -23,6 +23,7 @@ struct Settings
 	bool debug_logs = true;      // boot.log and the others in /data/snes9x/logs (OrbisLogSetEnabled)
 	std::string last_dir; // the browser reopens here
 	std::string last_rom; // and puts the cursor on this file
+	int last_tab = 0; // the shelf's tab (fe_tabs.h): 0 Internal, 1 USB, 2 Network
 
 	void Load();
 	void Save() const;

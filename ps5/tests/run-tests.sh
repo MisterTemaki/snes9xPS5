@@ -1091,6 +1091,61 @@ rc=$(run "$T" "$PAD" "")
 expect "[ $rc = 0 ] && ! grep -q '^smb://\|^nfs://' $T/root/shares.txt" "an empty form is not saved (and Circle on a form with no changes leaves it at once)"
 expect "! grep -q 'runtime error\|AddressSanitizer' $T/out.txt" "no sanitizer reports"
 
+echo "== 32. shelf tabs: Internal and Network apart, L1 / R1 between them, the last tab kept, Square on Network scans again"
+# The tab bar sits at the top: the open tab's pill is the accent colour (78,62,170), the other one dark (32,30,58); (795,60) is
+# inside the Internal pill and (1120,60) inside the Network pill (no text there). The share connects within a few seconds of wall time.
+L1=400; R1=800; SQUARE=8000
+tab_pills() { # dump the active tab: Internal | Network
+	local f=$1 on=$2
+	if [ "$on" = Internal ]; then
+		$CHECK "$f" 795 60 78 62 170 >/dev/null && $CHECK "$f" 1120 60 32 30 58 >/dev/null
+	else
+		$CHECK "$f" 795 60 32 30 58 >/dev/null && $CHECK "$f" 1120 60 78 62 170 >/dev/null
+	fi
+}
+T=$(newroot t32)
+mkdir -p "$T/share"
+python3 tests/make_test_rom.py "$T/root/roms/Local Game (USA).sfc" ntsc >/dev/null
+python3 tests/make_test_rom.py "$T/share/Net Game (USA).sfc" ntsc >/dev/null
+echo "smb://10.0.0.5/games" >"$T/root/shares.txt"
+rc=$(SNES9X_HOST_REALTIME=1 SNES9X_HOST_NETFS_DIR="$T/share" run "$T" "0:0;220:$R1;222:0;300:$SQUARE;302:0;380:$L1;382:0;420:$OPTIONS;422:0;430:$CROSS;432:0" "200,260,400")
+expect "[ $rc = 0 ]" "exit code 0 (got $rc)"
+expect "tab_pills $T/dump/flip00200.ppm Internal" "the shelf opens on the Internal tab"
+expect "tab_pills $T/dump/flip00260.ppm Network" "R1 goes to the Network tab"
+expect "tab_pills $T/dump/flip00400.ppm Internal" "L1 comes back"
+expect "grep -q '\[shelf\] tab Network: 1 game' $T/root/logs/boot.log" "the Network tab holds the game on the share"
+expect "grep -q '\[shelf\] tab Internal: 1 game' $T/root/logs/boot.log" "and the Internal tab only the local one"
+expect "grep -q '\[shelf\] network tab: scan again\$' $T/root/logs/boot.log" "Square on the Network tab scans again"
+expect "[ \$(grep -c '\[games\] 2 ROM' $T/root/logs/boot.log) -ge 2 ]" "and the scan found both games again"
+expect "grep -q 'last_tab=0' $T/root/snes9x-ps5.ini" "the tab left on is kept (Internal)"
+expect "! grep -q 'runtime error\|AddressSanitizer' $T/out.txt" "no sanitizer reports"
+T=$(newroot t32b)
+mkdir -p "$T/share"
+python3 tests/make_test_rom.py "$T/root/roms/Local Game (USA).sfc" ntsc >/dev/null
+python3 tests/make_test_rom.py "$T/share/Net Game (USA).sfc" ntsc >/dev/null
+echo "smb://10.0.0.5/games" >"$T/root/shares.txt"
+echo "last_tab=2" >>"$T/root/snes9x-ps5.ini"
+rc=$(SNES9X_HOST_REALTIME=1 SNES9X_HOST_NETFS_DIR="$T/share" run "$T" "0:0;300:$OPTIONS;302:0;310:$CROSS;312:0" "40,250")
+expect "[ $rc = 0 ] && tab_pills $T/dump/flip00040.ppm Network" "with last_tab=2 and a share set up the shelf opens on Network, before the share is up"
+expect "tab_pills $T/dump/flip00250.ppm Network" "and stays there when its games arrive"
+expect "grep -q 'last_tab=2' $T/root/snes9x-ps5.ini" "and keeps the tab on quit"
+T=$(newroot t32c)
+python3 tests/make_test_rom.py "$T/root/roms/Local Game (USA).sfc" ntsc >/dev/null
+echo "last_tab=2" >>"$T/root/snes9x-ps5.ini"
+rc=$(run "$T" "0:0;60:$R1;62:0;70:$SQUARE;72:0;90:$L1;92:0;120:$OPTIONS;122:0;130:$CROSS;132:0" "40,80,110")
+expect "[ $rc = 0 ] && tab_pills $T/dump/flip00040.ppm Internal" "last_tab=2 without a share set up opens on the games instead"
+expect "tab_pills $T/dump/flip00080.ppm Network && grep -q '\[shelf\] tab Network: 0 game' $T/root/logs/boot.log" "R1 shows the empty Network tab"
+expect "grep -q '\[shelf\] network tab: scan again\$' $T/root/logs/boot.log" "Square on it scans again, with no share to ask"
+expect "tab_pills $T/dump/flip00110.ppm Internal && grep -q 'last_tab=0' $T/root/snes9x-ps5.ini" "L1 goes back and the tab is kept"
+expect "! grep -q 'runtime error\|AddressSanitizer' $T/out.txt" "no sanitizer reports"
+T=$(newroot t32d)
+echo "smb://10.0.0.5/games" >"$T/root/shares.txt"
+rc=$(SNES9X_HOST_REALTIME=1 SNES9X_HOST_NETFS_DIR="$T/nothing" run "$T" "0:0;150:$SQUARE;152:0;330:$OPTIONS;332:0;340:$CROSS;342:0" "100")
+expect "[ $rc = 0 ] && tab_pills $T/dump/flip00100.ppm Network" "a share that is down leaves a shelf with no games on the Network tab"
+expect "grep -q '\[shelf\] network tab: scan again, reconnecting' $T/root/logs/boot.log" "Square connects it again"
+expect "[ \$(grep -c 'The folder games is not on 10.0.0.5' $T/root/logs/boot.log) -ge 2 ]" "and says why each time"
+expect "! grep -q 'runtime error\|AddressSanitizer' $T/out.txt" "no sanitizer reports"
+
 echo
 echo "passed $PASS, failed $FAIL  (work dir $WORK)"
 [ $FAIL = 0 ]
