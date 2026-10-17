@@ -3,12 +3,14 @@
 
 #include "fe_border.h"
 
+#include "fe_borderfetch.h"
 #include "fe_borderimg.h"
 #include "fe_covers.h"
 #include "fe_games.h"
 #include "fe_settings.h"
 
 #include "OrbisPaths.h"
+#include "ProsperoThread.h"
 #include "ProsperoVideo.h"
 
 #include <dirent.h>
@@ -18,10 +20,13 @@
 #include <algorithm>
 #include <cctype>
 #include <chrono>
+#include <condition_variable>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <ctime>
 #include <exception>
+#include <mutex>
 #include <utility>
 #include <vector>
 
@@ -233,16 +238,26 @@ Pick Choose(const std::string& pack, int setting, const GameInfo& game)
 		const auto own = std::find_if(files.begin(), files.end(), [&](const PackFile& f) { return f.stem == game.file_base; });
 		if (own != files.end() && try_stem(*own, "own file"))
 			return pick;
+		std::string matched;
 		if (!files.empty())
 		{
 			std::vector<std::string> stems;
 			for (const PackFile& f : files)
 				stems.push_back(f.stem);
-			const std::string matched = MatchPackName(stems, game);
+			matched = MatchPackName(stems, game);
 			const auto hit = matched.empty() || (own != files.end() && matched == own->stem)
 				? files.end()
 				: std::find_if(files.begin(), files.end(), [&](const PackFile& f) { return f.stem == matched; });
 			if (hit != files.end() && try_stem(*hit, "matched"))
+				return pick;
+		}
+		// The Bezel Project's name for the game (the index built into the app): a border downloaded earlier is found by it
+		// even when the matcher, which sees only the files in the folder, would pick another name or none.
+		const std::string bezel = BezelNameFor(game);
+		if (!bezel.empty() && bezel != matched && !(own != files.end() && bezel == own->stem))
+		{
+			const auto hit = std::find_if(files.begin(), files.end(), [&](const PackFile& f) { return f.stem == bezel; });
+			if (hit != files.end() && try_stem(*hit, "bezel name"))
 				return pick;
 		}
 	}
@@ -267,26 +282,124 @@ Pick Choose(const std::string& pack, int setting, const GameInfo& game)
 
 namespace
 {
-// The game that is loaded, to pick again when the setting changes. Used on the thread that loads games.
+// The game that is loaded, to pick again when the setting changes. Used on the thread that loads games, except `shown`.
 struct Current
 {
 	bool game = false;
 	std::string rom_path;
 	uint32_t crc = 0;
 	int setting = 0; // the setting the border on screen was picked for
-	bool shown = false; // SetBorder has been given a border
+	bool shown = false; // SetBorder has been given a border (s_lock)
 } s_cur;
+
+// s_gen changes whenever the border is picked again or released: the watcher for an older pick gives up. s_lock guards it and
+// `shown`; the cv wakes the watcher at once.
+std::mutex s_lock;
+std::condition_variable s_cv;
+uint64_t s_gen = 0;
+ps5::BigThread s_watch; // started and joined by the thread that loads games
+
+constexpr std::chrono::milliseconds kWatchPoll(500);
+constexpr std::chrono::minutes kWatchMax(30); // the helper may be offline for a while; after this the next game start asks again
 
 void Show(std::shared_ptr<const ps5video::Border> border)
 {
+	std::lock_guard<std::mutex> lock(s_lock);
 	if (!border && !s_cur.shown)
 		return; // nothing on screen, nothing to take away: the renderer is not disturbed
 	s_cur.shown = border != nullptr;
 	ps5video::SetBorder(std::move(border));
 }
 
+// The watcher puts a border up only while its pick is still the current one.
+bool ShowIfCurrent(uint64_t gen, std::shared_ptr<const ps5video::Border> border)
+{
+	std::lock_guard<std::mutex> lock(s_lock);
+	if (s_gen != gen)
+		return false;
+	s_cur.shown = true;
+	ps5video::SetBorder(std::move(border));
+	return true;
+}
+
+void StopWatch()
+{
+	{
+		std::lock_guard<std::mutex> lock(s_lock);
+		s_gen++;
+	}
+	s_cv.notify_all();
+	s_watch.join();
+}
+
+// The helper is downloading `file` into the pack for the game that was just loaded: waits for it (a stat twice a second, on
+// this thread), loads it and puts it up in place of the frame the game started with. Never on the emulation thread.
+void Watch(uint64_t gen, std::string pack, std::string file, std::string game_name)
+{
+	try
+	{
+		const std::string path = pack + "/games/" + file;
+		const std::string stem = file.substr(0, file.size() - 4);
+		const time_t since = time(nullptr);
+		const auto deadline = std::chrono::steady_clock::now() + kWatchMax;
+		struct stat st = {};
+		for (;;)
+		{
+			if (stat(path.c_str(), &st) == 0 && S_ISREG(st.st_mode) && st.st_size > 0)
+				break;
+			if (stat((pack + "/games/" + stem + ".missing").c_str(), &st) == 0 && st.st_mtime >= since)
+			{
+				OrbisLog("[border] %s: The Bezel Project has no picture named %s", game_name.c_str(), file.c_str());
+				return;
+			}
+			std::unique_lock<std::mutex> lock(s_lock);
+			if (s_cv.wait_for(lock, kWatchPoll, [&] { return s_gen != gen; }) || std::chrono::steady_clock::now() >= deadline)
+				return;
+		}
+		const auto t0 = std::chrono::steady_clock::now();
+		const Ini ini = ReadIni(pack + "/games/" + stem + ".ini");
+		if (ini.off)
+			return;
+		auto border = LoadFile("games/" + file, path, ini);
+		if (!border)
+			return;
+		const long ms = long(std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - t0).count());
+		const ps5video::Rect& w = border->window;
+		const size_t rim = border->rim.size();
+		if (ShowIfCurrent(gen, std::move(border)))
+			OrbisLog("[border] %s -> %s (downloaded): window %d,%d %dx%d, rim %zu pixels, %ld ms", game_name.c_str(), file.c_str(), w.x,
+				w.y, w.w, w.h, rim, ms);
+	}
+	catch (const std::exception& e)
+	{
+		OrbisLog("[border] watching for the download failed: %s", e.what());
+	}
+	catch (...)
+	{
+		OrbisLog("[border] watching for the download failed");
+	}
+}
+
+// Auto, and the game has only the default or the built-in frame: asks the helper for The Bezel Project's border (borders/
+// priority.txt, fe_borderfetch.h) and starts watching for it.
+void RequestDownload(const std::string& pack, const GameInfo& game)
+{
+	WantedCover want;
+	if (!BorderWanted(pack, game, &want))
+		return;
+	WritePriorityBorders(pack, {want});
+	OrbisLog("[border] %s: asking the helper for %s", game.file_base.c_str(), want.file.c_str());
+	uint64_t gen;
+	{
+		std::lock_guard<std::mutex> lock(s_lock);
+		gen = s_gen;
+	}
+	s_watch = ps5::BigThread([gen, pack, file = want.file, name = game.file_base] { Watch(gen, pack, file, name); }, 1024 * 1024);
+}
+
 void Apply()
 {
+	StopWatch();
 	s_cur.setting = Config().border;
 	if (s_cur.setting <= 0)
 	{
@@ -297,7 +410,8 @@ void Apply()
 	{
 		const auto t0 = std::chrono::steady_clock::now();
 		const GameInfo game = DescribeGame(s_cur.rom_path, s_cur.crc);
-		Pick pick = Choose(OrbisDir("borders"), s_cur.setting, game);
+		const std::string pack = OrbisDir("borders");
+		Pick pick = Choose(pack, s_cur.setting, game);
 		const long ms = long(std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - t0).count());
 		if (pick.border)
 		{
@@ -309,7 +423,10 @@ void Apply()
 			OrbisLog("[border] %s: none, an .ini says off=1", game.file_base.c_str());
 		else
 			OrbisLog("[border] %s: none usable", game.file_base.c_str());
+		const bool no_own = pick.source != "own file" && pick.source != "matched" && pick.source != "bezel name" && pick.source != "off";
 		Show(std::move(pick.border));
+		if (s_cur.setting == 1 && no_own && Config().border_download)
+			RequestDownload(pack, game);
 	}
 	catch (const std::exception& e)
 	{
@@ -341,6 +458,7 @@ void Reselect()
 
 void Release()
 {
+	StopWatch();
 	s_cur.game = false;
 	s_cur.rom_path.clear();
 	Show(nullptr);

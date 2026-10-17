@@ -55,6 +55,8 @@ void Settings::Load()
 			aspect = Clamp(atoi(val), 0, 3);
 		else if (key == "border")
 			border = Clamp(atoi(val), 0, 2);
+		else if (key == "border_download")
+			border_download = atoi(val) != 0;
 		else if (key == "scanlines")
 			scanlines = atoi(val) != 0;
 		else if (key == "show_fps")
@@ -108,6 +110,7 @@ void Settings::Save() const
 	fprintf(f, "shader=%d\n", shader);
 	fprintf(f, "aspect=%d\n", aspect);
 	fprintf(f, "border=%d\n", border);
+	fprintf(f, "border_download=%d\n", border_download ? 1 : 0);
 	fprintf(f, "scanlines=%d\n", scanlines ? 1 : 0);
 	fprintf(f, "show_fps=%d\n", show_fps ? 1 : 0);
 	fprintf(f, "audio=%d\n", audio ? 1 : 0);

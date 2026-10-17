@@ -3,6 +3,7 @@
 
 #include "fe_shelf.h"
 
+#include "fe_borderfetch.h"
 #include "fe_covers.h"
 #include "fe_games.h"
 #include "fe_menu.h"
@@ -682,6 +683,15 @@ int RepairMissingCovers()
 		CoversRestartIfNeeded(st.games, Config().covers_download, true, Loading);
 	OrbisLog("[covers] user requested repair of %d missing covers", queued);
 	return queued;
+}
+
+int DownloadBorders()
+{
+	const std::string pack = OrbisDir("borders");
+	const std::vector<WantedCover> wanted = border::MissingBorders(pack, S().games);
+	border::WriteWantedBorders(pack, wanted);
+	OrbisLog("[border] user asked for the borders of the library: %zu to download", wanted.size());
+	return int(wanted.size());
 }
 
 void ShelfShutdown()

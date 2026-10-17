@@ -7,6 +7,7 @@
 
 #include "fe_menu.h"
 
+#include "fe_coverworker.h"
 #include "fe_emu.h"
 #include "fe_games.h"
 #include "fe_shelf.h"
@@ -233,6 +234,28 @@ std::string NetworkSummary()
 	return std::to_string(ready) + " of " + std::to_string(shares.size()) + " connected";
 }
 
+// The Download all borders row: what the helper is doing (borders/progress.txt), or what the last press asked for.
+struct BorderAsk
+{
+	double at = -1000;
+	int queued = 0;
+} g_border_ask;
+
+std::string BorderDownloadValue()
+{
+	const CoverProgress p = ReadBorderProgress();
+	const double age = Now() - g_border_ask.at;
+	if (p.valid && p.left > 0)
+		return std::to_string(p.left) + " left";
+	if (age < 6.0)
+		return g_border_ask.queued > 0 ? std::to_string(g_border_ask.queued) + " queued" : "Nothing to fetch";
+	if (g_border_ask.queued > 0 && !p.valid && age < 120.0)
+		return "Waiting for the helper";
+	if (p.valid && p.fetched > 0)
+		return std::to_string(p.fetched) + " fetched";
+	return "";
+}
+
 std::string SettingLabel(int s)
 {
 	switch (s)
@@ -325,6 +348,7 @@ void SettingsMenu()
 		rows.push_back({"Network shares", NetworkSummary(), true, true});
 		rows.push_back({"Controller shortcuts", ""});
 		rows.push_back({"Repair missing covers", ""});
+		rows.push_back({"Download all borders", BorderDownloadValue(), true, true});
 		rows.push_back({"Back", ""});
 		Header("Settings");
 		DrawOptionBox("Settings", rows, sel, false);
@@ -364,7 +388,12 @@ void SettingsMenu()
 			OrbisLog("[settings] queued %d missing covers for retry", count);
 			nav = NavReader();
 		}
-		if (n.back || n.options || (n.ok && sel == S_COUNT + 3))
+		if (n.ok && sel == S_COUNT + 3)
+		{
+			g_border_ask.queued = DownloadBorders();
+			g_border_ask.at = Now();
+		}
+		if (n.back || n.options || (n.ok && sel == S_COUNT + 4))
 		{
 			Config().Save();
 			return;
