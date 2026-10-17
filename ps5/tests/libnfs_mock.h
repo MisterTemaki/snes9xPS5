@@ -46,6 +46,7 @@ struct Server
 	int max_read_len = 0;   // the largest single READ asked for
 	int in_flight = 0;      // READs queued and not yet completed
 	int max_in_flight = 0;
+	int leaked_handles = 0; // files still open when a context was destroyed (libnfs does not free them)
 	std::function<void()> on_service; // runs at the start of every nfs_service
 };
 

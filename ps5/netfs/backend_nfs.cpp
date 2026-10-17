@@ -22,6 +22,7 @@
 #include <cctype>
 #include <cstring>
 #include <memory>
+#include <set>
 
 #include <nfsc/libnfs.h> // first: it defines EXTERN for the raw headers
 #include <nfsc/libnfs-raw.h>
@@ -132,6 +133,9 @@ void OnDone(int status, nfs_context*, void* data, void* priv)
 	}
 }
 
+// For nfs_close_async calls nobody waits for (see ReleaseLocal).
+void OnIgnored(int, nfs_context*, void*, void*) {}
+
 std::unique_ptr<Call> NewCall(bool want_st = false, bool want_ptr = false)
 {
 	auto c = std::make_unique<Call>();
@@ -157,6 +161,7 @@ public:
 
 private:
 	bool NewContext();
+	void ReleaseLocal(nfsfh* fh);
 	int Wait(std::unique_ptr<Call>& c, int64_t deadline);
 	int WaitAll(std::vector<std::unique_ptr<Call>>& calls, int64_t deadline);
 	std::string Full(const std::string& rel) const;
@@ -168,6 +173,7 @@ private:
 	std::string m_base; // folder inside the mounted export, no leading or trailing '/'
 	nfs_context* m_ctx = nullptr;
 	std::vector<std::unique_ptr<Call>> m_orphans; // given-up calls; libnfs may still point at them
+	std::set<nfsfh*> m_open;                      // handed out by Open, not yet closed; libnfs does not track them
 	std::vector<std::string> m_exports;
 	bool m_exports_fetched = false;
 	bool Dead() const { return m_aborted.load(std::memory_order_acquire) || m_dead.load(std::memory_order_acquire); }
@@ -313,6 +319,8 @@ void NfsBackend::Disconnect()
 	m_fd.store(-1, std::memory_order_relaxed);
 	if (m_ctx)
 	{
+		while (!m_open.empty()) // nfs_destroy_context does not free open files
+			ReleaseLocal(*m_open.begin());
 		nfs_destroy_context(m_ctx);
 		m_ctx = nullptr;
 	}
@@ -529,6 +537,7 @@ Status NfsBackend::Open(const std::string& path, Handle& out)
 	if (c->status < 0)
 		return Status::Errno(-c->status);
 	out = c->data;
+	m_open.insert(static_cast<nfsfh*>(c->data));
 	return Status::Ok();
 }
 
@@ -575,12 +584,29 @@ int64_t NfsBackend::Pread(Handle h, void* buf, size_t len, uint64_t offset)
 	return total;
 }
 
+// Frees a handle without talking to the server. The backend only reads, so on NFSv3 libnfs closes the file
+// with a local free and an immediate callback, which also works on a dead connection. NFSv4 sends a CLOSE and
+// cannot: there the handle is left to the context, a few dozen bytes (notes: known limits).
+void NfsBackend::ReleaseLocal(nfsfh* fh)
+{
+	if (m_cfg && m_cfg->nfs_version != 4)
+		nfs_close_async(m_ctx, fh, OnIgnored, nullptr);
+	m_open.erase(fh);
+}
+
 void NfsBackend::Close(Handle h)
 {
-	if (!h || !m_ctx || Dead())
-		return; // a dead connection: the handle goes with the context
+	nfsfh* fh = static_cast<nfsfh*>(h);
+	if (!fh || !m_ctx || m_open.count(fh) == 0)
+		return;
+	if (Dead())
+	{
+		ReleaseLocal(fh);
+		return;
+	}
+	m_open.erase(fh);
 	auto c = NewCall();
-	if (nfs_close_async(m_ctx, static_cast<nfsfh*>(h), OnDone, c.get()) != 0)
+	if (nfs_close_async(m_ctx, fh, OnDone, c.get()) != 0)
 		return;
 	Wait(c, NowMs() + kCallTimeoutMs);
 }

@@ -528,6 +528,66 @@ TEST(a_socket_failure_ends_the_connection)
 	CHECK(S().calls_after_death == 0);
 }
 
+TEST(files_open_when_the_connection_is_aborted_are_freed)
+{
+	Fixture();
+	ShareConfig cfg = Cfg();
+	auto b = MakeNfsBackend();
+	b->Connect(cfg);
+	Handle h = nullptr, h2 = nullptr;
+	b->Open("Game.sfc", h);
+	b->Open("Game.sfc", h2);
+	b->Abort();
+	b->Close(h);
+	b->Disconnect();
+	CHECK(S().leaked_handles == 0); // h2 was never closed: Disconnect frees it
+}
+
+TEST(files_open_when_the_socket_fails_are_freed)
+{
+	Fixture();
+	ShareConfig cfg = Cfg();
+	auto b = MakeNfsBackend();
+	b->Connect(cfg);
+	Handle h = nullptr;
+	b->Open("Game.sfc", h);
+	S().fail_service_at = S().services + 1;
+	char buf[4];
+	CHECK(b->Pread(h, buf, 4, 0) == -EIO);
+	b->Close(h);
+	b->Disconnect();
+	CHECK(S().leaked_handles == 0);
+}
+
+TEST(files_open_when_a_read_never_answers_are_freed)
+{
+	Fixture();
+	ShareConfig cfg = Cfg();
+	auto b = MakeNfsBackend();
+	b->Connect(cfg);
+	Handle h = nullptr;
+	b->Open("Game.sfc", h);
+	S().hang = true;
+	char buf[4];
+	CHECK(b->Pread(h, buf, 4, 0) == -EIO);
+	b->Disconnect(); // the caller never got to Close
+	CHECK(S().leaked_handles == 0);
+}
+
+TEST(closed_files_and_a_double_close_leave_nothing_behind)
+{
+	Fixture();
+	ShareConfig cfg = Cfg();
+	auto b = MakeNfsBackend();
+	b->Connect(cfg);
+	Handle h = nullptr;
+	b->Open("Game.sfc", h);
+	b->Close(h);
+	b->Close(h); // not an open handle any more: ignored
+	b->Disconnect();
+	CHECK(S().leaked_handles == 0);
+}
+
 TEST(disconnect_after_a_failed_connect_and_after_abort_is_safe)
 {
 	Fixture();

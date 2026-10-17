@@ -42,6 +42,10 @@ EXP
 if ! rpcinfo -p 127.0.0.1 >/dev/null 2>&1; then
 	rpcbind -w -f >"$T/rpcbind.log" 2>&1 &
 	RPCBIND_PID=$!
+	for _ in $(seq 50); do
+		rpcinfo -p 127.0.0.1 >/dev/null 2>&1 && break
+		sleep 0.1
+	done
 fi
 "$UNFSD" -d -e "$T/exports" >"$T/unfsd.log" 2>&1 &
 UNFSD_PID=$!

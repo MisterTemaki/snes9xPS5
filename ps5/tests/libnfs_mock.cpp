@@ -27,7 +27,7 @@ struct nfs_context
 	size_t readmax = 1u << 20;
 	bool dead = false;
 	std::deque<std::function<void(bool cancel)>> queue; // completions, run one per nfs_service
-	std::set<nfsfh*> open;                              // libnfs leaves these to the caller; the mock tidies up
+	std::set<nfsfh*> open;                              // libnfs leaves these to the caller; the mock counts and frees them
 };
 
 struct nfsfh
@@ -147,7 +147,10 @@ void nfs_destroy_context(nfs_context* c)
 	for (auto& f : q)
 		f(true);
 	for (nfsfh* fh : c->open)
+	{
+		S().leaked_handles++; // real libnfs would leak it; the mock frees it for the sanitizers and counts it
 		delete fh;
+	}
 	delete c;
 }
 
@@ -362,6 +365,14 @@ int nfs_pread_async(nfs_context* c, nfsfh* fh, void* buf, size_t count, uint64_t
 
 int nfs_close_async(nfs_context* c, nfsfh* fh, nfs_cb cb, void* priv)
 {
+	if (c->version != 4)
+	{
+		// NFSv3, file never written: libnfs frees the handle locally and calls back at once, with no I/O
+		c->open.erase(fh);
+		delete fh;
+		cb(0, c, nullptr, priv);
+		return 0;
+	}
 	Touch(c);
 	Enqueue(c, [=](bool cancel) {
 		if (!cancel)
