@@ -25,6 +25,7 @@
 #include "ProsperoVideo.h"
 
 #include "fe_emu.h"
+#include "fe_i18n.h"
 #include "fe_covers.h"
 #include "fe_menu.h"
 #include "fe_prefetch.h"
@@ -58,8 +59,8 @@ bool PlayGame(const std::string& rom)
 {
 	if (!emu::LoadGame(rom))
 	{
-		ProsperoNotify("Snes9x: could not open %s", rom.c_str());
-		fe::MessageBox("Could not open the game", rom);
+		ProsperoNotify(fe::T("Snes9x: could not open %s"), rom.c_str());
+		fe::MessageBox(fe::T("Could not open the game"), rom);
 		return true;
 	}
 	emu::Osd("%s", emu::GameName().c_str());
@@ -186,7 +187,7 @@ int Run(int argc, char** argv)
 	if (!ps5video::Init())
 	{
 		OrbisLog("[boot] video init failed");
-		ProsperoNotify("Snes9x PS5: video failed to start (see %s/logs/boot.log)", OrbisRoot().c_str());
+		ProsperoNotify(fe::T("Snes9x PS5: video failed to start (see %s/logs/boot.log)"), OrbisRoot().c_str());
 		return 1;
 	}
 	OrbisLog("[boot] splash screen hidden: %x", unsigned(sceSystemServiceHideSplashScreen()));
@@ -200,8 +201,10 @@ int Run(int argc, char** argv)
 	if (!have_data)
 	{
 		// the jailbreak didn't happen: say so on the screen (the pad works, this is the title in front)
-		fe::MessageBox("Snes9x PS5 has no access to /data",
-			"Send Snes9xPS5-v" SNES9X_PS5_VERSION ".elf with the Payload Manager (it unlocks the app), then open Snes9x PS5 again.");
+		char send[512];
+		snprintf(send, sizeof(send), fe::T("Send Snes9xPS5-v%s.elf with the Payload Manager (it unlocks the app), then open Snes9x PS5 again."),
+			SNES9X_PS5_VERSION);
+		fe::MessageBox(fe::T("Snes9x PS5 has no access to /data"), send);
 		ps5input::Shutdown();
 		ps5audio::Shutdown();
 		ps5video::Shutdown();
@@ -211,7 +214,7 @@ int Run(int argc, char** argv)
 	S9X_STAGE(Boot, "emu init");
 	if (!emu::InitCore(1, argv))
 	{
-		ProsperoNotify("Snes9x PS5: the emulator failed to start");
+		ProsperoNotify("%s", fe::T("Snes9x PS5: the emulator failed to start"));
 		ps5audio::Shutdown();
 		ps5video::Shutdown();
 		return 1;

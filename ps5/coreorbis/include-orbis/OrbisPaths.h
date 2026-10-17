@@ -42,7 +42,7 @@ bool OrbisMkdirs(const std::string& path);
 void OrbisLogOpen(const char* name = "boot");
 void OrbisLog(const char* fmt, ...) __attribute__((format(printf, 1, 2)));
 void OrbisLogClose();
-// Debug logs on or off: the "Debug logs" setting (debug_logs= in snes9x-ps5.ini, on unless it says 0).
+// Debug logs on or off: the "Debug logs" setting (debug_logs= in snes9x-ps5.ini, off unless it says 1).
 // OrbisLogOpen reads it, so the app, the installer and the helper all follow it; while off, OrbisLog writes
 // nothing (no file, no stdout) and the log files of earlier runs are left as they are.
 void OrbisLogSetEnabled(bool on);

@@ -21,7 +21,7 @@
 PS5_PAYLOAD_SDK ?= /opt/ps5-payload-sdk
 PS5_HOST ?= ps5
 PS5_PORT ?= 9021
-VERSION ?= 2.6
+VERSION ?= 2.6.1
 TITLE_ID ?= PPSA99922
 # where the app looks for its updates (Settings, Updates): this repository's GitHub releases
 UPDATE_REPO ?= MisterTemaki/snes9xPS5
@@ -45,7 +45,7 @@ EMU_SRC := coreorbis/main-boot.cpp \
 	coreorbis/orbis-shims/ProsperoVideo.cpp coreorbis/orbis-shims/ProsperoAudio.cpp \
 	coreorbis/orbis-shims/ProsperoInput.cpp coreorbis/orbis-shims/ProsperoJailbreak.cpp \
 	coreorbis/orbis-shims/ProsperoCrash.cpp coreorbis/orbis-shims/ProsperoCrt.cpp coreorbis/orbis-shims/ProsperoUpdate.cpp \
-	frontend/fe_emu.cpp frontend/fe_menu.cpp frontend/fe_settings.cpp frontend/fe_text.cpp \
+	frontend/fe_emu.cpp frontend/fe_menu.cpp frontend/fe_settings.cpp frontend/fe_i18n.cpp frontend/fe_text.cpp \
 	frontend/fe_games.cpp frontend/fe_http.cpp frontend/fe_covers.cpp frontend/fe_shelf.cpp \
 	frontend/fe_prefetch.cpp frontend/fe_coverfetch.cpp frontend/fe_coverworker.cpp
 # the payloads: the helper, and the installer (= helper + install)

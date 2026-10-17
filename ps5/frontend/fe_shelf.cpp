@@ -5,6 +5,7 @@
 
 #include "fe_covers.h"
 #include "fe_games.h"
+#include "fe_i18n.h"
 #include "fe_menu.h"
 #include "fe_prefetch.h"
 #include "fe_settings.h"
@@ -501,8 +502,8 @@ bool Confirm(const char* question)
 	const int bw = 900, bh = 240, bx = (W - bw) / 2, by = (H - bh) / 2;
 	ps5video::FillRect(bx - 3, by - 3, bw + 6, bh + 6, Rgb(150, 125, 255));
 	ps5video::FillRect(bx, by, bw, bh, Rgb(26, 24, 48));
-	DrawText(bx + 50, by + 50, question, 5, Rgb(240, 240, 250));
-	DrawText(bx + 50, by + 160, (std::string(icon::Cross) + " Yes       " + icon::Circle + " No").c_str(), 3, Rgb(170, 160, 210));
+	DrawText(bx + 50, by + 50, FitText(question, 5, bw - 100).c_str(), 5, Rgb(240, 240, 250));
+	DrawText(bx + 50, by + 160, (std::string(icon::Cross) + " " + T("Yes") + "       " + icon::Circle + " " + T("No")).c_str(), 3, Rgb(170, 160, 210));
 	ps5video::Present(0, 0, 0, 0, true);
 	for (;;)
 	{
@@ -623,7 +624,7 @@ std::string Shelf()
 	Pool pool;
 
 	S9X_STAGE(Shelf, "scan games");
-	Loading("Looking for games...");
+	Loading(T("Looking for games..."));
 	// a big library takes a while the first time (each new ROM is read once for its CRC): say how far it is,
 	// redrawn at most ten times a second
 	double drawn = Now();
@@ -634,9 +635,9 @@ std::string Shelf()
 		drawn = now;
 		char text[96];
 		if (stage == 0)
-			snprintf(text, sizeof(text), "Looking for games... %zu found", done);
+			snprintf(text, sizeof(text), T("Looking for games... %zu found"), done);
 		else
-			snprintf(text, sizeof(text), "Identifying games... %d%% (%zu of %zu)", total ? int(done * 100 / total) : 0, done, total);
+			snprintf(text, sizeof(text), T("Identifying games... %d%% (%zu of %zu)"), total ? int(done * 100 / total) : 0, done, total);
 		LoadingProgress(text, stage == 0 ? -1.0f : total ? float(done) / float(total) : 0.f);
 	});
 	bool same = games.size() == st.games.size();
@@ -752,7 +753,7 @@ std::string Shelf()
 		}
 		if (down & SCE_PAD_BUTTON_OPTIONS)
 		{
-			if (Confirm("Quit Snes9x PS5?"))
+			if (Confirm(T("Quit Snes9x PS5?")))
 				return "";
 			ps5input::Poll();
 			prev = ps5input::Pad(0).buttons;
@@ -884,50 +885,51 @@ std::string Shelf()
 			if (g.on_usb)
 				sub += "   USB";
 			if (sel_tex && !sel_tex->real)
-				sub += "   no cover";
+				sub += std::string("   ") + T("no cover");
 			CenterText(880, sub, 3, Rgb(175, 170, 205));
 		}
 		else
 		{
-			CenterText(300, "No games found.", 5, Rgb(240, 240, 250));
-			CenterText(420, "Copy your SNES ROMs (.sfc .smc .zip ...) to", 3, Rgb(200, 200, 220));
-			CenterText(470, "/data/snes9x/roms   or   snes9x/roms  on a USB drive", 4, Rgb(200, 190, 255));
-			CenterText(560, "and open Snes9x PS5 again.", 3, Rgb(200, 200, 220));
+			CenterText(300, T("No games found."), 5, Rgb(240, 240, 250));
+			CenterText(420, T("Copy your SNES ROMs (.sfc .smc .zip ...) to"), 3, Rgb(200, 200, 220));
+			CenterText(470, T("/data/snes9x/roms   or   snes9x/roms  on a USB drive"), 4, Rgb(200, 190, 255));
+			CenterText(560, T("and open Snes9x PS5 again."), 3, Rgb(200, 200, 220));
 		}
 		// download status
 		if (st.covers.ToDownload() > 0 && !st.covers.Offline() && cfg.covers_download)
 		{
 			char s[96];
-			snprintf(s, sizeof(s), "Downloading covers... %d left", st.covers.ToDownload());
+			snprintf(s, sizeof(s), T("Downloading covers... %d left"), st.covers.ToDownload());
 			DrawText(W - 80 - TextWidth(s, 3), 112, s, 3, Rgb(170, 160, 210));
 		}
 		else if (st.covers.BackgroundLeft() > 0 && !st.covers.BackgroundOffline() && cfg.covers_download)
 		{
 			char s[96];
-			snprintf(s, sizeof(s), "Downloading covers in the background... %d left", st.covers.BackgroundLeft());
+			snprintf(s, sizeof(s), T("Downloading covers in the background... %d left"), st.covers.BackgroundLeft());
 			DrawText(W - 80 - TextWidth(s, 3), 112, s, 3, Rgb(170, 160, 210));
 		}
 		else if ((st.covers.Offline() || (st.covers.BackgroundLeft() > 0 && st.covers.BackgroundOffline())) &&
 				 cfg.covers_download)
 		{
-			const char* s = "Offline: covers next time";
+			const char* s = T("Offline: covers next time");
 			DrawText(W - 80 - TextWidth(s, 3), 112, s, 3, Rgb(170, 160, 210));
 		}
 		if (now < bulk_covers_until)
 		{
 			char notice[128];
-			snprintf(notice, sizeof(notice), "Retrying %d missing covers (box art, then title screens)", bulk_covers);
+			snprintf(notice, sizeof(notice), T("Retrying %d missing covers (box art, then title screens)"), bulk_covers);
 			CenterText(950, notice, 3, Rgb(225, 220, 245));
 		}
 		// hints
 		ps5video::DarkenRect(0, H - 78, W, 78);
 		const std::string sp = "      ";
 		const std::string hint = n > 0
-			? std::string(icon::Cross) + " Play" + sp + icon::DpadLeftRight + " Browse" + sp + icon::L1 + " " + icon::R1 +
-				" Skip 10" + sp + icon::Triangle + " Settings" + sp + icon::Square + " Get cover" + sp +
-				icon::R3 + " Fix Covers" + sp + icon::Options + " Quit"
-			: std::string(icon::Triangle) + " Settings" + sp + icon::Options + " Quit";
-		DrawText((W - TextWidth(hint.c_str(), 2)) / 2, H - 54, hint.c_str(), 2, Rgb(205, 200, 228));
+			? std::string(icon::Cross) + " " + T("Play") + sp + icon::DpadLeftRight + " " + T("Browse") + sp + icon::L1 + " " + icon::R1 +
+				" " + T("Skip 10") + sp + icon::Triangle + " " + T("Settings") + sp + icon::Square + " " + T("Get cover") + sp +
+				icon::R3 + " " + T("Fix Covers") + sp + icon::Options + " " + T("Quit")
+			: std::string(icon::Triangle) + " " + T("Settings") + sp + icon::Options + " " + T("Quit");
+		const std::string hint_fit = FitText(hint, 2, W - 40);
+		DrawText((W - TextWidth(hint_fit.c_str(), 2)) / 2, H - 54, hint_fit.c_str(), 2, Rgb(205, 200, 228));
 
 		ps5video::Present(0, 0, 0, 0, true);
 	}

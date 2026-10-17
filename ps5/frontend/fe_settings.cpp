@@ -36,6 +36,9 @@ Settings& Config()
 
 void Settings::Load()
 {
+	// off by default (2.6.1); the host tests turn the default on (orbis_paths.cpp reads the same variable)
+	if (const char* d = getenv("SNES9X_LOGS_DEFAULT"))
+		debug_logs = atoi(d) != 0;
 	FILE* f = fopen(IniPath().c_str(), "r");
 	if (!f)
 		return;
@@ -75,6 +78,8 @@ void Settings::Load()
 			covers_download = atoi(val) != 0;
 		else if (key == "debug_logs")
 			debug_logs = atoi(val) != 0;
+		else if (key == "language")
+			language = Clamp(atoi(val), 0, 4);
 		else if (key == "last_dir")
 			last_dir = val;
 		else if (key == "last_rom")
@@ -114,6 +119,7 @@ void Settings::Save() const
 	fprintf(f, "superfx_clock=%d\n", superfx_clock);
 	fprintf(f, "covers_download=%d\n", covers_download ? 1 : 0);
 	fprintf(f, "debug_logs=%d\n", debug_logs ? 1 : 0);
+	fprintf(f, "language=%d\n", language);
 	fprintf(f, "last_dir=%s\n", last_dir.c_str());
 	fprintf(f, "last_rom=%s\n", last_rom.c_str());
 	bool ok = ferror(f) == 0;

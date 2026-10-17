@@ -20,7 +20,8 @@ struct Settings
 	bool transparency = true; // Snes9x "Transparency"
 	int superfx_clock = 100; // % (Snes9x SuperFXClockMultiplier)
 	bool covers_download = true; // fetch box art from libretro-thumbnails
-	bool debug_logs = true;      // boot.log and the others in /data/snes9x/logs (OrbisLogSetEnabled)
+	bool debug_logs = false;     // boot.log and the others in /data/snes9x/logs (OrbisLogSetEnabled); off by default
+	int language = 0;            // fe::Language: 0 English (the default), 1 Spanish, 2 Portuguese (Brazil), 3 French, 4 German
 	std::string last_dir; // the browser reopens here
 	std::string last_rom; // and puts the cursor on this file
 

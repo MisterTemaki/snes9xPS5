@@ -26,13 +26,15 @@ FILE* s_log = nullptr;
 bool s_enabled = true; // the "Debug logs" setting
 std::string s_name;    // the log OrbisLogOpen opened (or would have), to open again when logs are turned on
 
-// snes9x-ps5.ini says debug_logs=0 (read here, not through fe::Settings: the installer and the helper have none)
+// The "Debug logs" setting, read here (not through fe::Settings: the installer and the helper have none): off unless
+// snes9x-ps5.ini says debug_logs=1. The host tests turn the default on with SNES9X_LOGS_DEFAULT=1 (they read boot.log).
 bool IniSaysLogsOff()
 {
+	const char* def = getenv("SNES9X_LOGS_DEFAULT");
+	bool off = !(def && atoi(def) != 0);
 	FILE* f = fopen((OrbisRoot() + "/snes9x-ps5.ini").c_str(), "r");
 	if (!f)
-		return false;
-	bool off = false;
+		return off;
 	char line[512];
 	while (fgets(line, sizeof(line), f))
 		if (strncmp(line, "debug_logs=", 11) == 0)

@@ -10,6 +10,8 @@ HELPER=$PWD/build/host/snes9x-ps5-helper
 VER=$(sed -n 's/^VERSION ?= //p' Makefile) # the release the binaries say they are
 # ports nobody listens on, so the app's ordinary runs find no helper and no ELF loader
 export SNES9X_HELPER_PORT=$((20000 + RANDOM % 10000)) SNES9X_ELFLDR_PORT=$((30000 + RANDOM % 10000)) SNES9X_JB_NO_OTHERS=1
+# the debug logs are off by default (2.6.1): the tests read boot.log, so here a settings file without the key means on
+export SNES9X_LOGS_DEFAULT=1
 CHECK="python3 $PWD/tests/check_ppm.py"
 WORK=${WORK:-$(mktemp -d)}
 PASS=0
@@ -433,6 +435,14 @@ expect "[ $rc = 0 ]" "exit code 0 (got $rc)"
 expect "$CHECK $T/dump/flip00090.ppm 960 540 255 0 0 >/dev/null" "the game runs"
 expect "[ \"\$(cat $T/root/logs/boot.log)\" = 'OLD RUN' ] && [ ! -e $T/root/logs/boot.prev.log ]" "the earlier boot.log is kept as it was, nothing new written"
 expect "! grep -q '^\[snes9x-ps5' $T/out.txt" "nothing on stdout either"
+expect "! grep -q 'runtime error\|AddressSanitizer' $T/out.txt" "no sanitizer reports"
+# the default (2.6.1): no debug_logs key and no test override -> nothing written, and the settings file says 0
+T=$(newroot t18z)
+python3 tests/make_test_rom.py "$T/root/roms/test.sfc" ntsc >/dev/null
+rc=$(SNES9X_LOGS_DEFAULT= run "$T" "0:0;100:$L3R3;105:0;120:$UP;122:0;130:$CROSS;132:0" "90" "$T/root/roms/test.sfc")
+expect "[ $rc = 0 ] && $CHECK $T/dump/flip00090.ppm 960 540 255 0 0 >/dev/null" "the game runs"
+expect "[ ! -e $T/root/logs/boot.log ] && ! grep -q '^\[snes9x-ps5' $T/out.txt" "debug logs off by default: no boot.log, nothing on stdout"
+expect "grep -q '^debug_logs=0' $T/root/snes9x-ps5.ini" "the settings file has debug_logs=0"
 expect "! grep -q 'runtime error\|AddressSanitizer' $T/out.txt" "no sanitizer reports"
 # Settings (Triangle) -> Debug logs (Up five times from Shader: Back, Repair missing covers, Controller shortcuts, Updates, Debug logs) -> Off
 T=$(newroot t18b)
@@ -858,6 +868,63 @@ for line in open(sys.argv[1], errors='replace'):
     if m: t[m.group(2)] = float(m.group(1))
 sys.exit(0 if 'emu' in t and 'games' in t and t['games'] - t['emu'] < 3.0 else 1)
 PY" "the scan (with a CRC of each) took under 3 seconds"
+expect "! grep -q 'runtime error\|AddressSanitizer' $T/out.txt" "no sanitizer reports"
+
+echo "== 27. languages: English by default; Spanish, Portuguese (Brazil), French and German translated"
+TRIANGLE=1000; RIGHT=20
+expect "python3 $PWD/tests/check_i18n.py $PWD/frontend/fe_i18n.cpp >/dev/null" "every translation has its five languages and the English format specifiers"
+for L in 1 2 3 4; do
+	T=$(newroot t27_$L)
+	echo "language=$L" >>"$T/root/snes9x-ps5.ini"
+	python3 tests/make_test_rom.py "$T/root/roms/Alpha (USA).sfc" ntsc >/dev/null
+	# the settings (every row, the controller shortcuts), the shelf, a game: quick save, the pause menu (every row,
+	# a state saved, the cheat manager), then quit from it
+	pad="0:0;20:$TRIANGLE;22:0"; f=30
+	for i in $(seq 1 11); do pad="$pad;$f:$DOWN;$((f + 2)):0"; f=$((f + 6)); done
+	pad="$pad;$f:$CROSS;$((f + 2)):0;$((f + 20)):$CIRCLE;$((f + 22)):0"; f=$((f + 30))
+	for i in $(seq 1 3); do pad="$pad;$f:$DOWN;$((f + 2)):0"; f=$((f + 6)); done
+	pad="$pad;$f:$CIRCLE;$((f + 2)):0"; f=$((f + 30))
+	pad="$pad;$f:$CROSS;$((f + 2)):0"; f=$((f + 150))
+	pad="$pad;$f:$(printf %x $((0x$L2 | 0x$UP)));$((f + 4)):0"; f=$((f + 20))
+	pad="$pad;$f:$L3R3;$((f + 4)):0"; f=$((f + 15))
+	pad="$pad;$f:$DOWN;$((f + 2)):0;$((f + 8)):$CROSS;$((f + 10)):0"; f=$((f + 20))
+	for i in $(seq 1 3); do pad="$pad;$f:$DOWN;$((f + 2)):0"; f=$((f + 6)); done
+	pad="$pad;$f:$CROSS;$((f + 2)):0;$((f + 20)):$CIRCLE;$((f + 22)):0"; f=$((f + 30))
+	for i in $(seq 1 14); do pad="$pad;$f:$DOWN;$((f + 2)):0"; f=$((f + 6)); done
+	pad="$pad;$((f + 4)):$CROSS;$((f + 6)):0"
+	rm -f $T/missing.txt
+	rc=$(SNES9X_HOST_I18N_MISSING=$T/missing.txt run "$T" "$pad" "")
+	# what was shown untranslated: only names (the shaders') and texts without words
+	python3 - $T/missing.txt <<'PY' >$T/untranslated.txt
+import re, sys
+names = {'CRT Easymode style', 'crt-lottes', 'crt-lottes-fast', 'crt-1tap', 'crt-2tap', 'crt-hyllian-fast', 'crt-nobody',
+         'newpixie-mini', 'crt-blurPi-sharp', 'crt-blurPi-soft', 'monoCRT'}
+try:
+    lines = open(sys.argv[1], encoding='utf-8').read().splitlines()
+except FileNotFoundError:
+    lines = []
+for t in lines:
+    if t not in names and re.search('[A-Za-z]{2}', t):
+        print(t)
+PY
+	expect "[ $rc = 0 ] && [ -s $T/missing.txt ] && [ ! -s $T/untranslated.txt ]" "language $L: every menu text shown is translated ($(head -c 200 $T/untranslated.txt | tr '\n' '|'))"
+	expect "grep -q '^language=$L$' $T/root/snes9x-ps5.ini && ls $T/root/states/*.000 >/dev/null 2>&1" "language $L: kept in the settings file; the walk reached the game (a state saved)"
+	expect "! grep -q 'runtime error\|AddressSanitizer' $T/out.txt" "language $L: no sanitizer reports"
+done
+# English stays the default: no setting, English on the screen (the texts pass through as they are)
+T=$(newroot t27en)
+python3 tests/make_test_rom.py "$T/root/roms/test.sfc" ntsc >/dev/null
+rc=$(SNES9X_HOST_I18N_MISSING=$T/missing.txt run "$T" "0:0;100:$L3R3;105:0;120:$UP;122:0;130:$CROSS;132:0" "" "$T/root/roms/test.sfc")
+expect "[ $rc = 0 ] && [ ! -s $T/missing.txt ] && grep -q '^language=0$' $T/root/snes9x-ps5.ini" "English by default (language=0): nothing is looked up"
+# Settings, Language (Up six times from Shader: Back, Repair missing covers, Controller shortcuts, Updates, Debug logs,
+# Language), Right: Spanish, saved
+T=$(newroot t27b)
+python3 tests/make_test_rom.py "$T/root/roms/test.sfc" ntsc >/dev/null
+pad="0:0;30:$TRIANGLE;32:0"; f=50
+for i in $(seq 1 6); do pad="$pad;$f:$UP;$((f + 2)):0"; f=$((f + 8)); done
+pad="$pad;$f:$RIGHT;$((f + 2)):0;$((f + 20)):$CIRCLE;$((f + 22)):0;$((f + 40)):$OPTIONS;$((f + 42)):0;$((f + 50)):$CROSS;$((f + 52)):0"
+rc=$(run "$T" "$pad" "")
+expect "[ $rc = 0 ] && grep -q '^language=1$' $T/root/snes9x-ps5.ini" "Settings, Language, Right: Spanish (language=1) saved"
 expect "! grep -q 'runtime error\|AddressSanitizer' $T/out.txt" "no sanitizer reports"
 
 echo

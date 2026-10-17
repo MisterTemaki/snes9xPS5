@@ -12,6 +12,7 @@
 #include "ProsperoCrash.h"
 #include "ProsperoJailbreak.h"
 #include "ProsperoNotify.h"
+#include "fe_i18n.h"
 #include "ProsperoSce.h"
 
 #include <cstdio>
@@ -107,7 +108,7 @@ void CoversRestartIfNeeded(const std::vector<GameInfo>& games, bool downloads_on
 	OrbisLog("[covers] %d new cover(s) to fetch (%zu wanted): restarting %s so the prefetch gets them", fresh,
 		wanted.size(), path);
 	if (show)
-		show("Downloading covers...");
+		show(T("Downloading covers..."));
 	ProsperoNotifyFlush();
 	OrbisLogClose();
 	const int rc = sceSystemServiceLoadExec(path, nullptr);
@@ -149,9 +150,9 @@ PrefetchResult PrefetchCovers(double budget_s)
 		return r;
 	}
 	if (wanted.size() == 1)
-		ProsperoNotify("Snes9x PS5: downloading 1 cover...");
+		ProsperoNotify("%s", T("Snes9x PS5: downloading 1 cover..."));
 	else
-		ProsperoNotify("Snes9x PS5: downloading %d covers...", int(wanted.size()));
+		ProsperoNotify(T("Snes9x PS5: downloading %d covers..."), int(wanted.size()));
 
 	Http http;
 	http.SetDeadline(t0 + budget_s); // a slow server can't hold the start past the budget: one GET retries for up to a minute

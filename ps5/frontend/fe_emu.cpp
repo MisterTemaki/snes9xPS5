@@ -14,6 +14,7 @@
 #include "fe_emu.h"
 
 #include "fe_games.h"
+#include "fe_i18n.h"
 #include "fe_cheatlookup.h"
 #include "fe_settings.h"
 #include "fe_shortcuts.h"
@@ -97,7 +98,10 @@ struct State
 	// After the game starts or the pause menu closes, player 1's pad reaches the game only once the buttons that
 	// did it (Cross, Circle, L3 + R3) are let go: Resume with Cross must not press B in the game.
 	bool wait_release = true;
-	std::string cheat_status = "No cheat file checked";
+	std::string cheat_status = "No cheat file checked"; // in English (the log); the cheat menu shows it translated
+	const char* cheat_status_fmt = "No cheat file checked"; // ...from this English format,
+	std::string cheat_status_file; // its file (%s)
+	int cheat_status_count = 0;    // and its count (%d)
 	std::vector<int16_t> mix;
 	// last frame, for the pause menu
 	std::vector<uint16_t> last;
@@ -297,7 +301,7 @@ bool ImportCheatsFromFile(const std::string& path)
     std::ifstream in(path, std::ios::binary);
     if (!in)
     {
-        g.cheat_status = "Unable to open cheat file";
+        g.cheat_status = g.cheat_status_fmt = "Unable to open cheat file";
         return false;
     }
     std::string head(4096, '\0');
@@ -329,10 +333,15 @@ bool ImportCheatsFromFile(const std::string& path)
     if (!parsed || added<=0)
     {
         g.cheat_status="Found " + S9xBasename(path) + " but no supported codes";
+        g.cheat_status_fmt = "Found %s but no supported codes";
+        g.cheat_status_file = S9xBasename(path);
         OrbisLog("[cheats] %s", g.cheat_status.c_str());
         return false;
     }
     g.cheat_status = "Loaded " + std::to_string(added) + " cheats from " + S9xBasename(path);
+    g.cheat_status_fmt = "Loaded %d cheats from %s";
+    g.cheat_status_file = S9xBasename(path);
+    g.cheat_status_count = added;
     OrbisLog("[cheats] %s", g.cheat_status.c_str());
     return true;
 }
@@ -341,7 +350,7 @@ bool LoadManualCheatsForRom()
     const std::string file = FindManualCheatFile();
     if (file.empty())
     {
-        g.cheat_status = "No matching .cht file in /data/snes9x/cheats";
+        g.cheat_status = g.cheat_status_fmt = "No matching .cht file in /data/snes9x/cheats";
         return false;
     }
     return ImportCheatsFromFile(file);
@@ -662,7 +671,16 @@ std::string RomNoIntro()
 }
 std::string CheatStatus()
 {
-	return g.cheat_status;
+	// the same text as g.cheat_status, in the interface's language
+	char buf[512];
+	const char* fmt = fe::T(g.cheat_status_fmt);
+	if (strcmp(g.cheat_status_fmt, "Loaded %d cheats from %s") == 0)
+		snprintf(buf, sizeof(buf), fmt, g.cheat_status_count, g.cheat_status_file.c_str());
+	else if (strcmp(g.cheat_status_fmt, "Found %s but no supported codes") == 0)
+		snprintf(buf, sizeof(buf), fmt, g.cheat_status_file.c_str());
+	else
+		return fmt;
+	return buf;
 }
 bool ReloadDownloadedCheats()
 {
@@ -852,13 +870,13 @@ FrameResult RunFrame()
 	if (l2)
 	{
 		if (pressed & SCE_PAD_BUTTON_UP)
-			Osd(SaveState(cfg.state_slot) ? "State saved to slot %d" : "Could not save slot %d", cfg.state_slot);
+			Osd(fe::T(SaveState(cfg.state_slot) ? "State saved to slot %d" : "Could not save slot %d"), cfg.state_slot);
 		else if (pressed & SCE_PAD_BUTTON_DOWN)
-			Osd(LoadState(cfg.state_slot) ? "State loaded from slot %d" : "Slot %d is empty", cfg.state_slot);
+			Osd(fe::T(LoadState(cfg.state_slot) ? "State loaded from slot %d" : "Slot %d is empty"), cfg.state_slot);
 		else if (pressed & (SCE_PAD_BUTTON_LEFT | SCE_PAD_BUTTON_RIGHT))
 		{
 			cfg.state_slot = (cfg.state_slot + ((pressed & SCE_PAD_BUTTON_RIGHT) ? 1 : 9)) % 10;
-			Osd("State slot: %d%s", cfg.state_slot, StateExists(cfg.state_slot) ? " (used)" : " (empty)");
+			Osd(fe::T(StateExists(cfg.state_slot) ? "State slot: %d (used)" : "State slot: %d (empty)"), cfg.state_slot);
 		}
 	}
 

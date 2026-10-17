@@ -17,8 +17,8 @@ own icon and background. The PS5 layer follows the layout of PS5SX2 (the PCSX2 p
 Everything outside `ps5/` is the original Snes9x source, unchanged, apart from this README (the original one is
 [README-Snes9x.md](README-Snes9x.md)).
 
-> **Status (2.6):** runs on the console: the app opens from its icon, the shelf, the controller, video and sound
-> work, and games play. It builds with the ps5-payload-dev SDK and passes 222 host tests, which run the same code
+> **Status (2.6.1):** runs on the console: the app opens from its icon, the shelf, the controller, video and sound
+> work, and games play. It builds with the ps5-payload-dev SDK and passes 242 host tests, which run the same code
 > on Linux with the PS5 calls simulated. If something fails, the logs in `/data/snes9x/logs/` say where.
 
 ## How it works (the PS5SX2 model)
@@ -48,9 +48,12 @@ written to PS5SX2's folders (`/data/PCSX2`, `/data/homebrew/PPSA99203`).
 
 ## Versions
 
-Every release carries its version in the file name: `Snes9xPS5-v2.6.elf` and `snes9x-ps5-v2.6-src.zip`
+Every release carries its version in the file name: `Snes9xPS5-v2.6.1.elf` and `snes9x-ps5-v2.6.1-src.zip`
 (`make dist`). When updating, replace the old ELF with the new one in your autoload or Payload Manager. In this
 README, "`Snes9xPS5.elf`" always means the current release's ELF.
+
+**2.6.1:** **Interface languages**: English (the default), Spanish, Portuguese (Brazil), French and German
+(Settings, Language). The **debug logs are off by default** (Settings, Debug logs turns them on).
 
 **2.6:** **Cheats, controller shortcuts and better covers**, by
 [thatboialex](https://github.com/thatboialex) ([#1](https://github.com/MisterTemaki/snes9xPS5/pull/1)): a cheat
@@ -133,7 +136,9 @@ next to the ELF. The same zip is what the homebrew catalog lists.
 
 ## Language
 
-Every screen and notification of Snes9x PS5 is in English.
+The interface is in English by default. Settings -> **Language** (Left / Right) switches every menu, message and
+notification of the app to Spanish (Español), Portuguese (Brazil) (Português (Brasil)), French (Français) or German
+(Deutsch); the choice is `language=0..4` in `snes9x-ps5.ini`. Game names, file names and the logs stay as they are.
 
 ## Requirements
 
@@ -146,10 +151,10 @@ Every screen and notification of Snes9x PS5 is in English.
 
 1. **Send `Snes9xPS5.elf`** with PS5 Payload Manager, or from a PC on the same network:
    ```sh
-   nc -q0 PS5_IP 9021 < Snes9xPS5-v2.6.elf
+   nc -q0 PS5_IP 9021 < Snes9xPS5-v2.6.1.elf
    ```
    It installs the app in `/data/homebrew/PPSA99922/` (`eboot.bin`, `sce_module/libc.prx`, `param.json`, the
-   icon and the backgrounds), shows **"Snes9x PS5 2.6 installed. Open it from the Snes9x PS5 icon on the home
+   icon and the backgrounds), shows **"Snes9x PS5 2.6.1 installed. Open it from the Snes9x PS5 icon on the home
    screen."** and stays running as the helper.
 2. **Open the Snes9x PS5 icon.** The game shelf appears and the controller works.
 3. **Copy your ROMs** (`.sfc .smc .swc .fig .bs .st .zip .gz`) to `/data/snes9x/roms`, over FTP for example, or
@@ -438,11 +443,11 @@ Good to know:
 ## Debugging (logs and crashes)
 
 **Turning the logs on or off:** Settings (Triangle on the shelf, or L3 + R3 in a game) -> **Debug logs** (just above
-Updates; On by default). Off stops every log at once: the app writes nothing more to `boot.log` (its last line says
+Updates; Off by default since 2.6.1). Off stops every log at once: the app writes nothing more to `boot.log` (its last line says
 the logs were turned off) or to the console output, and the next starts -- the app, the installer and the helper --
 write no log files at all; the files of earlier runs are left as they are (delete them over FTP if you want). On
 starts again at once, adding to `boot.log`. The setting is `debug_logs=0` / `debug_logs=1` in `snes9x-ps5.ini`.
-Leave them on if you want to report a problem: with them off there is no log to send, and no `== CRASH ==` report
+Turn them on if you want to report a problem: with them off there is no log to send, and no `== CRASH ==` report
 either.
 
 If something fails, send the files in `/data/snes9x/logs/`: `boot.log` (the app), `installer.log` and

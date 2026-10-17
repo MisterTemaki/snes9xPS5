@@ -9,6 +9,7 @@
 
 #include "fe_emu.h"
 #include "fe_games.h"
+#include "fe_i18n.h"
 #include "fe_shelf.h"
 #include "fe_settings.h"
 #include "fe_shortcuts.h"
@@ -29,6 +30,7 @@
 #include <sys/stat.h>
 
 #include <algorithm>
+#include <cstdarg>
 #include <cstdio>
 #include <cstring>
 #include <ctime>
@@ -44,6 +46,16 @@ namespace fe
 namespace
 {
 using ps5video::Rgb;
+std::string Fmt(const char* fmt, ...) __attribute__((format(printf, 1, 2)));
+std::string Fmt(const char* fmt, ...)
+{
+	char buf[512];
+	va_list ap;
+	va_start(ap, fmt);
+	vsnprintf(buf, sizeof(buf), fmt, ap);
+	va_end(ap);
+	return buf;
+}
 constexpr int W = ps5video::kWidth;
 constexpr int H = ps5video::kHeight;
 
@@ -140,7 +152,7 @@ void Header(const char* subtitle)
 void Footer(const char* help)
 {
 	ps5video::FillRect(0, H - 80, W, 80, kPanel);
-	DrawText(80, H - 60, help, 3, kDim);
+	DrawText(80, H - 60, FitText(help, 3, W - 160).c_str(), 3, kDim);
 }
 
 bool HasRomExtension(const char* name)
@@ -199,7 +211,7 @@ std::vector<Entry> ListDir(const std::string& dir)
 std::string RootLabel(const std::string& root)
 {
 	if (root == OrbisDir("roms"))
-		return "Console  (" + root + ")";
+		return std::string(T("Console")) + "  (" + root + ")";
 	if (root.rfind("/mnt/usb", 0) == 0)
 		return "USB " + root.substr(8, 1) + "  (" + root + ")";
 	return root;
@@ -227,7 +239,7 @@ void DrawOptionBox(const char* title, const std::vector<Row>& rows, int sel, boo
 		ps5video::FillRect(bx - 4, by - 4, bw + 8, bh + 8, kAccent);
 	ps5video::FillRect(bx, by, bw, bh, kPanel);
 	ps5video::FillRect(bx, by + 86, bw, 3, kAccent);
-	DrawText(bx + 40, by + 24, title, 5, kAccent);
+	DrawText(bx + 40, by + 24, FitText(title, 5, bw - 80).c_str(), 5, kAccent);
 	for (int i = start; i < start + visible; i++)
 	{
 		const int y = by + 110 + (i - start) * row_h;
@@ -245,7 +257,7 @@ void DrawOptionBox(const char* title, const std::vector<Row>& rows, int sel, boo
 
 const char* YesNo(bool b)
 {
-	return b ? "On" : "Off";
+	return T(b ? "On" : "Off");
 }
 
 // The settings shared by the game list (Triangle) and the pause menu. Returns true if 'idx' was a setting
@@ -260,6 +272,7 @@ enum SettingRow
 	S_TRANSPARENCY,
 	S_SUPERFX,
 	S_COVERS,
+	S_LANGUAGE,
 	S_DEBUGLOGS,
 	S_UPDATES,
 	S_COUNT
@@ -287,24 +300,24 @@ std::string UpdateValue()
 {
 	char buf[96];
 	if (!g_upd.helper)
-		return "Needs the helper";
+		return T("Needs the helper");
 	const update::Status& st = g_upd.st;
 	switch (st.phase)
 	{
-		case update::Phase::Checking: return "Checking...";
-		case update::Phase::UpToDate: return "Up to date";
+		case update::Phase::Checking: return T("Checking...");
+		case update::Phase::UpToDate: return T("Up to date");
 		case update::Phase::Available:
-			snprintf(buf, sizeof(buf), "Install %s (%.1f MB)", st.latest.c_str(), st.size / 1048576.0);
+			snprintf(buf, sizeof(buf), T("Install %s (%.1f MB)"), st.latest.c_str(), st.size / 1048576.0);
 			return buf;
 		case update::Phase::Downloading:
-			snprintf(buf, sizeof(buf), "Downloading %d%%", st.total ? int(st.done * 100 / st.total) : 0);
+			snprintf(buf, sizeof(buf), T("Downloading %d%%"), st.total ? int(st.done * 100 / st.total) : 0);
 			return buf;
 		case update::Phase::Installing:
-			snprintf(buf, sizeof(buf), "Installing %d/%d", int(st.done), int(st.total));
+			snprintf(buf, sizeof(buf), T("Installing %d/%d"), int(st.done), int(st.total));
 			return buf;
-		case update::Phase::Done: return "Installed: restart";
-		case update::Phase::Failed: return "Failed: try again";
-		default: return "Check now";
+		case update::Phase::Done: return T("Installed: restart");
+		case update::Phase::Failed: return T("Failed: try again");
+		default: return T("Check now");
 	}
 }
 
@@ -341,16 +354,17 @@ std::string SettingLabel(int s)
 {
 	switch (s)
 	{
-		case S_SHADER: return "Shader";
-		case S_ASPECT: return "Aspect ratio";
-		case S_SCANLINES: return "Scanlines (shader Off)";
-		case S_FPS: return "Show FPS";
-		case S_AUDIO: return "Sound";
-		case S_TRANSPARENCY: return "Transparency";
-		case S_SUPERFX: return "Super FX clock";
-		case S_COVERS: return "Download covers";
-		case S_DEBUGLOGS: return "Debug logs";
-		case S_UPDATES: return "Updates (this is " SNES9X_PS5_VERSION ")";
+		case S_SHADER: return T("Shader");
+		case S_ASPECT: return T("Aspect ratio");
+		case S_SCANLINES: return T("Scanlines (shader Off)");
+		case S_FPS: return T("Show FPS");
+		case S_AUDIO: return T("Sound");
+		case S_TRANSPARENCY: return T("Transparency");
+		case S_SUPERFX: return T("Super FX clock");
+		case S_COVERS: return T("Download covers");
+		case S_LANGUAGE: return T("Language");
+		case S_DEBUGLOGS: return T("Debug logs");
+		case S_UPDATES: return Fmt(T("Updates (this is %s)"), SNES9X_PS5_VERSION);
 		default: return "";
 	}
 }
@@ -361,14 +375,15 @@ std::string SettingValue(int s)
 	char buf[32];
 	switch (s)
 	{
-		case S_SHADER: return ps5crt::Name(ps5crt::Shader(c.shader));
-		case S_ASPECT: return ps5video::AspectName(ps5video::Aspect(c.aspect));
+		case S_SHADER: return T(ps5crt::Name(ps5crt::Shader(c.shader)));
+		case S_ASPECT: return T(ps5video::AspectName(ps5video::Aspect(c.aspect)));
 		case S_SCANLINES: return YesNo(c.scanlines);
 		case S_FPS: return YesNo(c.show_fps);
 		case S_AUDIO: return YesNo(c.audio);
 		case S_TRANSPARENCY: return YesNo(c.transparency);
 		case S_SUPERFX: snprintf(buf, sizeof(buf), "%d%%", c.superfx_clock); return buf;
 		case S_COVERS: return YesNo(c.covers_download);
+		case S_LANGUAGE: return LanguageName(c.language);
 		case S_DEBUGLOGS: return YesNo(c.debug_logs);
 		case S_UPDATES: return UpdateValue();
 		default: return "";
@@ -393,6 +408,12 @@ void ChangeSetting(int s, int dir)
 		case S_AUDIO: c.audio = !c.audio; break;
 		case S_TRANSPARENCY: c.transparency = !c.transparency; break;
 		case S_COVERS: c.covers_download = !c.covers_download; break;
+		case S_LANGUAGE:
+		{
+			const int nl = int(Language::Count);
+			c.language = (c.language + dir + nl) % nl;
+			break;
+		}
 		case S_DEBUGLOGS:
 			c.debug_logs = !c.debug_logs;
 			OrbisLogSetEnabled(c.debug_logs); // at once: the line saying so is the last (or first) one written
@@ -423,16 +444,16 @@ void SettingsMenu()
 		std::vector<Row> rows;
 		for (int s = 0; s < S_COUNT; s++)
 			rows.push_back({SettingLabel(s), SettingValue(s)});
-		rows.push_back({"Controller shortcuts", ""});
-		rows.push_back({"Repair missing covers", ""});
-		rows.push_back({"Back", ""});
-		Header("Settings");
-		DrawOptionBox("Settings", rows, sel, false);
+		rows.push_back({T("Controller shortcuts"), ""});
+		rows.push_back({T("Repair missing covers"), ""});
+		rows.push_back({T("Back"), ""});
+		Header(T("Settings"));
+		DrawOptionBox(T("Settings"), rows, sel, false);
 		if (sel == S_UPDATES && g_upd.st.phase == update::Phase::Failed && !g_upd.st.error.empty())
 			DrawText(80, H - 130, FitText(g_upd.st.error, 2, W - 160).c_str(), 2, kAccent);
 		else if (sel == S_UPDATES && !g_upd.helper)
-			DrawText(80, H - 130, "Updates are downloaded by the helper: send the payload, then open Settings again.", 2, kDim);
-		Footer((std::string(icon::Cross) + " Toggle     " + icon::DpadLeftRight + " Adjust     " + icon::Circle + " Back").c_str());
+			DrawText(80, H - 130, FitText(T("Updates are downloaded by the helper: send the payload, then open Settings again."), 2, W - 160).c_str(), 2, kDim);
+		Footer((std::string(icon::Cross) + " " + T("Toggle") + "     " + icon::DpadLeftRight + " " + T("Adjust") + "     " + icon::Circle + " " + T("Back")).c_str());
 		Present();
 
 		const Nav n = nav.Read();
@@ -471,7 +492,7 @@ namespace
 {
 std::string DirTitle(const std::string& dir)
 {
-	return dir.empty() ? "Choose where your games are" : dir;
+	return dir.empty() ? T("Choose where your games are") : dir;
 }
 } // namespace
 
@@ -533,16 +554,16 @@ std::string RomBrowser()
 		if (list.empty())
 		{
 			const char* lines[] = {
-				"No games found here.",
+				T("No games found here."),
 				"",
-				"Copy your SNES ROMs (.sfc .smc .swc .fig .bs .zip) to:",
+				T("Copy your SNES ROMs (.sfc .smc .swc .fig .bs .zip) to:"),
 				"    /data/snes9x/roms",
-				"or, on a USB drive, to the folder  snes9x/roms",
+				T("or, on a USB drive, to the folder  snes9x/roms"),
 			};
 			int y = 330;
 			for (const char* l : lines)
 			{
-				DrawText(160, y, l, 4, kText);
+				DrawText(160, y, FitText(l, 4, W - 320).c_str(), 4, kText);
 				y += 60;
 			}
 		}
@@ -574,7 +595,7 @@ std::string RomBrowser()
 			snprintf(count, sizeof(count), "%d / %d", sel + 1, int(list.size()));
 			DrawText(W - 80 - TextWidth(count, 3), 104, count, 3, kDim);
 		}
-		Footer((std::string(icon::Cross) + " Open     " + icon::Circle + " Back     " + icon::Triangle + " Settings     " + icon::Options + " Quit     " + icon::L1 + " " + icon::R1 + " Page").c_str());
+		Footer((std::string(icon::Cross) + " " + T("Open") + "     " + icon::Circle + " " + T("Back") + "     " + icon::Triangle + " " + T("Settings") + "     " + icon::Options + " " + T("Quit") + "     " + icon::L1 + " " + icon::R1 + " " + T("Page")).c_str());
 		Present();
 
 		const Nav n = nav.Read();
@@ -662,24 +683,25 @@ PauseAction PauseMenu()
 
 		char slot[64];
 		std::vector<Row> rows(I_COUNT);
-		rows[I_RESUME] = {"Resume", ""};
-		snprintf(slot, sizeof(slot), "Save state (slot %d)", cfg.state_slot);
+		rows[I_RESUME] = {T("Resume"), ""};
+		snprintf(slot, sizeof(slot), T("Save state (slot %d)"), cfg.state_slot);
 		rows[I_SAVE] = {slot, ""};
-		snprintf(slot, sizeof(slot), "Load state (slot %d)", cfg.state_slot);
+		snprintf(slot, sizeof(slot), T("Load state (slot %d)"), cfg.state_slot);
 		rows[I_LOAD] = {slot, "", emu::StateExists(cfg.state_slot)};
-		snprintf(slot, sizeof(slot), "%d%s", cfg.state_slot, emu::StateExists(cfg.state_slot) ? " (used)" : " (empty)");
-		rows[I_SLOT] = {"State slot", slot};
-		rows[I_CHEATS] = {"Cheat manager", ""};
-		rows[I_SHORTCUTS] = {"Controller shortcuts", ""};
+		snprintf(slot, sizeof(slot), T(emu::StateExists(cfg.state_slot) ? "%d (used)" : "%d (empty)"), cfg.state_slot);
+		rows[I_SLOT] = {T("State slot"), slot};
+		rows[I_CHEATS] = {T("Cheat manager"), ""};
+		rows[I_SHORTCUTS] = {T("Controller shortcuts"), ""};
 		for (int s = 0; s < S_UPDATES; s++)
 			rows[I_SET0 + s] = {SettingLabel(s), SettingValue(s)};
-		rows[I_RESET] = {"Reset game", ""};
-		rows[I_LIST] = {"Back to the game list", ""};
-		rows[I_QUIT] = {"Quit Snes9x", ""};
+		rows[I_RESET] = {T("Reset game"), ""};
+		rows[I_LIST] = {T("Back to the game list"), ""};
+		rows[I_QUIT] = {T("Quit Snes9x"), ""};
 
 		DrawOptionBox(FitText(emu::GameName(), 5, 900).c_str(), rows, sel, true);
 		if (!toast.empty() && Now() < toast_until)
 		{
+			toast = FitText(toast, 3, W - 200);
 			const int tw = TextWidth(toast.c_str(), 3);
 			ps5video::FillRect((W - tw) / 2 - 30, H - 110, tw + 60, 70, kSel);
 			DrawText((W - tw) / 2, H - 90, toast.c_str(), 3, kText);
@@ -707,7 +729,7 @@ PauseAction PauseMenu()
 			{
 				case I_RESUME: return PauseAction::Resume;
 				case I_SAVE:
-					toast = emu::SaveState(cfg.state_slot) ? "State saved." : "Could not save the state.";
+					toast = T(emu::SaveState(cfg.state_slot) ? "State saved." : "Could not save the state.");
 					toast_until = Now() + 2.0;
 					cfg.Save();
 					break;
@@ -715,10 +737,10 @@ PauseAction PauseMenu()
 					if (emu::LoadState(cfg.state_slot))
 					{
 						cfg.Save();
-						emu::Osd("State loaded from slot %d", cfg.state_slot);
+						emu::Osd(T("State loaded from slot %d"), cfg.state_slot);
 						return PauseAction::Resume;
 					}
-					toast = "This slot is empty.";
+					toast = T("This slot is empty.");
 					toast_until = Now() + 2.0;
 					break;
 				case I_CHEATS:
@@ -756,10 +778,10 @@ void CheatMenu()
 		const int visible = std::min(count, kVisible);
 		if (count == 0)
 		{
-			Header("Cheats");
-			DrawOptionBox("No cheats found", {{"Place a matching .cht file in /data/snes9x/cheats", ""}, {"Back", ""}}, 1, false);
+			Header(T("Cheats"));
+			DrawOptionBox(T("No cheats found"), {{T("Place a matching .cht file in /data/snes9x/cheats"), ""}, {T("Back"), ""}}, 1, false);
 			DrawText(150, H - 184, FitText(emu::CheatStatus(), 3, W - 300).c_str(), 3, kText);
-			Footer("Copy .cht file over FTP     Circle: Back");
+			Footer(T("Copy .cht file over FTP     Circle: Back"));
 		}
 		else
 		{
@@ -770,13 +792,13 @@ void CheatMenu()
 			for (int i = 0; i < visible; ++i)
 			{
 				const int index = top + i;
-				rows.push_back({FitText(emu::CheatName(index), 3, 670), emu::CheatEnabled(index) ? "ON" : "OFF"});
+				rows.push_back({FitText(emu::CheatName(index), 3, 670), T(emu::CheatEnabled(index) ? "ON" : "OFF")});
 			}
 			Header(emu::GameName().c_str());
 			char caption[120];
-			snprintf(caption, sizeof(caption), "Cheats %d-%d / %d", top + 1, top + visible, count);
+			snprintf(caption, sizeof(caption), T("Cheats %d-%d / %d"), top + 1, top + visible, count);
 			DrawOptionBox(caption, rows, sel - top, true);
-			Footer("Cross: Toggle   L1/R1: Page   Triangle: All ON   Square: All OFF   Circle: Back");
+			Footer(T("Cross: Toggle   L1/R1: Page   Triangle: All ON   Square: All OFF   Circle: Back"));
 		}
 		Present();
 		const Nav n = nav.Read();
@@ -809,14 +831,14 @@ void ShortcutMenu()
 		Settings& cfg = Config();
 		int* items[] = {&cfg.shortcut_pause, &cfg.shortcut_list, &cfg.shortcut_cheats};
 		std::vector<Row> rows = {
-			{"Pause menu", shortcuts::Label(*items[0])},
-			{"Return to game shelf", shortcuts::Label(*items[1])},
-			{"Cheat manager", shortcuts::Label(*items[2])},
-			{"Back", ""}
+			{T("Pause menu"), T(shortcuts::Label(*items[0]))},
+			{T("Return to game shelf"), T(shortcuts::Label(*items[1]))},
+			{T("Cheat manager"), T(shortcuts::Label(*items[2]))},
+			{T("Back"), ""}
 		};
-		Header("Controller shortcuts");
-		DrawOptionBox("Button shortcuts", rows, sel, false);
-		Footer("Left / Right: Reassign     Cross: Next option     Circle: Back");
+		Header(T("Controller shortcuts"));
+		DrawOptionBox(T("Button shortcuts"), rows, sel, false);
+		Footer(T("Left / Right: Reassign     Cross: Next option     Circle: Back"));
 		Present();
 		const Nav n = nav.Read();
 		if (n.back || n.options || (n.ok && sel == 3)) { cfg.Save(); return; }
@@ -850,7 +872,7 @@ void MessageBox(const std::string& title, const std::string& text)
 		ps5video::FillRect(bx, by, bw, bh, kPanel);
 		DrawText(bx + 40, by + 30, FitText(title, 5, bw - 80).c_str(), 5, kAccent);
 		DrawText(bx + 40, by + 130, FitText(text, 3, bw - 80).c_str(), 3, kText);
-		DrawText(bx + 40, by + bh - 70, (std::string(icon::Cross) + " OK").c_str(), 3, kDim);
+		DrawText(bx + 40, by + bh - 70, (std::string(icon::Cross) + " " + T("OK")).c_str(), 3, kDim);
 		Present();
 		const Nav n = nav.Read();
 		if (n.ok || n.back || n.options)
