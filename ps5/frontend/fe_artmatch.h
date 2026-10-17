@@ -542,15 +542,22 @@ inline std::string Resolve(const Index& ix, const std::string& requested, const 
     std::sort(candidates.begin(), candidates.end());
     candidates.erase(std::unique(candidates.begin(), candidates.end()), candidates.end());
     const std::vector<std::string> head = Tokens(MainOf(q.title));
-    int best = -1;
-    double best_fit = 0, second_fit = 0;
+    int best = -1, whole = -1;
+    double best_fit = 0, second_fit = 0, whole_fit = 0, second_whole = 0;
     for (int k : candidates)
     {
-        const double f = Score(ix, words, head, ix.entries[size_t(k)]);
+        const Entry& e = ix.entries[size_t(k)];
+        const double f = Score(ix, words, head, e);
         if (f > best_fit) { second_fit = best_fit; best_fit = f; best = k; }
         else if (f > second_fit) second_fit = f;
+        // what the whole query says, apart from the main-title tiers: a game that explains all of it comes first
+        // ("Front Mission - Gun Hazard" is "Front Mission Series - Gun Hazard", not the "Front Mission" its head names)
+        const double w = std::max(Fit(ix, words, e.all), Fit(ix, words, e.head));
+        if (w > whole_fit) { second_whole = whole_fit; whole_fit = w; whole = k; }
+        else if (w > second_whole) second_whole = w;
     }
-    if (best < 0 || best_fit < 0.85 || best_fit - second_fit < 0.05) return "";
+    if (whole >= 0 && whole_fit >= 0.85 && whole_fit - second_whole >= 0.05) best = whole;
+    else if (best < 0 || best_fit < 0.85 || best_fit - second_fit < 0.05) return "";
     return Pick(ix, ix.by_joined.at(ix.entries[size_t(best)].joined), q.region);
 }
 // The entries of a sorted key list that equal key, and those that only start with it.

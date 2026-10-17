@@ -35,6 +35,7 @@ struct GameInfo
 	std::string crc_name; // the name the ROM's CRC has in the extra table (a translation, a hack), "" if none
 	std::string header_title; // the ROM header's title, only for a ROM no name or CRC identified; "" otherwise
 	bool header_japan = false; // that header's country byte says Japan
+	uint32_t crc = 0; // the ROM's CRC32 (without a copier header) when the scan took it; 0 if not
 };
 
 // The table built into the ELF.
@@ -46,6 +47,9 @@ std::string ByCrc(uint32_t crc);
 // The name of a dump No-Intro does not list (data/snes-extra-crc.tsv: fan translations, hacks, other dump sets), or "".
 // Not a No-Intro name: only the cover lookup reads it.
 std::string ByExtraCrc(uint32_t crc);
+// Where an online database has the cover of a game libretro-thumbnails lacks (data/snes-db-art.tsv): addresses,
+// tab-separated, found by the ROM's CRC or by the words of its name; "" when no database row fits.
+std::string DatabaseCoverUrls(const GameInfo& game);
 // Exact No-Intro name ("Super Mario World (USA)") -> itself, or "".
 std::string Exact(const std::string& name);
 // Loose: title without tags, any case ("super mario world") -> best regional entry, or "".

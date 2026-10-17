@@ -4,6 +4,7 @@
 #include "fe_games.h"
 #include "fe_titlematch.h"
 #include "fe_artmatch.h"
+#include "fe_dbart.h"
 #include "fe_romheader.h"
 
 #include "OrbisPaths.h"
@@ -34,6 +35,7 @@
 
 S9X_INCBIN(s9x_gamedb, GAMEDB_TSV)
 S9X_INCBIN(s9x_extracrc, EXTRACRC_TSV)
+S9X_INCBIN(s9x_dbart, DBART_TSV)
 
 namespace fe
 {
@@ -107,8 +109,10 @@ struct Db
 	std::unordered_map<std::string, std::string> loose; // Key -> best name
 	std::vector<std::string> all_names;
 	std::unordered_map<uint32_t, std::string> extra_by_crc; // dumps No-Intro does not list
+	dbart::Table covers; // games an online database has a cover for and libretro-thumbnails has not
 	Db()
 	{
+		dbart::Parse(s9x_dbart_begin, s9x_dbart_end, covers);
 		const char* p = s9x_gamedb_begin;
 		const char* end = s9x_gamedb_end;
 		while (p < end)
@@ -341,6 +345,22 @@ std::string ByExtraCrc(uint32_t crc)
 	return it == D().extra_by_crc.end() ? std::string() : it->second;
 }
 
+std::string DatabaseCoverUrls(const GameInfo& game)
+{
+	// the host tests point both at a local server
+	const char* hasheous = getenv("SNES9X_DBART_HASHEOUS");
+	const char* thegamesdb = getenv("SNES9X_DBART_THEGAMESDB");
+	const dbart::Row* row = dbart::Find(D().covers, game.crc, game.nointro.empty() ? game.file_base : game.nointro);
+	if (!row && game.nointro != game.file_base)
+		row = dbart::Find(D().covers, 0, game.file_base);
+	if (!row && !game.crc_name.empty())
+		row = dbart::Find(D().covers, 0, game.crc_name);
+	if (!row)
+		return std::string();
+	return dbart::Urls(*row, hasheous && *hasheous ? hasheous : "https://hasheous.org/api/v1/images/",
+		thegamesdb && *thegamesdb ? thegamesdb : "https://cdn.thegamesdb.net/images/original/boxart/front/");
+}
+
 std::string Exact(const std::string& name)
 {
 	auto it = D().exact.find(Lower(name));
@@ -477,6 +497,7 @@ std::vector<GameInfo> ScanGames(const ScanProgress& progress)
 			uint32_t crc = 0;
 			if (CachedCrc(cache, g.path, &crc))
 			{
+				g.crc = crc;
 				g.nointro = gamedb::ByCrc(crc);
 				g.name_by_crc = !g.nointro.empty();
 				if (g.nointro.empty())

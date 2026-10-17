@@ -3,8 +3,13 @@
 #include "../frontend/fe_cheatlookup.h"
 #include "../frontend/fe_artaliases.h"
 #include "../frontend/fe_artmatch.h"
+#include "../frontend/fe_dbart.h"
 #include "../frontend/fe_romheader.h"
 #include <cassert>
+#include <cstdio>
+#include <iterator>
+#include <map>
+#include <set>
 #include <string>
 #include <vector>
 #include <iostream>
@@ -162,6 +167,11 @@ int main()
         assert(am::Resolve(ix, "Flying Hero - Bugyuru's Adventure (English)") == "Flying Hero - Bugyuru no Daibouken (Japan)");
         assert(am::Resolve(ix, "Chrono Trigger - Retranslation") == "Chrono Trigger (USA)");
         assert(am::Resolve(ix, "Ranma 1-2 - Hard Battle II - Super Move Hustle").empty());
+        // a game that explains the whole name beats the main title alone: Gun Hazard is not Front Mission
+        assert(am::Resolve(ix, "Front Mission - Gun Hazard (English)") == "Front Mission Series - Gun Hazard (Japan)");
+        assert(am::Resolve(ix, "Front Mission - Gun Hazard T-Eng (2004)(Aeon Genesis)") == "Front Mission Series - Gun Hazard (Japan)");
+        assert(am::Resolve(ix, "Front Mission T-Eng v1.02 (2023)(mteam, F.H.)") == "Front Mission (Japan)");
+        assert(am::Resolve(ix, "Front Mission - Something Else") == "Front Mission (Japan)"); // no such game: the main title's art, as for a hack
         // close in spelling is not enough when the numbers disagree
         assert(am::NumbersConflict("Dragon Quest III (English)", "Dragon Quest I & II (Japan)"));
         assert(am::NumbersConflict("Final Fantasy III", "Final Fantasy II (USA)"));
@@ -256,6 +266,45 @@ int main()
         }
         std::cout << "Extra CRC table: " << by_crc.size() << " dumps, " << found << " of " << translations << " English translations find art\n";
         assert(translations > 300 && found * 100 >= translations * 75);
+    }
+    // The database covers (tools/make_db_art.py): games libretro-thumbnails has no art for.
+    {
+        namespace am = fe::artmatch;
+        namespace da = fe::dbart;
+        std::ifstream f("ps5/frontend/data/snes-db-art.tsv", std::ios::binary);
+        assert(f);
+        const std::string text((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
+        da::Table table;
+        da::Parse(text.data(), text.data() + text.size(), table);
+        assert(table.rows.size() > 300 && table.names.size() == table.rows.size());
+        // by CRC32: a pirate cart that is a dump of Aladdin 2000, and Pokemon Stadium
+        const da::Row* aladdin = da::Find(table, 0x752A25D3, "mystery pirate");
+        assert(aladdin && aladdin->name == "Aladdin 2000");
+        assert(da::Urls(*aladdin, "https://h/", "https://t/") == "https://h/AF768536EEED4254A29FE3F540CE879677D5FE1D");
+        const da::Row* stadium = da::Find(table, 0xA8142249, "");
+        assert(stadium && stadium->name == "Pokemon Stadium");
+        // by the words of the name: the article after the comma, a different number or subtitle never matches
+        const da::Row* kof = da::Find(table, 0, "King of Fighters 2000");
+        assert(kof && da::Urls(*kof, "https://h/", "https://t/") == "https://t/27252-1.jpg");
+        assert(da::Find(table, 0, "Street Fighter EX Plus Alpha (Japan)"));
+        assert(!da::Find(table, 0, "Street Fighter III - Super Version")); // no database lists a SNES Street Fighter III
+        assert(!da::Find(table, 0, "Completely Different Game"));
+        assert(!da::Find(table, 0xDEADBEEF, ""));
+        // the table lists only what libretro-thumbnails lacks, so no CRC of it is a game with art
+        const auto nointro = index("ps5/frontend/data/snes-nointro.tsv");
+        std::map<std::string, std::string> nointro_name;
+        for (const std::string& line : nointro) nointro_name[line.substr(0, 8)] = line.substr(9);
+        const std::set<std::string> covered(boxarts.begin(), boxarts.end());
+        size_t overlap = 0;
+        for (const auto& entry : table.by_crc)
+        {
+            char crc[9];
+            std::snprintf(crc, sizeof crc, "%08X", entry.first);
+            const auto n = nointro_name.find(crc);
+            if (n != nointro_name.end() && covered.count(n->second)) ++overlap;
+        }
+        assert(overlap == 0);
+        std::cout << "Database covers: " << table.rows.size() << " games, " << table.by_crc.size() << " CRCs\n";
     }
     // The ROM header: LoROM, HiROM, ExHiROM, a copier header, a wrong checksum, and no header at all.
     {

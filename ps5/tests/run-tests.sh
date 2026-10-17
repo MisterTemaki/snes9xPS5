@@ -237,6 +237,37 @@ expect "[ -f '$T/root/covers/Dai-4-ji Super Robot Taisen (Japan).png' ]" "the CR
 expect "[ -f '$T/root/covers/Super Robot Taisen EX (Japan).png' ]" "Super Robot Wars EX (English) finds its Japanese art by its words"
 expect "[ -f '$T/root/covers/Zelda no Densetsu - Kamigami no Triforce (Japan).png' ]" "a header title finds its art"
 
+echo "== 9c. covers a database has and libretro-thumbnails has not: found by the ROM's CRC or by its name's words"
+T=$(newroot t9c)
+mkdir -p "$T/srv/hasheous" "$T/srv/tgdb" "$T/srv/Named_Boxarts" "$T/root/covers"
+python3 - "$T/srv" <<'PY'
+import sys
+from PIL import Image
+# hasheous.org/api/v1/images/<id> has no file extension; TheGamesDB's is <id>-1.jpg
+Image.new('RGB', (300, 400), (0, 255, 0)).save(sys.argv[1] + "/hasheous/AF768536EEED4254A29FE3F540CE879677D5FE1D", "PNG")
+Image.new('RGB', (300, 400), (0, 0, 255)).save(sys.argv[1] + "/tgdb/27252-1.jpg", "JPEG")
+PY
+# a name that says nothing, the CRC of a dump the table has (data/snes-db-art.tsv: Aladdin 2000)
+python3 tests/make_test_rom.py "$T/root/roms/mystery pirate.sfc" ntsc >/dev/null
+python3 tests/forge_crc.py "$T/root/roms/mystery pirate.sfc" 752A25D3 >/dev/null
+# the game's words (a database has "King of Fighters 2000, The"); and one no database lists
+python3 tests/make_test_rom.py "$T/root/roms/King of Fighters 2000.sfc" ntsc >/dev/null
+python3 tests/make_test_rom.py "$T/root/roms/Street Fighter III - Super Version.sfc" ntsc >/dev/null
+PORT=18083
+(cd "$T/srv" && exec python3 -m http.server $PORT --bind 127.0.0.1 >"$T/srv.log" 2>&1) &
+SRVPID=$!
+sleep 1
+rc=$(OFFLINE= COVER_URL="http://127.0.0.1:$PORT/Named_Boxarts/\${name}.png" SNES9X_DBART_HASHEOUS="http://127.0.0.1:$PORT/hasheous/" \
+	SNES9X_DBART_THEGAMESDB="http://127.0.0.1:$PORT/tgdb/" SNES9X_HOST_REALTIME=1 run "$T" "0:0;300:$OPTIONS;302:0;310:$CROSS;312:0" "")
+kill $SRVPID 2>/dev/null
+expect "[ $rc = 0 ]" "exit code 0 (got $rc)"
+expect "[ -n \"\$(find $T/root/covers -name '*.png' -size +100c | grep -e mystery -e Aladdin)\" ]" "the CRC of a dump the table has finds its cover (hasheous.org)"
+is_jpeg() { [ "$(head -c 2 "$1" | od -An -tx1 | tr -d ' \n')" = ffd8 ]; }
+expect "[ -f '$T/root/covers/King of Fighters 2000.png' ] && is_jpeg '$T/root/covers/King of Fighters 2000.png'" "the words of a name find its cover (TheGamesDB, a JPEG)"
+expect "[ ! -e '$T/root/covers/Street Fighter III - Super Version.png' ]" "a game no database lists gets no cover"
+expect "! grep '/hasheous/\|/tgdb/' $T/srv.log | grep -v 'AF768536EEED4254A29FE3F540CE879677D5FE1D\|27252-1.jpg' | grep -q ." "and nothing else is asked of either database"
+expect "! grep -q 'runtime error\|AddressSanitizer' $T/out.txt" "no sanitizer reports"
+
 echo "== 10. offline: no download is tried, the shelf still works"
 T=$(newroot t10)
 python3 tests/make_test_rom.py "$T/root/roms/Super Mario World (USA).sfc" ntsc >/dev/null

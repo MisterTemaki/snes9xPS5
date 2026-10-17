@@ -25,6 +25,7 @@
 #include <ctime>
 #include <mutex>
 #include <unordered_map>
+#include <unordered_set>
 
 #define STB_IMAGE_IMPLEMENTATION
 #define STB_IMAGE_STATIC
@@ -479,10 +480,40 @@ std::string CoverUrlFor(const std::string& nointro)
         root + "Named_Snaps/" + encoded + ".png";
 }
 
+namespace
+{
+// Where an online database has the box art of a game libretro-thumbnails has none of (fe_dbart.h), or "". Asked once per game.
+std::string DatabaseUrls(const GameInfo& game, const std::string& box)
+{
+    static const std::unordered_set<std::string> libretro(BoxArtNames().begin(), BoxArtNames().end());
+    if (libretro.count(box)) return "";
+    static std::mutex mutex;
+    static std::unordered_map<std::string, std::string> cache;
+    const std::string key = game.file_base + "|" + game.nointro + "|" + std::to_string(game.crc) + "|" + game.crc_name;
+    std::lock_guard<std::mutex> guard(mutex);
+    auto it = cache.find(key);
+    if (it == cache.end())
+    {
+        it = cache.emplace(key, gamedb::DatabaseCoverUrls(game)).first;
+        if (!it->second.empty())
+            OrbisLog("[covers] a database has art for %s: %s", game.file_base.c_str(), it->second.c_str());
+    }
+    return it->second;
+}
+// The boxart address stays first, the database's follow it, then the title screen and the snapshot.
+std::string WithDatabaseUrls(const std::string& urls, const std::string& database)
+{
+    if (database.empty()) return urls;
+    const size_t tab = urls.find('\t');
+    return tab == std::string::npos ? urls + "\t" + database : urls.substr(0, tab) + "\t" + database + urls.substr(tab);
+}
+} // namespace
+
 std::string CoverUrlForGame(const GameInfo& game)
 {
     const std::string box = CoverNameFor(game);
-    const std::string default_url = CoverUrlFor(box);
+    const std::string database = DatabaseUrls(game, box);
+    const std::string default_url = WithDatabaseUrls(CoverUrlFor(box), database);
     if (getenv("SNES9X_COVER_URL")) return default_url;
     const std::string root =
         "https://raw.githubusercontent.com/libretro-thumbnails/Nintendo_-_Super_Nintendo_Entertainment_System/master/";
@@ -496,8 +527,8 @@ std::string CoverUrlForGame(const GameInfo& game)
         url.replace(p, 7, UrlEncode(ThumbnailName(box)));
     const std::string title_name = title.empty() ? box : title;
     const std::string snap_name = snap.empty() ? box : snap;
-    return url + "\t" + root + "Named_Titles/" + UrlEncode(ThumbnailName(title_name)) +
-        ".png\t" + root + "Named_Snaps/" + UrlEncode(ThumbnailName(snap_name)) + ".png";
+    return WithDatabaseUrls(url + "\t" + root + "Named_Titles/" + UrlEncode(ThumbnailName(title_name)) +
+        ".png\t" + root + "Named_Snaps/" + UrlEncode(ThumbnailName(snap_name)) + ".png", database);
 }
 
 std::string WantedListPath()
