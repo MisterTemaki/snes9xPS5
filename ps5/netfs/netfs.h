@@ -66,10 +66,34 @@ std::vector<std::string> netfs_notices();
 // True for /smb/... and /nfs/... paths (whether or not a share is mounted there).
 bool netfs_is_network_path(const char* path);
 
-// The frontend calls this with true after LoadGame returns and with false in CloseGame. The read-ahead cache
-// (a later phase) uses it to decide what may wait on the network. It has no other effect yet.
+// The frontend calls this with true after LoadGame returns and with false in CloseGame. While it is true nothing
+// in netfs waits on the network for the calling thread: stat and open answer from memory, a .pcm read that is not
+// in memory is silence, and no connection call is made on the emulation thread. The one exception is a miss
+// inside an MSU-1 data file (<rom>.msu, msu1.rom) that did not fit the prefetch budget; see netfs_cache.h.
 void netfs_set_realtime(bool on);
 bool netfs_realtime();
+
+// ---- cache ----
+
+// Before LoadGame, for a ROM on a share: lists the ROM's folder, fetches the MSU-1 data files whole (up to 32 MiB)
+// and the first 128 KiB of up to 64 tracks. Waits for the data, and for the track heads up to head_wait_ms.
+// Does nothing for other paths and for a share that is not ready.
+void netfs_prepare_game(const std::string& rom_path, int head_wait_ms = 3000);
+// After CloseGame: lets go of what netfs_prepare_game kept.
+void netfs_end_game();
+// Forget the cached folder listings (the frontend's rescan). They expire after 60 s on their own.
+void netfs_rescan();
+
+struct NetfsStats
+{
+	uint64_t blocks_fetched = 0;
+	uint64_t bytes_fetched = 0;
+	uint64_t underruns = 0;   // .pcm reads answered with silence
+	uint64_t data_stalls = 0; // MSU-1 data reads that waited for the network
+};
+NetfsStats netfs_stats();
+// Where netfs's own lines go (one line per call, safe to show or log). Empty: nowhere.
+void netfs_set_log(std::function<void(const std::string&)> log);
 
 // ---- test and backend hooks ----
 
@@ -81,5 +105,7 @@ void netfs_set_clock(std::function<int64_t()> now_ms);
 // One watchdog pass (the watchdog thread calls it every 250 ms): a connect running over 15 s, or any other
 // request over 5 s, aborts that share's connection and marks it Dead (or Failed, while connecting).
 void netfs_watchdog_tick();
+// Returns when no share has read-ahead or handle-close work queued or running (deterministic waits in tests).
+void netfs_cache_wait_idle();
 constexpr int64_t kNetfsRequestLimitMs = 5000;
 constexpr int64_t kNetfsConnectLimitMs = 15000;

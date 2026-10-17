@@ -15,6 +15,7 @@
 #include <mutex>
 #include <new>
 
+#include "netfs_cache.h"
 #include "netfs_core.h"
 
 namespace netfs
@@ -23,23 +24,17 @@ namespace vfs
 {
 namespace
 {
-constexpr size_t kBlock = 512 * 1024;    // the largest buffer refill, and the size from which a read bypasses the buffer
-constexpr size_t kFillStart = 64 * 1024; // the first refill; it doubles while the reads stay sequential
-
 struct OpenFile
 {
 	std::recursive_mutex mu; // the stdio per-FILE lock too (flockfile)
 	bool used = false;       // guarded by g_slots_mu
-	std::shared_ptr<Share> share;
-	Handle h = nullptr;
+	std::shared_ptr<Share> share; // outlives data: the cache's handle closes through it
+	std::shared_ptr<FileData> data;
 	uint64_t size = 0;
 	uint64_t pos = 0; // the next byte a read returns
 	bool eof = false;
 	bool err = false;
 	int pushback = -1;
-	std::vector<uint8_t> buf; // bytes [buf_off, buf_off + buf.size()) of the file
-	uint64_t buf_off = 0;
-	size_t fill = kFillStart;
 };
 
 struct OpenDir
@@ -86,12 +81,10 @@ OpenFile* Claim()
 			OpenFile& f = Files()[i];
 			f.used = true;
 			f.share.reset();
-			f.h = nullptr;
-			f.size = f.pos = f.buf_off = 0;
+			f.data.reset();
+			f.size = f.pos = 0;
 			f.eof = f.err = false;
 			f.pushback = -1;
-			f.buf.clear();
-			f.fill = kFillStart;
 			return &f;
 		}
 	return nullptr;
@@ -151,49 +144,20 @@ size_t ReadBytes(OpenFile& f, uint8_t* dst, size_t n)
 			f.eof = true;
 			break;
 		}
-		uint64_t buf_end = f.buf_off + f.buf.size();
-		if (f.pos >= f.buf_off && f.pos < buf_end)
-		{
-			size_t k = (size_t)std::min<uint64_t>(n - done, buf_end - f.pos);
-			memcpy(dst + done, f.buf.data() + (f.pos - f.buf_off), k);
-			f.pos += k;
-			done += k;
-			continue;
-		}
-		size_t want = (size_t)std::min<uint64_t>(n - done, f.size - f.pos);
-		bool direct = want >= kBlock;
-		size_t ask = want;
-		if (!direct)
-		{
-			// refill the buffer; the doubling follows a reader that keeps coming back for the next bytes
-			f.fill = (!f.buf.empty() && f.pos == buf_end) ? std::min(f.fill * 2, kBlock) : kFillStart;
-			ask = (size_t)std::min<uint64_t>(f.fill, f.size - f.pos);
-			f.buf.resize(ask);
-		}
-		int64_t r = f.share->Read(f.h, f.pos, direct ? dst + done : f.buf.data(), ask);
+		int64_t r = f.data->ReadAt(f.pos, dst + done, n - done);
 		if (r < 0)
 		{
-			f.buf.clear();
 			f.err = true;
 			errno = (int)-r;
 			break;
 		}
 		if (r == 0)
 		{
-			f.buf.clear();
 			f.eof = true; // the file is shorter than it said
 			break;
 		}
-		if (direct)
-		{
-			f.pos += (uint64_t)r;
-			done += (size_t)r;
-		}
-		else
-		{
-			f.buf.resize((size_t)r);
-			f.buf_off = f.pos;
-		}
+		f.pos += (uint64_t)r;
+		done += (size_t)r;
 	}
 	return done;
 }
@@ -209,7 +173,7 @@ bool Lookup(const char* path, Route& r, Attr& a, int& ret)
 {
 	if (!Resolve(path, r))
 		return false;
-	Status s = r.share->Stat(r.rel, a);
+	Status s = r.share->cache().Stat(r.rel, a);
 	if (!s.ok())
 	{
 		errno = ErrnoOf(s);
@@ -247,16 +211,11 @@ bool OpenSlot(const char* path, OpenFile*& slot)
 	if (!Resolve(path, r))
 		return false;
 	slot = nullptr;
-	Attr a;
-	Status s = r.share->Stat(r.rel, a);
+	std::shared_ptr<FileData> data;
+	Status s = r.share->cache().Open(r.rel, data);
 	if (!s.ok())
 	{
 		errno = ErrnoOf(s);
-		return true;
-	}
-	if (a.is_dir)
-	{
-		errno = EISDIR;
 		return true;
 	}
 	OpenFile* f = Claim();
@@ -265,18 +224,9 @@ bool OpenSlot(const char* path, OpenFile*& slot)
 		errno = EMFILE;
 		return true;
 	}
-	Handle h = nullptr;
-	s = r.share->Open(r.rel, h);
-	if (!s.ok())
-	{
-		std::lock_guard<std::mutex> lk(g_slots_mu);
-		f->used = false;
-		errno = ErrnoOf(s);
-		return true;
-	}
 	f->share = r.share;
-	f->h = h;
-	f->size = a.size;
+	f->size = data->size;
+	f->data = std::move(data);
 	slot = f;
 	return true;
 }
@@ -379,7 +329,7 @@ bool Opendir(const char* path, DIR*& ret)
 		return true;
 	}
 	std::vector<DirEntry> list;
-	Status s = r.share->List(r.rel, list);
+	Status s = r.share->cache().List(r.rel, list);
 	if (!s.ok())
 	{
 		errno = ErrnoOf(s);
@@ -418,11 +368,8 @@ int Fclose(FILE* fp)
 		return EOF;
 	{
 		std::lock_guard<std::recursive_mutex> lk(f->mu);
-		if (f->share)
-			f->share->CloseHandle(f->h);
+		f->data.reset(); // the last reference closes the server's handle
 		f->share.reset();
-		f->buf.clear();
-		f->buf.shrink_to_fit();
 	}
 	std::lock_guard<std::mutex> lk(g_slots_mu);
 	f->used = false;
@@ -595,10 +542,7 @@ long Pread(int fd, void* p, size_t n, long long off)
 		return -1;
 	if (off < 0)
 		return Reject(EINVAL);
-	if ((uint64_t)off >= f->size)
-		return 0;
-	n = (size_t)std::min<uint64_t>(n, f->size - (uint64_t)off);
-	int64_t r = f->share->Read(f->h, (uint64_t)off, p, n);
+	int64_t r = f->data->ReadAt((uint64_t)off, p, n);
 	if (r < 0)
 		return Reject((int)-r);
 	return (long)r;

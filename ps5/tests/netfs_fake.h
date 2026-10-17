@@ -33,6 +33,8 @@ struct FakeServer
 	netfs::Status connect_status;      // what Connect() returns
 	std::atomic<bool> hang{false};     // the next call waits until its backend is aborted
 	std::atomic<bool> fail_reads{false}; // Pread() returns -EIO
+	std::atomic<bool> gate{false};     // Pread() waits until Release() (a slow link) or its backend is aborted
+	std::atomic<int> gated{0};         // reads waiting at the gate
 	std::vector<std::string> offered;  // Enumerate()
 
 	// traffic
@@ -48,6 +50,21 @@ struct FakeServer
 		files[path] = data;
 		for (size_t i = path.find('/'); i != std::string::npos; i = path.find('/', i + 1))
 			dirs.insert(path.substr(0, i));
+	}
+
+	void Release()
+	{
+		{
+			std::lock_guard<std::mutex> lk(mu);
+			gate = false;
+		}
+		cv.notify_all();
+	}
+
+	void WaitGated(int n)
+	{
+		std::unique_lock<std::mutex> lk(mu);
+		cv.wait(lk, [&] { return gated.load() >= n; });
 	}
 
 	// Waits (a real condition wait, no sleep) until `n` calls are parked by `hang`.
@@ -149,7 +166,7 @@ public:
 	int64_t Pread(netfs::Handle h, void* buf, size_t len, uint64_t offset) override
 	{
 		m_s->reads++;
-		if (Parked() || m_s->fail_reads)
+		if (Parked() || AtGate() || m_s->fail_reads)
 			return -EIO;
 		std::lock_guard<std::mutex> lk(m_s->mu);
 		const std::string& data = m_s->files[((OpenRec*)h)->path];
@@ -191,6 +208,20 @@ private:
 	{
 		std::string path;
 	};
+
+	// With `gate` set: waits until Release() or Abort(). Returns true when the call was aborted.
+	bool AtGate()
+	{
+		std::unique_lock<std::mutex> lk(m_s->mu);
+		if (m_s->gate && !m_aborted)
+		{
+			m_s->gated++;
+			m_s->cv.notify_all();
+			m_s->cv.wait(lk, [&] { return !m_s->gate || m_aborted; });
+			m_s->gated--;
+		}
+		return m_aborted;
+	}
 
 	// With `hang` set: parks the call until Abort(). Returns true when the call was aborted.
 	bool Parked()

@@ -13,6 +13,8 @@
 
 namespace netfs
 {
+class Cache;
+
 // One configured share and its one connection. All backend calls go through here, under the connection lock,
 // timed for the watchdog.
 class Share
@@ -37,6 +39,8 @@ public:
 	void Kill(bool stopping);
 	// Milliseconds on the netfs clock when the running request began; 0 when none runs.
 	int64_t RequestStart() const { return m_req_start.load(); }
+	// Listings, file blocks and the read-ahead worker for this share (netfs_cache.h). Always there.
+	Cache& cache() { return *m_cache; }
 
 	Status Stat(const std::string& rel, Attr& out);
 	Status List(const std::string& rel, std::vector<DirEntry>& out);
@@ -57,6 +61,7 @@ private:
 	std::unique_ptr<Backend> m_backend;
 	std::mutex m_conn_mu; // serialises backend calls
 	std::atomic<int64_t> m_req_start{0};
+	std::unique_ptr<Cache> m_cache; // last: goes first, while the connection it closes handles on is still there
 };
 
 struct Route
@@ -71,4 +76,6 @@ bool Resolve(const char* path, Route& out);
 
 int64_t NowMs();
 void SetLastError(const std::string& text);
+// One line for the frontend's log (netfs_set_log); a no-op when none is set. Never has a password in it.
+void Log(const std::string& line);
 } // namespace netfs
