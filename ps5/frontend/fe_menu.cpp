@@ -119,12 +119,25 @@ const char* YesNo(bool b)
 	return b ? "On" : "Off";
 }
 
+// Settings::border: nothing, the game's own art from /data/snes9x/borders (else the pack's default, else the built-in
+// frame), or the default frame only.
+const char* BorderName(int b)
+{
+	switch (b)
+	{
+		case 1: return "Auto";
+		case 2: return "Default frame";
+		default: return "Off";
+	}
+}
+
 // The settings shared by the game list (Triangle) and the pause menu. Returns true if 'idx' was a setting
 // and 'dir' (-1/+1) changed it.
 enum SettingRow
 {
 	S_SHADER,
 	S_ASPECT,
+	S_BORDER,
 	S_SCANLINES,
 	S_FPS,
 	S_AUDIO,
@@ -226,6 +239,7 @@ std::string SettingLabel(int s)
 	{
 		case S_SHADER: return "Shader";
 		case S_ASPECT: return "Aspect ratio";
+		case S_BORDER: return "Border";
 		case S_SCANLINES: return "Scanlines (shader Off)";
 		case S_FPS: return "Show FPS";
 		case S_AUDIO: return "Sound";
@@ -246,6 +260,7 @@ std::string SettingValue(int s)
 	{
 		case S_SHADER: return ps5crt::Name(ps5crt::Shader(c.shader));
 		case S_ASPECT: return ps5video::AspectName(ps5video::Aspect(c.aspect));
+		case S_BORDER: return BorderName(c.border);
 		case S_SCANLINES: return YesNo(c.scanlines);
 		case S_FPS: return YesNo(c.show_fps);
 		case S_AUDIO: return YesNo(c.audio);
@@ -271,6 +286,7 @@ void ChangeSetting(int s, int dir)
 			break;
 		}
 		case S_ASPECT: c.aspect = (c.aspect + dir + n) % n; break;
+		case S_BORDER: c.border = (c.border + dir + 3) % 3; break;
 		case S_SCANLINES: c.scanlines = !c.scanlines; break;
 		case S_FPS: c.show_fps = !c.show_fps; break;
 		case S_AUDIO: c.audio = !c.audio; break;
