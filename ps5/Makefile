@@ -39,6 +39,24 @@ CORE_SRC := apu/apu.cpp apu/bapu/dsp/sdsp.cpp apu/bapu/smp/smp.cpp apu/bapu/smp/
 	tileimpl-n2x1.cpp tileimpl-h2x1.cpp sha256.cpp bml.cpp movie.cpp fscompat.cpp loadzip.cpp
 CORE_C_SRC := unzip/unzip.c unzip/ioapi.c
 
+# netfs: network shares as folders (SMB and NFS), see netfs/netfs_backend.h. The protocol files are swapped
+# in by the backend work: backend_smb.cpp / backend_nfs.cpp replace the stubs (which fail with "not built in").
+NETFS_CORE_SRC :=
+NETFS_SMB_SRC := netfs/backend_smb_stub.cpp
+NETFS_NFS_SRC := netfs/backend_nfs_stub.cpp
+NETFS_SRC := $(NETFS_CORE_SRC) $(NETFS_SMB_SRC) $(NETFS_NFS_SRC)
+# libsmb2 and libnfs (LGPL-2.1) are vendored into these folders, with their notices. While a folder is absent
+# its list is empty and nothing is built. The flags are a start: the backend work tunes them (PS4_PLATFORM,
+# config.h, the PS5 resolver and socket shims).
+LIBSMB2 := third_party/libsmb2
+LIBNFS := third_party/libnfs
+LIBSMB2_SRC := $(sort $(wildcard $(LIBSMB2)/lib/*.c))
+LIBNFS_SRC := $(sort $(foreach d,lib mount nfs nfs4 portmap nlm nsm rquota,$(wildcard $(LIBNFS)/$(d)/*.c)))
+LIBSMB2_FLAGS := -I$(LIBSMB2)/include -I$(LIBSMB2)/include/smb2 -I$(LIBSMB2)/lib
+LIBNFS_FLAGS := -I$(LIBNFS)/include -I$(LIBNFS)/include/nfsc -I$(LIBNFS)
+%/port/netfs/backend_smb.o: EXTRA_FLAGS = $(LIBSMB2_FLAGS)
+%/port/netfs/backend_nfs.o: EXTRA_FLAGS = $(LIBNFS_FLAGS)
+
 # the app (eboot.bin): the emulator and its frontend
 EMU_SRC := coreorbis/main-boot.cpp \
 	coreorbis/orbis-shims/orbis_paths.cpp coreorbis/orbis-shims/ProsperoNotify.cpp \
@@ -47,7 +65,7 @@ EMU_SRC := coreorbis/main-boot.cpp \
 	coreorbis/orbis-shims/ProsperoCrash.cpp coreorbis/orbis-shims/ProsperoCrt.cpp coreorbis/orbis-shims/ProsperoUpdate.cpp \
 	frontend/fe_emu.cpp frontend/fe_menu.cpp frontend/fe_settings.cpp frontend/fe_text.cpp \
 	frontend/fe_games.cpp frontend/fe_http.cpp frontend/fe_covers.cpp frontend/fe_shelf.cpp \
-	frontend/fe_prefetch.cpp frontend/fe_coverfetch.cpp frontend/fe_coverworker.cpp
+	frontend/fe_prefetch.cpp frontend/fe_coverfetch.cpp frontend/fe_coverworker.cpp $(NETFS_SRC)
 # the payloads: the helper, and the installer (= helper + install)
 # (the helper also downloads the covers in the background: fe_coverworker.cpp, with the app's HTTPS code)
 HELPER_SRC := coreorbis/orbis-shims/orbis_paths.cpp coreorbis/orbis-shims/ProsperoNotify.cpp \
@@ -102,6 +120,8 @@ PS5_MBEDTLS_OBJ := $(patsubst $(MBEDTLS)/library/%.c,$(PS5_OUT)/mbedtls/%.o,$(MB
 PS5_HELPER_OBJ := $(PS5_OUT)/port/installer/helper_main.o $(patsubst %.cpp,$(PS5_OUT)/port/%.o,$(HELPER_SRC)) $(PS5_MBEDTLS_OBJ)
 PS5_INSTALLER_OBJ := $(patsubst %.cpp,$(PS5_OUT)/port/%.o,$(INSTALLER_SRC)) $(PS5_MBEDTLS_OBJ)
 PS5_ZLIB_OBJ := $(patsubst $(ZLIB)/%.c,$(PS5_OUT)/zlib/%.o,$(ZLIB_SRC))
+PS5_LIBSMB2_OBJ := $(patsubst $(LIBSMB2)/%.c,$(PS5_OUT)/libsmb2/%.o,$(LIBSMB2_SRC))
+PS5_LIBNFS_OBJ := $(patsubst $(LIBNFS)/%.c,$(PS5_OUT)/libnfs/%.o,$(LIBNFS_SRC))
 
 ps5: $(PS5_OUT)/Snes9xPS5.elf
 
@@ -128,6 +148,14 @@ $(PS5_OUT)/port/installer/helper_main.o: installer/installer_main.cpp coreorbis/
 $(PS5_OUT)/zlib/%.o: $(ZLIB)/%.c
 	@mkdir -p $(dir $@)
 	$(PS5_CC) -O2 -fPIC -march=znver2 -DHAVE_UNISTD_H -I$(ZLIB) -w -c -o $@ $<
+
+$(PS5_OUT)/libsmb2/%.o: $(LIBSMB2)/%.c
+	@mkdir -p $(dir $@)
+	$(PS5_CC) -O2 -fPIC -march=znver2 -DPS4_PLATFORM $(LIBSMB2_FLAGS) -w -c -o $@ $<
+
+$(PS5_OUT)/libnfs/%.o: $(LIBNFS)/%.c
+	@mkdir -p $(dir $@)
+	$(PS5_CC) -O2 -fPIC -march=znver2 $(LIBNFS_FLAGS) -w -c -o $@ $<
 
 # 1. the helper payload (built into the app, which sends it to the ELF loader when no helper answers)
 $(PS5_OUT)/Snes9xPS5-helper.elf: $(PS5_HELPER_OBJ)
@@ -220,7 +248,7 @@ build/app/app_crt.o build/app/app_cpp_runtime.o: build/app/%.o: $(NATIVE)/toolin
 		-c -o $@ $<
 
 EBOOT_OBJS = build/app/app_crt.o build/app/app_cpp_runtime.o $(PS5_CORE_OBJ) $(PS5_EMU_OBJ) $(PS5_ZLIB_OBJ) \
-	$(PS5_OUT)/helper_data.o
+	$(PS5_LIBSMB2_OBJ) $(PS5_LIBNFS_OBJ) $(PS5_OUT)/helper_data.o
 build/app/snes9x-pie.elf: $(EBOOT_OBJS) $(NATIVE)/tooling/native/ps5-pie.ld $(NATIVE)/tooling/native/ehframe.ld \
 		$(NATIVE)/tooling/native/app-symbols.map $(NATIVE)/tooling/native/localize.map
 	$(LLD) -m elf_x86_64 -pie -z max-page-size=0x4000 --hash-style=gnu \
@@ -271,6 +299,8 @@ HOST_HELPER_OBJ := $(HOST_OUT)/port/installer/helper_main.o $(patsubst %.cpp,$(H
 	$(HOST_MBEDTLS_OBJ)
 HOST_INSTALLER_OBJ := $(patsubst %.cpp,$(HOST_OUT)/port/%.o,$(INSTALLER_SRC) host/sce_host.cpp) $(HOST_MBEDTLS_OBJ)
 HOST_ZLIB_OBJ := $(patsubst $(ZLIB)/%.c,$(HOST_OUT)/zlib/%.o,$(ZLIB_SRC))
+HOST_LIBSMB2_OBJ := $(patsubst $(LIBSMB2)/%.c,$(HOST_OUT)/libsmb2/%.o,$(LIBSMB2_SRC))
+HOST_LIBNFS_OBJ := $(patsubst $(LIBNFS)/%.c,$(HOST_OUT)/libnfs/%.o,$(LIBNFS_SRC))
 
 host: $(HOST_OUT)/snes9x-ps5-host $(HOST_OUT)/snes9x-ps5-installer $(HOST_OUT)/snes9x-ps5-helper
 
@@ -298,6 +328,14 @@ $(HOST_OUT)/zlib/%.o: $(ZLIB)/%.c
 	@mkdir -p $(dir $@)
 	$(HOST_CC) -O2 -DHAVE_UNISTD_H -I$(ZLIB) -w -c -o $@ $<
 
+$(HOST_OUT)/libsmb2/%.o: $(LIBSMB2)/%.c
+	@mkdir -p $(dir $@)
+	$(HOST_CC) -O2 -g1 $(LIBSMB2_FLAGS) -w -c -o $@ $<
+
+$(HOST_OUT)/libnfs/%.o: $(LIBNFS)/%.c
+	@mkdir -p $(dir $@)
+	$(HOST_CC) -O2 -g1 $(LIBNFS_FLAGS) -w -c -o $@ $<
+
 # The host installer carries a stand-in app folder (tests/fake-eboot.bin, tests/fake-libc.prx + the real
 # param/icon/pic); the host app carries the host helper, which it hands to a fake ELF loader in the tests.
 HOST_APP_DEFS = -DAPP_EBOOT='"$(abspath tests/fake-eboot.bin)"' -DAPP_PARAM='"$(abspath app/sce_sys/param.json)"' \
@@ -320,7 +358,7 @@ $(HOST_OUT)/snes9x-ps5-helper: $(HOST_HELPER_OBJ)
 $(HOST_OUT)/snes9x-ps5-installer: $(HOST_INSTALLER_OBJ) $(HOST_OUT)/install_data.o
 	$(HOST_CXX) $(HOST_SAN) -o $@ $^ -lpthread
 
-$(HOST_OUT)/snes9x-ps5-host: $(HOST_CORE_OBJ) $(HOST_EMU_OBJ) $(HOST_ZLIB_OBJ) $(HOST_OUT)/helper_data.o
+$(HOST_OUT)/snes9x-ps5-host: $(HOST_CORE_OBJ) $(HOST_EMU_OBJ) $(HOST_ZLIB_OBJ) $(HOST_LIBSMB2_OBJ) $(HOST_LIBNFS_OBJ) $(HOST_OUT)/helper_data.o
 	$(HOST_CXX) $(HOST_SAN) -o $@ $^ -lpthread
 
 test: host
