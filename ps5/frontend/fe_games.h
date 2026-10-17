@@ -27,6 +27,7 @@ struct GameInfo
 	std::string title; // what the shelf shows
 	std::string region; // "USA", "Europe"... from the name's tags
 	bool on_usb = false;
+	bool on_network = false; // on a share (/smb/..., /nfs/...): named without reading the ROM (netfs)
 	bool name_by_crc = false; // the name came from the CRC (not the file name)
 };
 
@@ -46,6 +47,9 @@ std::string Fuzzy(const std::string& file_base);
 std::string Title(const std::string& nointro);
 std::string Region(const std::string& nointro);
 } // namespace gamedb
+
+// The folders to look for ROMs in: OrbisRomRoots() plus the network shares that are connected (in memory, no I/O).
+std::vector<std::string> RomRoots();
 
 // The headerless CRC32 of a ROM file (or the CRC a .zip stores for its ROM); false if it can't be read.
 bool RomCrc32(const std::string& path, uint32_t* crc);

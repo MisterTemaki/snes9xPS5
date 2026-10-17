@@ -7,6 +7,7 @@
 #include <chrono>
 #include <condition_variable>
 #include <cstdio>
+#include <deque>
 #include <cstring>
 
 #include "ProsperoThread.h"
@@ -41,6 +42,7 @@ struct Registry
 	std::shared_ptr<const ShareList> shares = std::make_shared<const ShareList>();
 	std::vector<std::string> notices;
 	std::string last_error;
+	std::deque<std::string> events;
 	NetfsBackendFactory factory[2];
 	std::function<int64_t()> clock;
 	std::function<void(const std::string&)> log;
@@ -150,6 +152,15 @@ void SetLastError(const std::string& text)
 	r.last_error = text;
 }
 
+void PushEvent(const std::string& text)
+{
+	Registry& r = R();
+	std::lock_guard<std::mutex> lk(r.mu);
+	if (r.events.size() >= 32)
+		r.events.pop_front();
+	r.events.push_back(text);
+}
+
 // Marks a request in flight for the watchdog while it is alive.
 class Timed
 {
@@ -238,13 +249,17 @@ void Share::Mount()
 	if (m_state.load() != NetfsState::Connecting) // the watchdog or netfs_stop got there first
 		return;
 	if (st.ok())
+	{
 		m_state.store(NetfsState::Ready);
+		PushEvent("Connected to " + label);
+	}
 	else
 	{
 		std::string text = netfs_error_text(st, cfg);
 		m_error = text;
 		m_state.store(NetfsState::Failed);
 		SetLastError(text);
+		PushEvent(text);
 	}
 }
 
@@ -275,7 +290,10 @@ void Share::Kill(bool stopping)
 		m_state.store(to);
 	}
 	if (!stopping)
+	{
 		SetLastError(Error());
+		PushEvent(Error());
+	}
 	if (b)
 		b->Abort();
 }
@@ -396,6 +414,7 @@ int netfs_load_text(const std::string& text)
 	r.shares = list;
 	r.notices = f.notices;
 	r.last_error.clear();
+	r.events.clear();
 	return (int)list->size();
 }
 
@@ -507,6 +526,15 @@ std::string netfs_last_error()
 	Registry& r = R();
 	std::lock_guard<std::mutex> lk(r.mu);
 	return r.last_error;
+}
+
+std::vector<std::string> netfs_take_events()
+{
+	Registry& r = R();
+	std::lock_guard<std::mutex> lk(r.mu);
+	std::vector<std::string> out(r.events.begin(), r.events.end());
+	r.events.clear();
+	return out;
 }
 
 std::vector<std::string> netfs_notices()

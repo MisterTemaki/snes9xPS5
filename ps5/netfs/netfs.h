@@ -61,6 +61,9 @@ std::vector<NetfsShareInfo> netfs_shares();
 bool netfs_mount_finished();
 // The newest failure sentence of any share ("" if none). Never has a password in it.
 std::string netfs_last_error();
+// What happened since the last call, oldest first: "Connected to ...", the sentence of a failed mount, "The
+// connection to ... was lost." For the frontend to show as notices; never a password. At most 32 are kept.
+std::vector<std::string> netfs_take_events();
 // Problems found in shares.txt: line numbers and reasons, never a line's text.
 std::vector<std::string> netfs_notices();
 // True for /smb/... and /nfs/... paths (whether or not a share is mounted there).

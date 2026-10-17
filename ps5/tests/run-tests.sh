@@ -867,6 +867,42 @@ echo "$NETFS_OUT" | sed 's/^/  /'
 expect "[ $NETFS_RC = 0 ]" "netfs: every check passes"
 expect "! echo \"\$NETFS_OUT\" | grep -q 'runtime error\|Sanitizer'" "no sanitizer reports"
 
+echo "== 28. netfs end to end: a share in shares.txt, its games on the shelf, a launch and an MSU-1 track over it"
+# host/netfs_dirbackend.cpp turns every address in shares.txt into a folder on this machine; the app is the real one.
+# The shelf looks for a connected share twice a second of wall time, so these runs are paced (SNES9X_HOST_REALTIME).
+net_prepare() { # dir -> the share is <dir>/share, shares.txt names it
+	mkdir -p "$1/share/Sub"
+	python3 tests/make_test_rom.py "$1/share/Sub/Msu Test.sfc" msu >/dev/null
+	: >"$1/share/Sub/Msu Test.msu"
+	msu_pcm "$1/share/Sub/Msu Test-1.pcm"
+	echo "smb://10.0.0.5/games" >"$1/root/shares.txt"
+}
+net_play() { # dir -> the last "non-zero samples" count; the game is started from the shelf, no local ROM exists
+	SNES9X_HOST_REALTIME=1 MAXFLIPS=900 SNES9X_HOST_NETFS_DIR="$1/share" SNES9X_HOST_AUDIO_STATS=1 run "$1" "0:0;150:$CROSS;152:0;450:$L3R3;455:0;470:$UP;472:0;480:$CROSS;482:0" "" >/dev/null
+	grep '\[host\] audio' "$1/out.txt" | tail -1 | sed 's/.*played, \([0-9]*\) non-zero.*/\1/'
+}
+T=$(newroot t28)
+net_prepare "$T"
+n=$(net_play "$T")
+expect "grep -q '\[net\] 1 share(s) in shares.txt' $T/root/logs/boot.log" "shares.txt was read"
+expect "grep -q '\[net\] Connected to smb://10.0.0.5/games' $T/root/logs/boot.log" "the share connected"
+expect "grep -q 'Using msu file /smb/10.0.0.5/games/Sub/Msu Test.msu' $T/out.txt" "the game was launched from the share and found its .msu there"
+expect "grep -q 'prefetch for Msu Test.sfc: 1/1 track heads' $T/root/logs/boot.log" "the track head was fetched before the first frame"
+expect "[ \"${n:-0}\" -gt 100000 ]" "track 1 plays from the share (${n:-0} non-zero samples)"
+expect "! grep -q 'audio underrun' $T/root/logs/boot.log" "and without an underrun"
+expect "! grep -q 'runtime error\|AddressSanitizer' $T/out.txt" "no sanitizer reports"
+T=$(newroot t28s)
+net_prepare "$T"
+n=$(SNES9X_HOST_NETFS_DELAY_MS=200 net_play "$T")
+expect "[ \"${n:-0}\" -gt 100000 ]" "the same with 200 ms on every read (${n:-0} non-zero samples)"
+expect "! grep -q 'runtime error\|AddressSanitizer' $T/out.txt" "no sanitizer reports"
+T=$(newroot t28f)
+echo "smb://10.0.0.5/games" >"$T/root/shares.txt"
+rc=$(SNES9X_HOST_REALTIME=1 SNES9X_HOST_NETFS_DIR="$T/nothing" run "$T" "0:0;100:$OPTIONS;102:0;110:$CROSS;112:0" "")
+expect "[ $rc = 0 ] && grep -q '\[games\] 0 ROM(s)' $T/root/logs/boot.log" "a share that does not connect leaves the shelf working"
+expect "grep -q '\[net\] The folder games is not on 10.0.0.5' $T/root/logs/boot.log" "and says why"
+expect "! grep -q 'runtime error\|AddressSanitizer' $T/out.txt" "no sanitizer reports"
+
 echo
 echo "passed $PASS, failed $FAIL  (work dir $WORK)"
 [ $FAIL = 0 ]

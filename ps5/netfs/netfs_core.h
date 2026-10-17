@@ -78,4 +78,6 @@ int64_t NowMs();
 void SetLastError(const std::string& text);
 // One line for the frontend's log (netfs_set_log); a no-op when none is set. Never has a password in it.
 void Log(const std::string& line);
+// A line for netfs_take_events (a share connected, could not connect, or was lost).
+void PushEvent(const std::string& text);
 } // namespace netfs

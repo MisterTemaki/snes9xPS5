@@ -5,6 +5,7 @@
 #include "fe_titlematch.h"
 
 #include "OrbisPaths.h"
+#include "netfs.h"
 
 #include "unzip.h"
 #include "zlib.h"
@@ -173,10 +174,11 @@ struct CrcCache
 	}
 	void Save()
 	{
-		// entries of files that are gone are dropped (a USB drive that isn't plugged in keeps its own)
+		// entries of files that are gone are dropped (a USB drive that isn't plugged in, or a share that is not
+		// connected, keeps its own)
 		for (auto it = lines.begin(); it != lines.end();)
 		{
-			if (!seen.count(it->first) && it->first.rfind("/mnt/", 0) != 0)
+			if (!seen.count(it->first) && it->first.rfind("/mnt/", 0) != 0 && !netfs_is_network_path(it->first.c_str()))
 			{
 				it = lines.erase(it);
 				dirty = true;
@@ -203,7 +205,9 @@ struct CrcCache
 	}
 };
 
-bool CachedCrc(CrcCache& cache, const std::string& path, uint32_t* crc)
+// read: false for a ROM on a share, where only a CRC already in the cache is used (reading every ROM over the
+// network is what makes a scan slow)
+bool CachedCrc(CrcCache& cache, const std::string& path, uint32_t* crc, bool read)
 {
 	cache.seen[path] = true;
 	struct stat st = {};
@@ -219,6 +223,8 @@ bool CachedCrc(CrcCache& cache, const std::string& path, uint32_t* crc)
 		*crc = uint32_t(strtoul(it->second.c_str() + strlen(key), nullptr, 16));
 		return true;
 	}
+	if (!read)
+		return false;
 	char val[96];
 	if (!RomCrc32(path, crc))
 	{
@@ -234,7 +240,7 @@ bool CachedCrc(CrcCache& cache, const std::string& path, uint32_t* crc)
 	return true;
 }
 
-void Walk(const std::string& dir, int depth, bool usb, std::vector<GameInfo>& out, const ScanProgress& progress)
+void Walk(const std::string& dir, int depth, bool usb, bool net, std::vector<GameInfo>& out, const ScanProgress& progress)
 {
 	DIR* d = opendir(dir.c_str());
 	if (!d)
@@ -250,7 +256,7 @@ void Walk(const std::string& dir, int depth, bool usb, std::vector<GameInfo>& ou
 		if (S_ISDIR(st.st_mode))
 		{
 			if (depth < 4)
-				Walk(path, depth + 1, usb, out, progress);
+				Walk(path, depth + 1, usb, net, out, progress);
 			continue;
 		}
 		if (!S_ISREG(st.st_mode))
@@ -267,6 +273,7 @@ void Walk(const std::string& dir, int depth, bool usb, std::vector<GameInfo>& ou
 		g.file_base = name.substr(0, dot);
 		g.ext = ext;
 		g.on_usb = usb;
+			g.on_network = net;
 		out.push_back(std::move(g));
 		if (progress)
 			progress(0, out.size(), 0);
@@ -403,11 +410,19 @@ bool RomCrc32(const std::string& path, uint32_t* crc)
 	return true;
 }
 
+std::vector<std::string> RomRoots()
+{
+	std::vector<std::string> roots = OrbisRomRoots();
+	for (const std::string& r : netfs_mount_points())
+		roots.push_back(r);
+	return roots;
+}
+
 std::vector<GameInfo> ScanGames(const ScanProgress& progress)
 {
 	std::vector<GameInfo> games;
-	for (const std::string& root : OrbisRomRoots())
-		Walk(root, 0, root.rfind("/mnt/", 0) == 0, games, progress);
+	for (const std::string& root : RomRoots())
+		Walk(root, 0, root.rfind("/mnt/", 0) == 0, netfs_is_network_path(root.c_str()), games, progress);
 
 	CrcCache cache;
 	cache.Load();
@@ -420,7 +435,7 @@ std::vector<GameInfo> ScanGames(const ScanProgress& progress)
 		if (g.nointro.empty())
 		{
 			uint32_t crc = 0;
-			if (CachedCrc(cache, g.path, &crc))
+			if (CachedCrc(cache, g.path, &crc, !g.on_network))
 			{
 				g.nointro = gamedb::ByCrc(crc);
 				g.name_by_crc = !g.nointro.empty();

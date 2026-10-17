@@ -300,5 +300,53 @@ int64_t __wrap_ftello64(FILE* f)
 {
 	return vfs::IsFile(f) ? (int64_t)vfs::Ftell(f) : __real_ftello64(f);
 }
+
+// Code that includes minizip's ioapi.h before the system headers gets the 64-bit names for stat, readdir and the
+// rest too (it defines __USE_FILE_OFFSET64). On x86-64 the two layouts are the same, so these hand over to the
+// plain wrappers.
+static_assert(sizeof(struct stat64) == sizeof(struct stat) && sizeof(struct dirent64) == sizeof(struct dirent), "64-bit layouts differ");
+
+int __wrap_stat64(const char* path, struct stat64* st)
+{
+	return __wrap_stat(path, reinterpret_cast<struct stat*>(st));
+}
+
+int __wrap_lstat64(const char* path, struct stat64* st)
+{
+	return __wrap_lstat(path, reinterpret_cast<struct stat*>(st));
+}
+
+int __wrap_fstat64(int fd, struct stat64* st)
+{
+	return __wrap_fstat(fd, reinterpret_cast<struct stat*>(st));
+}
+
+struct dirent64* __wrap_readdir64(DIR* d)
+{
+	return reinterpret_cast<struct dirent64*>(__wrap_readdir(d));
+}
+
+int __wrap_open64(const char* path, int flags, ...)
+{
+	int mode = 0;
+	if (flags & O_CREAT)
+	{
+		va_list ap;
+		va_start(ap, flags);
+		mode = va_arg(ap, int);
+		va_end(ap);
+	}
+	return __wrap_open(path, flags, mode);
+}
+
+ssize_t __wrap_pread64(int fd, void* p, size_t n, off64_t off)
+{
+	return __wrap_pread(fd, p, n, off);
+}
+
+off64_t __wrap_lseek64(int fd, off64_t off, int whence)
+{
+	return __wrap_lseek(fd, off, whence);
+}
 #endif
 } // extern "C"
