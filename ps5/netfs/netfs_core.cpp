@@ -10,6 +10,7 @@
 #include <cstring>
 
 #include "ProsperoThread.h"
+#include "netfs_cache.h"
 
 using namespace netfs;
 
@@ -42,6 +43,7 @@ struct Registry
 	std::string last_error;
 	NetfsBackendFactory factory[2];
 	std::function<int64_t()> clock;
+	std::function<void(const std::string&)> log;
 	std::atomic<bool> custom_clock{false};
 	std::atomic<bool> realtime{false};
 	std::vector<ps5::BigThread> mounters;
@@ -159,12 +161,26 @@ private:
 	Share& m_s;
 };
 
-Share::Share(const ShareConfig& c) : cfg(c), mount_point(netfs_mount_point(c)), label(netfs_redact(c)), segs(Segments(mount_point))
+void Log(const std::string& line)
+{
+	std::function<void(const std::string&)> f;
+	{
+		Registry& r = R();
+		std::lock_guard<std::mutex> lk(r.mu);
+		f = r.log;
+	}
+	if (f)
+		f(line);
+}
+
+Share::Share(const ShareConfig& c)
+	: cfg(c), mount_point(netfs_mount_point(c)), label(netfs_redact(c)), segs(Segments(mount_point)), m_cache(new Cache(*this))
 {
 }
 
 Share::~Share()
 {
+	m_cache.reset(); // joins the read-ahead worker and closes what is still open, while the backend is there
 	if (m_backend)
 		m_backend->Disconnect();
 }
@@ -444,6 +460,8 @@ void netfs_stop()
 	r.wd_cv.notify_all();
 	for (const std::shared_ptr<Share>& s : *list)
 		s->Kill(true);
+	for (const std::shared_ptr<Share>& s : *list)
+		s->cache().Stop();
 	watchdog.join();
 	for (ps5::BigThread& t : mounters)
 		t.join();
@@ -517,6 +535,46 @@ bool netfs_realtime()
 	return R().realtime.load();
 }
 
+void netfs_prepare_game(const std::string& rom_path, int head_wait_ms)
+{
+	Route r;
+	if (Resolve(rom_path.c_str(), r) && r.share->State() == NetfsState::Ready)
+		r.share->cache().PrepareGame(r.rel, head_wait_ms);
+}
+
+void netfs_end_game()
+{
+	for (const std::shared_ptr<Share>& s : *Shares())
+		s->cache().EndGame();
+}
+
+void netfs_rescan()
+{
+	for (const std::shared_ptr<Share>& s : *Shares())
+		s->cache().Invalidate();
+}
+
+NetfsStats netfs_stats()
+{
+	NetfsStats out;
+	for (const std::shared_ptr<Share>& s : *Shares())
+	{
+		const CacheStats& c = s->cache().stats;
+		out.blocks_fetched += c.blocks_fetched;
+		out.bytes_fetched += c.bytes_fetched;
+		out.underruns += c.underruns;
+		out.data_stalls += c.data_stalls;
+	}
+	return out;
+}
+
+void netfs_set_log(std::function<void(const std::string&)> log)
+{
+	Registry& r = R();
+	std::lock_guard<std::mutex> lk(r.mu);
+	r.log = std::move(log);
+}
+
 void netfs_set_backend_factory(Scheme scheme, NetfsBackendFactory factory)
 {
 	Registry& r = R();
@@ -532,6 +590,12 @@ void netfs_set_clock(std::function<int64_t()> now_ms)
 		r.clock = std::move(now_ms);
 		r.custom_clock.store((bool)r.clock);
 	}
+}
+
+void netfs_cache_wait_idle()
+{
+	for (const std::shared_ptr<Share>& s : *Shares())
+		s->cache().WaitIdle();
 }
 
 void netfs_watchdog_tick()

@@ -27,15 +27,12 @@ using namespace netfs;
 extern "C"
 {
 FILE* __real_fopen(const char*, const char*);
-FILE* __real_fopen64(const char*, const char*);
 int __real_fclose(FILE*);
 size_t __real_fread(void*, size_t, size_t, FILE*);
 int __real_fseek(FILE*, long, int);
 int __real_fseeko(FILE*, off_t, int);
-int __real_fseeko64(FILE*, int64_t, int);
 long __real_ftell(FILE*);
 off_t __real_ftello(FILE*);
-int64_t __real_ftello64(FILE*);
 void __real_rewind(FILE*);
 int __real_feof(FILE*);
 int __real_ferror(FILE*);
@@ -71,14 +68,6 @@ FILE* __wrap_fopen(const char* path, const char* mode)
 	if (netfs_is_network_path(path) && vfs::Fopen(path, mode, f))
 		return f;
 	return __real_fopen(path, mode);
-}
-
-FILE* __wrap_fopen64(const char* path, const char* mode)
-{
-	FILE* f;
-	if (netfs_is_network_path(path) && vfs::Fopen(path, mode, f))
-		return f;
-	return __real_fopen64(path, mode);
 }
 
 int __wrap_open(const char* path, int flags, ...)
@@ -159,11 +148,6 @@ int __wrap_fseeko(FILE* f, off_t off, int whence)
 	return vfs::IsFile(f) ? vfs::Fseek(f, off, whence) : __real_fseeko(f, off, whence);
 }
 
-int __wrap_fseeko64(FILE* f, int64_t off, int whence)
-{
-	return vfs::IsFile(f) ? vfs::Fseek(f, off, whence) : __real_fseeko64(f, off, whence);
-}
-
 long __wrap_ftell(FILE* f)
 {
 	return vfs::IsFile(f) ? (long)vfs::Ftell(f) : __real_ftell(f);
@@ -172,11 +156,6 @@ long __wrap_ftell(FILE* f)
 off_t __wrap_ftello(FILE* f)
 {
 	return vfs::IsFile(f) ? (off_t)vfs::Ftell(f) : __real_ftello(f);
-}
-
-int64_t __wrap_ftello64(FILE* f)
-{
-	return vfs::IsFile(f) ? (int64_t)vfs::Ftell(f) : __real_ftello64(f);
 }
 
 void __wrap_rewind(FILE* f)
@@ -297,4 +276,29 @@ int __wrap_closedir(DIR* d)
 {
 	return vfs::IsDir(d) ? vfs::Closedir(d) : __real_closedir(d);
 }
+#ifdef __linux__
+// glibc's 64-bit variants (minizip calls them there). The console's libc has none: off_t is 64 bits and minizip
+// maps them to the plain calls (unzip/ioapi.h), so the console link must not --wrap them (NETFS_WRAPPED_LFS64).
+FILE* __real_fopen64(const char*, const char*);
+int __real_fseeko64(FILE*, int64_t, int);
+int64_t __real_ftello64(FILE*);
+
+FILE* __wrap_fopen64(const char* path, const char* mode)
+{
+	FILE* f;
+	if (netfs_is_network_path(path) && vfs::Fopen(path, mode, f))
+		return f;
+	return __real_fopen64(path, mode);
+}
+
+int __wrap_fseeko64(FILE* f, int64_t off, int whence)
+{
+	return vfs::IsFile(f) ? vfs::Fseek(f, off, whence) : __real_fseeko64(f, off, whence);
+}
+
+int64_t __wrap_ftello64(FILE* f)
+{
+	return vfs::IsFile(f) ? (int64_t)vfs::Ftell(f) : __real_ftello64(f);
+}
+#endif
 } // extern "C"
