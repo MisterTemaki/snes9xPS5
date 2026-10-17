@@ -860,6 +860,13 @@ sys.exit(0 if 'emu' in t and 'games' in t and t['games'] - t['emu'] < 3.0 else 1
 PY" "the scan (with a CRC of each) took under 3 seconds"
 expect "! grep -q 'runtime error\|AddressSanitizer' $T/out.txt" "no sanitizer reports"
 
+echo "== 27. netfs: share addresses and redaction, routing, the libc --wrap layer, minizip and zlib on a share, the watchdog (in-memory share)"
+NETFS_OUT=$(ASAN_OPTIONS=detect_leaks=1 timeout 120 "$PWD/build/host/test-netfs" 2>&1)
+NETFS_RC=$?
+echo "$NETFS_OUT" | sed 's/^/  /'
+expect "[ $NETFS_RC = 0 ]" "netfs: every check passes"
+expect "! echo \"\$NETFS_OUT\" | grep -q 'runtime error\|Sanitizer'" "no sanitizer reports"
+
 echo
 echo "passed $PASS, failed $FAIL  (work dir $WORK)"
 [ $FAIL = 0 ]

@@ -1,0 +1,74 @@
+// Snes9x PS5 netfs: the shares and their connections. Internal; the frontend uses netfs.h.
+//
+// SPDX-License-Identifier: MIT
+#pragma once
+
+#include <atomic>
+#include <memory>
+#include <mutex>
+#include <string>
+#include <vector>
+
+#include "netfs.h"
+
+namespace netfs
+{
+// One configured share and its one connection. All backend calls go through here, under the connection lock,
+// timed for the watchdog.
+class Share
+{
+public:
+	explicit Share(const ShareConfig& c);
+	~Share();
+
+	const ShareConfig cfg;
+	const std::string mount_point;
+	const std::string label; // netfs_redact(cfg)
+	const std::vector<std::string> segs; // the mount point's path segments
+
+	NetfsState State() const { return m_state.load(); }
+	std::string Error() const;
+	// errno for a call on a share that is not ready: EIO once dead, ENOTCONN before and after a failed mount.
+	int StateErrno() const;
+
+	// The mount job: creates the backend and connects (blocking; a worker thread, or the test's thread).
+	void Mount();
+	// The watchdog's verdict (connect over its limit: Failed; a request over its limit: Dead) and netfs_stop.
+	void Kill(bool stopping);
+	// Milliseconds on the netfs clock when the running request began; 0 when none runs.
+	int64_t RequestStart() const { return m_req_start.load(); }
+
+	Status Stat(const std::string& rel, Attr& out);
+	Status List(const std::string& rel, std::vector<DirEntry>& out);
+	Status Open(const std::string& rel, Handle& out);
+	// Reads len bytes at off, asking again after short reads. Returns the bytes read (fewer only at the end of
+	// the file or after an error that came after some bytes), or -errno.
+	int64_t Read(Handle h, uint64_t off, void* buf, size_t len);
+	void CloseHandle(Handle h);
+
+private:
+	friend class Timed;
+	int LockConn(std::unique_lock<std::mutex>& lk);
+	void Fail(NetfsState to, const Status& st);
+
+	std::atomic<NetfsState> m_state{NetfsState::Idle};
+	mutable std::mutex m_state_mu; // transitions, m_error and the backend pointer's assignment
+	std::string m_error;
+	std::unique_ptr<Backend> m_backend;
+	std::mutex m_conn_mu; // serialises backend calls
+	std::atomic<int64_t> m_req_start{0};
+};
+
+struct Route
+{
+	std::shared_ptr<Share> share;
+	std::string rel; // relative to the share's location ("" = the location itself)
+};
+
+// A path under a configured mount point -> its share and relative path. False for every other path (also
+// for /smb/... paths that no share covers, and for ones whose ".." leaves the mount point).
+bool Resolve(const char* path, Route& out);
+
+int64_t NowMs();
+void SetLastError(const std::string& text);
+} // namespace netfs

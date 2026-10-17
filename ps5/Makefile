@@ -41,7 +41,17 @@ CORE_C_SRC := unzip/unzip.c unzip/ioapi.c
 
 # netfs: network shares as folders (SMB and NFS), see netfs/netfs_backend.h. The protocol files are swapped
 # in by the backend work: backend_smb.cpp / backend_nfs.cpp replace the stubs (which fail with "not built in").
-NETFS_CORE_SRC :=
+NETFS_CORE_SRC := netfs/netfs_share.cpp netfs/netfs_core.cpp netfs/netfs_vfs.cpp netfs/netfs_wrap.cpp netfs/netfs_shims_ps5.cpp
+# the libc calls netfs answers for /smb/... and /nfs/... paths (netfs/netfs_wrap.cpp has a __wrap_ function for each).
+# They go into both links as --wrap, so a call anywhere in the app (the core, minizip, libc++'s file streams) lands
+# in netfs first and is passed on to the real call when the path or handle is not netfs's.
+NETFS_WRAPPED := fopen fopen64 fclose fread fseek fseeko fseeko64 ftell ftello ftello64 rewind feof ferror clearerr \
+	fileno fgetc getc ungetc fgets fflush setvbuf flockfile funlockfile open close read pread lseek fstat stat lstat \
+	access realpath opendir readdir closedir
+# console only (netfs/netfs_shims_ps5.cpp): sockets that take SO_NBIO instead of fcntl, and a getaddrinfo that works in a native title
+NETFS_WRAPPED_PS5 := fcntl getaddrinfo freeaddrinfo
+NETFS_WRAP_LLD := $(foreach s,$(NETFS_WRAPPED) $(NETFS_WRAPPED_PS5),--wrap=$(s))
+NETFS_WRAP_GCC := $(foreach s,$(NETFS_WRAPPED),-Wl,--wrap=$(s))
 NETFS_SMB_SRC := netfs/backend_smb_stub.cpp
 NETFS_NFS_SRC := netfs/backend_nfs.cpp
 NETFS_SRC := $(NETFS_CORE_SRC) $(NETFS_SMB_SRC) $(NETFS_NFS_SRC)
@@ -57,6 +67,7 @@ LIBNFS_FLAGS := -DHAVE_CONFIG_H -I$(LIBNFS) -I$(LIBNFS)/include -I$(LIBNFS)/incl
 	$(addprefix -I$(LIBNFS)/,mount nfs nfs4 nlm nsm portmap rquota)
 %/port/netfs/backend_smb.o: EXTRA_FLAGS = $(LIBSMB2_FLAGS)
 %/port/netfs/backend_nfs.o: EXTRA_FLAGS = $(LIBNFS_FLAGS)
+%/port/tests/test_netfs.o: EXTRA_FLAGS = -Inetfs
 
 # the app (eboot.bin): the emulator and its frontend
 EMU_SRC := coreorbis/main-boot.cpp \
@@ -138,7 +149,7 @@ $(PS5_OUT)/mbedtls/%.o: $(MBEDTLS)/library/%.c frontend/fe_mbedtls_config.h
 	@mkdir -p $(dir $@)
 	$(PS5_CC) -Os -fPIC -march=znver2 $(MBEDTLS_FLAGS) -c -o $@ $<
 
-$(PS5_OUT)/port/%.o: %.cpp coreorbis/include-orbis/*.h coreorbis/orbis-shims/*.h frontend/*.h
+$(PS5_OUT)/port/%.o: %.cpp coreorbis/include-orbis/*.h coreorbis/orbis-shims/*.h frontend/*.h netfs/*.h
 	@mkdir -p $(dir $@)
 	$(PS5_CXX) -std=c++17 $(PS5_OPT) $(DEFS) $(INCS) $(PORT_WARN) $(EXTRA_FLAGS) -c -o $@ $<
 
@@ -255,7 +266,7 @@ build/app/snes9x-pie.elf: $(EBOOT_OBJS) $(NATIVE)/tooling/native/ps5-pie.ld $(NA
 	$(LLD) -m elf_x86_64 -pie -z max-page-size=0x4000 --hash-style=gnu \
 		-T $(NATIVE)/tooling/native/ps5-pie.ld -T $(NATIVE)/tooling/native/ehframe.ld --eh-frame-hdr \
 		--version-script $(NATIVE)/tooling/native/app-symbols.map --version-script $(NATIVE)/tooling/native/localize.map \
-		-e _start --no-dynamic-linker -o $@ $(EBOOT_OBJS) \
+		$(NETFS_WRAP_LLD) -e _start --no-dynamic-linker -o $@ $(EBOOT_OBJS) \
 		--as-needed $(APP_STUBS) -L $(SDK_LIB) \
 		$(SDK_LIB)/libc++.a $(SDK_LIB)/libc++abi.a $(SDK_LIB)/libunwind.a $(SDK_LIB)/libc.a -lpthread
 
@@ -289,7 +300,8 @@ HOST_CC ?= gcc
 HOST_CXX ?= g++
 HOST_OUT := build/host
 HOST_SAN ?= -fsanitize=address,undefined -fno-omit-frame-pointer
-HOST_OPT := -O1 -g -mavx2 -fno-strict-aliasing
+# no _FORTIFY_SOURCE: it turns fread/fgets/read into __fread_chk/..., which --wrap (netfs) does not see
+HOST_OPT := -O1 -g -mavx2 -fno-strict-aliasing -U_FORTIFY_SOURCE
 # The Snes9x core reads unaligned words and shifts by negative amounts on purpose (x86 only): not our bugs.
 HOST_CORE_NOSAN := -fno-sanitize=alignment,shift
 
@@ -317,7 +329,7 @@ $(HOST_OUT)/mbedtls/%.o: $(MBEDTLS)/library/%.c frontend/fe_mbedtls_config.h
 	@mkdir -p $(dir $@)
 	$(HOST_CC) -O2 -g1 $(MBEDTLS_FLAGS) -c -o $@ $<
 
-$(HOST_OUT)/port/%.o: %.cpp coreorbis/include-orbis/*.h coreorbis/orbis-shims/*.h frontend/*.h
+$(HOST_OUT)/port/%.o: %.cpp coreorbis/include-orbis/*.h coreorbis/orbis-shims/*.h frontend/*.h netfs/*.h
 	@mkdir -p $(dir $@)
 	$(HOST_CXX) -std=c++17 $(HOST_OPT) $(HOST_SAN) $(DEFS) $(INCS) $(PORT_WARN) $(EXTRA_FLAGS) -c -o $@ $<
 
@@ -360,9 +372,17 @@ $(HOST_OUT)/snes9x-ps5-installer: $(HOST_INSTALLER_OBJ) $(HOST_OUT)/install_data
 	$(HOST_CXX) $(HOST_SAN) -o $@ $^ -lpthread
 
 $(HOST_OUT)/snes9x-ps5-host: $(HOST_CORE_OBJ) $(HOST_EMU_OBJ) $(HOST_ZLIB_OBJ) $(HOST_LIBSMB2_OBJ) $(HOST_LIBNFS_OBJ) $(HOST_OUT)/helper_data.o
-	$(HOST_CXX) $(HOST_SAN) -o $@ $^ -lpthread
+	$(HOST_CXX) $(HOST_SAN) -o $@ $^ $(NETFS_WRAP_GCC) -lpthread
 
-test: host
+# netfs's own test: the netfs code, the stub backends and an in-memory share, linked with the same --wrap list
+HOST_NETFS_TEST_OBJ := $(patsubst %.cpp,$(HOST_OUT)/port/%.o,$(NETFS_CORE_SRC) netfs/backend_smb_stub.cpp netfs/backend_nfs_stub.cpp \
+	tests/test_netfs.cpp)
+# minizip and zlib go into it too: the test opens a .zip and a .gz on the fake share
+HOST_NETFS_TEST_EXTRA := $(HOST_OUT)/core/unzip/unzip.o $(HOST_OUT)/core/unzip/ioapi.o $(HOST_ZLIB_OBJ)
+$(HOST_OUT)/test-netfs: $(HOST_NETFS_TEST_OBJ) $(HOST_NETFS_TEST_EXTRA) tests/netfs_fake.h
+	$(HOST_CXX) $(HOST_SAN) -o $@ $(HOST_NETFS_TEST_OBJ) $(HOST_NETFS_TEST_EXTRA) $(NETFS_WRAP_GCC) -lpthread
+
+test: host $(HOST_OUT)/test-netfs
 	bash tests/run-tests.sh
 
 # NFS backend unit test: backend_nfs.cpp against an in-memory libnfs (tests/libnfs_mock.cpp), no network
