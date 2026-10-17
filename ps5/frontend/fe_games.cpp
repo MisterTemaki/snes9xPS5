@@ -3,6 +3,9 @@
 
 #include "fe_games.h"
 #include "fe_titlematch.h"
+#include "fe_artmatch.h"
+#include "fe_dbart.h"
+#include "fe_romheader.h"
 
 #include "OrbisPaths.h"
 #include "ProsperoThread.h"
@@ -36,6 +39,8 @@
 	extern "C" const char sym##_end[];
 
 S9X_INCBIN(s9x_gamedb, GAMEDB_TSV)
+S9X_INCBIN(s9x_extracrc, EXTRACRC_TSV)
+S9X_INCBIN(s9x_dbart, DBART_TSV)
 
 namespace fe
 {
@@ -108,8 +113,11 @@ struct Db
 	std::unordered_map<std::string, std::string> exact; // lower-case name -> name
 	std::unordered_map<std::string, std::string> loose; // Key -> best name
 	std::vector<std::string> all_names;
+	std::unordered_map<uint32_t, std::string> extra_by_crc; // dumps No-Intro does not list
+	dbart::Table covers; // games an online database has a cover for and libretro-thumbnails has not
 	Db()
 	{
+		dbart::Parse(s9x_dbart_begin, s9x_dbart_end, covers);
 		const char* p = s9x_gamedb_begin;
 		const char* end = s9x_gamedb_end;
 		while (p < end)
@@ -129,6 +137,17 @@ struct Db
 				if (it == loose.end() || RegionRank(name) < RegionRank(it->second))
 					loose[k] = name;
 			}
+			p = nl + 1;
+		}
+		p = s9x_extracrc_begin;
+		end = s9x_extracrc_end;
+		while (p < end)
+		{
+			const char* nl = static_cast<const char*>(memchr(p, '\n', size_t(end - p)));
+			if (!nl)
+				nl = end;
+			if (*p != '#' && nl - p > 9 && p[8] == '\t')
+				extra_by_crc.emplace(uint32_t(strtoul(std::string(p, 8).c_str(), nullptr, 16)), std::string(p + 9, size_t(nl - p - 9)));
 			p = nl + 1;
 		}
 	}
@@ -274,6 +293,50 @@ bool CachedCrc(CrcCache& cache, const std::string& path, uint32_t* crc, bool rea
 	return true;
 }
 
+// A ROM no name or CRC identified keeps its header's title for the cover lookup. Cached like the CRC (under the path
+// plus "|hdr", with the size and mtime), so each such ROM is opened once: "size\tmtime\tTITLE\tCOUNTRY" or "...\tnone".
+// read: false for a ROM on a share, where a scan uses only what is cached (NetNaming reads the header with the CRC).
+bool HeaderHint(CrcCache& cache, const std::string& path, bool read, std::string& val)
+{
+	struct stat st = {};
+	if (stat(path.c_str(), &st) != 0)
+		return false;
+	const std::string key = path + "|hdr";
+	char stamp[64];
+	snprintf(stamp, sizeof(stamp), "%lld\t%lld\t", (long long)st.st_size, (long long)st.st_mtime);
+	{
+		std::lock_guard<std::mutex> lk(cache.lock);
+		cache.seen[key] = true;
+		auto it = cache.lines.find(key);
+		if (it != cache.lines.end() && it->second.compare(0, strlen(stamp), stamp) == 0)
+		{
+			val = it->second.substr(strlen(stamp));
+			return true;
+		}
+	}
+	if (!read)
+		return false;
+	romheader::Info info;
+	if (ReadRomHeader(path, &info))
+		val = info.title + "\t" + std::to_string(int(info.country));
+	else
+		val = "none";
+	cache.Put(key, stamp, val.c_str());
+	return true;
+}
+
+void LoadHeaderHint(CrcCache& cache, GameInfo& g)
+{
+	std::string val;
+	if (!HeaderHint(cache, g.path, !g.on_network, val))
+		return;
+	const size_t tab = val.find('\t');
+	if (tab == std::string::npos)
+		return;
+	g.header_title = val.substr(0, tab);
+	g.header_japan = atoi(val.c_str() + tab + 1) == 0;
+}
+
 void Walk(const std::string& dir, int depth, bool usb, bool net, std::vector<GameInfo>& out, const ScanProgress& progress)
 {
 	DIR* d = opendir(dir.c_str());
@@ -329,6 +392,28 @@ std::string ByCrc(uint32_t crc)
 	return it == D().by_crc.end() ? std::string() : it->second;
 }
 
+std::string ByExtraCrc(uint32_t crc)
+{
+	auto it = D().extra_by_crc.find(crc);
+	return it == D().extra_by_crc.end() ? std::string() : it->second;
+}
+
+std::string DatabaseCoverUrls(const GameInfo& game)
+{
+	// the host tests point both at a local server
+	const char* hasheous = getenv("SNES9X_DBART_HASHEOUS");
+	const char* thegamesdb = getenv("SNES9X_DBART_THEGAMESDB");
+	const dbart::Row* row = dbart::Find(D().covers, game.crc, game.nointro.empty() ? game.file_base : game.nointro);
+	if (!row && game.nointro != game.file_base)
+		row = dbart::Find(D().covers, 0, game.file_base);
+	if (!row && !game.crc_name.empty())
+		row = dbart::Find(D().covers, 0, game.crc_name);
+	if (!row)
+		return std::string();
+	return dbart::Urls(*row, hasheous && *hasheous ? hasheous : "https://hasheous.org/api/v1/images/",
+		thegamesdb && *thegamesdb ? thegamesdb : "https://cdn.thegamesdb.net/images/original/boxart/front/");
+}
+
 std::string Exact(const std::string& name)
 {
 	auto it = D().exact.find(Lower(name));
@@ -343,7 +428,9 @@ std::string Loose(const std::string& file_base)
 
 std::string Fuzzy(const std::string& file_base)
 {
-	return titles::Best(titles::IndexOf(D().all_names), file_base);
+	// close in spelling is not enough when the numbers disagree: "Dragon Quest III" has the letters of "Dragon Quest I & II"
+	const std::string best = titles::Best(titles::IndexOf(D().all_names), file_base);
+	return artmatch::NumbersConflict(file_base, best) ? std::string() : best;
 }
 
 std::string Title(const std::string& nointro)
@@ -488,6 +575,11 @@ struct NetNaming::Impl
 			char val[16];
 			snprintf(val, sizeof(val), "%08X", crc);
 			cache.Put(path, key, ok ? val : "fail");
+			if (ok && gamedb::ByCrc(crc).empty() && gamedb::ByExtraCrc(crc).empty())
+			{
+				std::string hint; // nothing names it: its header's title is the last hint for the cover
+				HeaderHint(cache, path, true, hint);
+			}
 			named++;
 			resolved++;
 			if (++since_save >= 20)
@@ -577,8 +669,11 @@ std::vector<GameInfo> ScanGames(const ScanProgress& progress)
 			bool known = false;
 			if (CachedCrc(cache, g.path, &crc, !g.on_network, &known))
 			{
+				g.crc = crc;
 				g.nointro = gamedb::ByCrc(crc);
 				g.name_by_crc = !g.nointro.empty();
+				if (g.nointro.empty())
+					g.crc_name = gamedb::ByExtraCrc(crc);
 			}
 			g.crc_pending = g.on_network && !known; // NetNaming reads it later
 		}
@@ -590,6 +685,8 @@ std::vector<GameInfo> ScanGames(const ScanProgress& progress)
 			if (!g.nointro.empty())
 				OrbisLog("[games] fuzzy: %s -> %s", g.file_base.c_str(), g.nointro.c_str());
 		}
+		if (g.nointro.empty())
+			LoadHeaderHint(cache, g);
 		g.title = g.nointro.empty() ? g.file_base : gamedb::Title(g.nointro);
 		g.region = gamedb::Region(g.nointro);
 	}
@@ -608,5 +705,84 @@ std::vector<GameInfo> ScanGames(const ScanProgress& progress)
 	if (games.size() > kLogged)
 		OrbisLog("[games]   ... and %zu more", games.size() - kLogged);
 	return games;
+}
+// How much of a ROM holds every place a header can be: ExHiROM's ($40FFC0), behind a copier header, and its 64 bytes.
+constexpr size_t kHeaderPrefix = 0x410000 + 512 + 64;
+
+bool ReadRomHeader(const std::string& path, romheader::Info* info)
+{
+	const size_t dot = path.find_last_of('.');
+	const std::string ext = Lower(dot == std::string::npos ? std::string() : path.substr(dot));
+	std::vector<uint8_t> prefix; // a .zip or .gz is unpacked as far as the last header place
+	uint64_t total = 0;
+	if (ext == ".zip")
+	{
+		unzFile z = unzOpen(path.c_str());
+		if (!z)
+			return false;
+		uLong best_size = 0;
+		bool found = false;
+		for (int r = unzGoToFirstFile(z); r == UNZ_OK; r = unzGoToNextFile(z))
+		{
+			unz_file_info zi;
+			char name[512];
+			name[sizeof(name) - 1] = '\0';
+			if (unzGetCurrentFileInfo(z, &zi, name, sizeof(name) - 1, nullptr, 0, nullptr, 0) != UNZ_OK ||
+				zi.size_filename >= sizeof(name) - 1)
+				continue;
+			if (zi.uncompressed_size < best_size)
+				continue; // the ROM is the biggest file in the archive
+			if (unzOpenCurrentFile(z) != UNZ_OK)
+				continue;
+			best_size = zi.uncompressed_size;
+			prefix.resize(std::min<size_t>(kHeaderPrefix, size_t(best_size)));
+			size_t got = 0;
+			int n;
+			while (got < prefix.size() && (n = unzReadCurrentFile(z, prefix.data() + got, unsigned(prefix.size() - got))) > 0)
+				got += size_t(n);
+			prefix.resize(got);
+			unzCloseCurrentFile(z);
+			total = best_size;
+			found = true;
+		}
+		unzClose(z);
+		if (!found)
+			return false;
+	}
+	else if (ext == ".gz")
+	{
+		gzFile gz = gzopen(path.c_str(), "rb");
+		if (!gz)
+			return false;
+		prefix.resize(kHeaderPrefix);
+		size_t got = 0;
+		int n;
+		while (got < prefix.size() && (n = gzread(gz, prefix.data() + got, unsigned(prefix.size() - got))) > 0)
+			got += size_t(n);
+		gzclose(gz);
+		prefix.resize(got);
+		total = got < kHeaderPrefix ? got : 0; // the size is known only when the whole ROM fit
+	}
+	if (ext == ".zip" || ext == ".gz")
+		return romheader::Read(
+			[&prefix](uint64_t at, uint8_t* out, size_t n) {
+				if (at + n > prefix.size())
+					return false;
+				memcpy(out, prefix.data() + at, n);
+				return true;
+			},
+			total, info);
+	FILE* f = fopen(path.c_str(), "rb");
+	if (!f)
+		return false;
+	fseek(f, 0, SEEK_END);
+	total = uint64_t(ftell(f));
+	const bool ok = romheader::Read(
+		[f](uint64_t at, uint8_t* out, size_t n) {
+			return fseek(f, long(at), SEEK_SET) == 0 && fread(out, 1, n, f) == n;
+		},
+		total, info);
+	fclose(f);
+	return ok;
 }
 } // namespace fe

@@ -7,9 +7,13 @@
 //   3. otherwise the file name, loosely: "super mario world.smc" -> the best No-Intro entry with that title
 //      (USA first, then World, Europe, Japan).
 // The No-Intro name gives the shelf its title ("Super Mario World") and the cover its download name.
+// A ROM none of that names (a fan translation, a hack) keeps its file name as the title. For the cover lookup it also
+// carries what its CRC is called in the extra table and the title in its own header (fe_artmatch.h).
 //
 // SPDX-License-Identifier: MIT
 #pragma once
+
+#include "fe_romheader.h"
 
 #include <atomic>
 #include <cstdint>
@@ -32,6 +36,10 @@ struct GameInfo
 	bool on_network = false; // on a share (/smb/..., /nfs/...): named without reading the ROM (netfs)
 	bool name_by_crc = false; // the name came from the CRC (not the file name)
 	bool crc_pending = false; // on a share, named from its file name only so far: NetNaming reads its CRC
+	std::string crc_name; // the name the ROM's CRC has in the extra table (a translation, a hack), "" if none
+	std::string header_title; // the ROM header's title, only for a ROM no name or CRC identified; "" otherwise
+	bool header_japan = false; // that header's country byte says Japan
+	uint32_t crc = 0; // the ROM's CRC32 (without a copier header) when the scan took it; 0 if not
 };
 
 // The table built into the ELF.
@@ -40,6 +48,12 @@ namespace gamedb
 size_t Count();
 // "" when unknown.
 std::string ByCrc(uint32_t crc);
+// The name of a dump No-Intro does not list (data/snes-extra-crc.tsv: fan translations, hacks, other dump sets), or "".
+// Not a No-Intro name: only the cover lookup reads it.
+std::string ByExtraCrc(uint32_t crc);
+// Where an online database has the cover of a game libretro-thumbnails lacks (data/snes-db-art.tsv): addresses,
+// tab-separated, found by the ROM's CRC or by the words of its name; "" when no database row fits.
+std::string DatabaseCoverUrls(const GameInfo& game);
 // Exact No-Intro name ("Super Mario World (USA)") -> itself, or "".
 std::string Exact(const std::string& name);
 // Loose: title without tags, any case ("super mario world") -> best regional entry, or "".
@@ -53,6 +67,9 @@ std::string Region(const std::string& nointro);
 
 // The folders to look for ROMs in: OrbisRomRoots() plus the network shares that are connected (in memory, no I/O).
 std::vector<std::string> RomRoots();
+
+// The internal header of a ROM file (a .zip or .gz is read through); false if there is none to find.
+bool ReadRomHeader(const std::string& path, romheader::Info* info);
 
 // The headerless CRC32 of a ROM file (or the CRC a .zip stores for its ROM); false if it can't be read.
 bool RomCrc32(const std::string& path, uint32_t* crc, const std::atomic<bool>* cancel = nullptr);
