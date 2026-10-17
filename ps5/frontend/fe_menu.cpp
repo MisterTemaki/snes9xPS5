@@ -632,7 +632,8 @@ PauseAction PauseMenu()
 }
 
 
-// Cheat groups are read from the game already loaded by emu::LoadGame.
+// Cheat groups are read from the game already loaded by emu::LoadGame, and again whenever the cheat file changes
+// (a code added over FTP shows up here by itself).
 // A scrolled list is essential: RetroArch files can contain hundreds of codes.
 void CheatMenu()
 {
@@ -640,17 +641,22 @@ void CheatMenu()
 	int sel = 0;
 	int top = 0;
 	constexpr int kVisible = 14;
+	bool first = true;
 	for (;;)
 	{
-		if (emu::CheatCount() == 0) emu::ReloadDownloadedCheats();
+		emu::RefreshCheats(first);
+		first = false;
 		const int count = emu::CheatCount();
 		const int visible = std::min(count, kVisible);
+		// the list may have become shorter under the selection
+		sel = std::max(0, std::min(sel, count - 1));
+		top = std::max(0, std::min(top, count - visible));
 		if (count == 0)
 		{
 			Header("Cheats");
 			DrawOptionBox("No cheats found", {{"Place a matching .cht file in /data/snes9x/cheats", ""}, {"Back", ""}}, 1, false);
 			DrawText(150, H - 184, FitText(emu::CheatStatus(), 3, W - 300).c_str(), 3, kText);
-			Footer("Copy .cht file over FTP     Circle: Back");
+			Footer("Copy .cht file over FTP, it loads by itself     Circle: Back");
 		}
 		else
 		{
