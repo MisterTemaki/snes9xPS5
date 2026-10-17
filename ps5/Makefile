@@ -49,14 +49,15 @@ NETFS_WRAPPED := fopen fclose fread fseek fseeko ftell ftello rewind feof ferror
 	fileno fgetc getc ungetc fgets fflush setvbuf flockfile funlockfile open close read pread lseek fstat stat lstat \
 	access realpath opendir readdir closedir
 # glibc only: the console's libc has no 64-bit variants (off_t is 64 bits), and minizip maps its fopen64 calls to
-# fopen on FreeBSD targets (unzip/ioapi.h), so a --wrap of these would leave __real_* undefined in the console link
-NETFS_WRAPPED_LFS64 := fopen64 fseeko64 ftello64
+# fopen on FreeBSD targets (unzip/ioapi.h), so a --wrap of these would leave __real_* undefined in the console link.
+# On the host, ioapi.h also turns stat and readdir into stat64 and readdir64 in files that include it first.
+NETFS_WRAPPED_LFS64 := fopen64 fseeko64 ftello64 stat64 lstat64 fstat64 readdir64 open64 pread64 lseek64
 # console only (netfs/netfs_shims_ps5.cpp): sockets that take SO_NBIO instead of fcntl, and a getaddrinfo that works in a native title
 NETFS_WRAPPED_PS5 := fcntl getaddrinfo freeaddrinfo
 NETFS_WRAP_LLD := $(foreach s,$(NETFS_WRAPPED) $(NETFS_WRAPPED_PS5),--wrap=$(s))
 NETFS_WRAP_GCC := $(foreach s,$(NETFS_WRAPPED) $(NETFS_WRAPPED_LFS64),-Wl,--wrap=$(s))
 NETFS_SMB_SRC := netfs/backend_smb.cpp
-NETFS_NFS_SRC := netfs/backend_nfs_stub.cpp
+NETFS_NFS_SRC := netfs/backend_nfs.cpp
 NETFS_SRC := $(NETFS_CORE_SRC) $(NETFS_SMB_SRC) $(NETFS_NFS_SRC)
 # libsmb2 and libnfs (LGPL-2.1) are vendored into these folders, with their notices. While a folder is absent
 # its list is empty and nothing is built. libsmb2 6.2 is built from a config.h of ours (no CMake). It needs no
@@ -68,7 +69,8 @@ LIBSMB2_SRC := $(sort $(wildcard $(LIBSMB2)/lib/*.c))
 LIBNFS_SRC := $(sort $(foreach d,lib mount nfs nfs4 portmap nlm nsm rquota,$(wildcard $(LIBNFS)/$(d)/*.c)))
 LIBSMB2_INC := -I$(LIBSMB2)/include -I$(LIBSMB2)/include/smb2 -I$(LIBSMB2)/lib
 LIBSMB2_FLAGS := -I$(LIBSMB2) $(LIBSMB2_INC) -DHAVE_CONFIG_H -D_FILE_OFFSET_BITS=64 '-D_U_=__attribute__((unused))'
-LIBNFS_FLAGS := -I$(LIBNFS)/include -I$(LIBNFS)/include/nfsc -I$(LIBNFS)
+LIBNFS_FLAGS := -DHAVE_CONFIG_H -I$(LIBNFS) -I$(LIBNFS)/include -I$(LIBNFS)/include/nfsc \
+	$(addprefix -I$(LIBNFS)/,mount nfs nfs4 nlm nsm portmap rquota)
 # netfs/backend_smb.cpp includes libsmb2's headers as system headers (they are not ours to keep -Werror clean)
 %/port/netfs/backend_smb.o: EXTRA_FLAGS = $(patsubst -I%,-isystem %,$(LIBSMB2_INC))
 %/port/netfs/backend_nfs.o: EXTRA_FLAGS = $(LIBNFS_FLAGS)
@@ -97,7 +99,7 @@ INSTALLER_SRC := installer/installer_main.cpp $(HELPER_SRC) coreorbis/orbis-shim
 
 ZLIB_SRC := $(wildcard $(ZLIB)/*.c)
 
-INCS := -I$(ROOT) -I$(ROOT)/apu -I$(ROOT)/apu/bapu -I$(ROOT)/unzip -I$(ZLIB) \
+INCS := -Inetfs -I$(ROOT) -I$(ROOT)/apu -I$(ROOT)/apu/bapu -I$(ROOT)/unzip -I$(ZLIB) \
 	-Icoreorbis/include-orbis -Icoreorbis/orbis-shims -Ifrontend
 DEFS := -DRIGHTSHIFT_IS_SAR -DZLIB -DUNZIP_SUPPORT -DSNES9X_PS5_VERSION='"$(VERSION)"' -DSNES9X_TITLE_ID='"$(TITLE_ID)"' -DSNES9X_UPDATE_REPO='"$(UPDATE_REPO)"'
 WARN := -Wall -Wno-unused-function -Wno-unused-variable -Wno-unused-but-set-variable -Wno-missing-braces \
@@ -106,11 +108,11 @@ WARN := -Wall -Wno-unused-function -Wno-unused-variable -Wno-unused-but-set-vari
 PORT_WARN := -Wall -Wextra -Werror -Wno-unused-parameter -Wno-missing-field-initializers
 
 # the No-Intro name table built into fe_games.o; stb_image in fe_covers.o has warnings of its own
-GAMEDB_DEFS := -DGAMEDB_TSV='"$(abspath frontend/data/snes-nointro.tsv)"'
+GAMEDB_DEFS := -DGAMEDB_TSV='"$(abspath frontend/data/snes-nointro.tsv)"' -DEXTRACRC_TSV='"$(abspath frontend/data/snes-extra-crc.tsv)"' -DDBART_TSV='"$(abspath frontend/data/snes-db-art.tsv)"'
 %/port/frontend/fe_games.o: EXTRA_FLAGS = $(GAMEDB_DEFS)
 %/port/frontend/fe_covers.o: EXTRA_FLAGS = -Wno-error -Wno-sign-compare -Wno-unused-but-set-variable -Wno-implicit-fallthrough -DCOVER_MANIFEST_TXT='"$(abspath frontend/data/snes-cover-index.txt)"' -DTITLE_MANIFEST_TXT='"$(abspath frontend/data/snes-title-index.txt)"' -DSNAP_MANIFEST_TXT='"$(abspath frontend/data/snes-snap-index.txt)"'
 %/port/frontend/fe_covers.o: frontend/data/snes-cover-index.txt frontend/data/snes-title-index.txt frontend/data/snes-snap-index.txt
-%/port/frontend/fe_games.o: frontend/data/snes-nointro.tsv
+%/port/frontend/fe_games.o: frontend/data/snes-nointro.tsv frontend/data/snes-extra-crc.tsv frontend/data/snes-db-art.tsv
 # the UI fonts (PS5SX2's: PCSX2's Roboto Regular and PromptFont) built into fe_text.o
 %/port/frontend/fe_text.o: EXTRA_FLAGS = -DFE_FONT_DIR='"$(abspath frontend/assets/fonts)"' -Wno-error -Wno-sign-compare -Wno-unused-function
 %/port/frontend/fe_text.o: frontend/assets/fonts/Roboto-Regular.ttf frontend/assets/fonts/promptfont.otf \
@@ -311,7 +313,7 @@ HOST_OPT := -O1 -g -mavx2 -fno-strict-aliasing -U_FORTIFY_SOURCE
 HOST_CORE_NOSAN := -fno-sanitize=alignment,shift
 
 HOST_CORE_OBJ := $(patsubst %.cpp,$(HOST_OUT)/core/%.o,$(CORE_SRC)) $(patsubst %.c,$(HOST_OUT)/core/%.o,$(CORE_C_SRC))
-HOST_EMU_OBJ := $(patsubst %.cpp,$(HOST_OUT)/port/%.o,$(EMU_SRC) host/sce_host.cpp)
+HOST_EMU_OBJ := $(patsubst %.cpp,$(HOST_OUT)/port/%.o,$(EMU_SRC) host/sce_host.cpp host/netfs_dirbackend.cpp)
 HOST_MBEDTLS_OBJ := $(patsubst $(MBEDTLS)/library/%.c,$(HOST_OUT)/mbedtls/%.o,$(MBEDTLS_SRC))
 HOST_HELPER_OBJ := $(HOST_OUT)/port/installer/helper_main.o $(patsubst %.cpp,$(HOST_OUT)/port/%.o,$(HELPER_SRC) host/sce_host.cpp) \
 	$(HOST_MBEDTLS_OBJ)
@@ -390,11 +392,41 @@ $(HOST_OUT)/test-netfs: $(HOST_NETFS_TEST_OBJ) $(HOST_NETFS_TEST_EXTRA) tests/ne
 test: host $(HOST_OUT)/test-netfs
 	bash tests/run-tests.sh
 
+# NFS backend unit test: backend_nfs.cpp against an in-memory libnfs (tests/libnfs_mock.cpp), no network
+NFS_TEST := $(HOST_OUT)/nfs-backend-test
+$(NFS_TEST): tests/nfs_backend_test.cpp tests/libnfs_mock.cpp tests/libnfs_mock.h netfs/backend_nfs.cpp netfs/backend_nfs.h netfs/netfs_backend.h
+	@mkdir -p $(dir $@)
+	$(HOST_CXX) -std=c++17 $(HOST_OPT) $(HOST_SAN) $(PORT_WARN) $(LIBNFS_FLAGS) -Inetfs -Itests -o $@ \
+		tests/nfs_backend_test.cpp tests/libnfs_mock.cpp netfs/backend_nfs.cpp -lpthread
+
+# the same backend on real libnfs (the objects of the host build), against loopback sockets that misbehave
+NFS_LOOP_TEST := $(HOST_OUT)/nfs-loopback-test
+$(NFS_LOOP_TEST): tests/nfs_loopback_test.cpp netfs/backend_nfs.cpp netfs/backend_nfs.h netfs/netfs_backend.h $(HOST_LIBNFS_OBJ)
+	@mkdir -p $(dir $@)
+	$(HOST_CXX) -std=c++17 $(HOST_OPT) $(HOST_SAN) $(PORT_WARN) $(LIBNFS_FLAGS) -Inetfs -o $@ \
+		tests/nfs_loopback_test.cpp netfs/backend_nfs.cpp $(HOST_LIBNFS_OBJ) -lpthread
+
+# the same backend against a real NFSv3 server (unfs3): not part of `make test`, needs rpcbind and unfsd
+NFS_SERVER_TEST := $(HOST_OUT)/nfs-server-test
+$(NFS_SERVER_TEST): tests/nfs_server_test.cpp netfs/backend_nfs.cpp netfs/backend_nfs.h netfs/netfs_backend.h $(HOST_LIBNFS_OBJ)
+	@mkdir -p $(dir $@)
+	$(HOST_CXX) -std=c++17 $(HOST_OPT) $(HOST_SAN) $(PORT_WARN) $(LIBNFS_FLAGS) -Inetfs -o $@ \
+		tests/nfs_server_test.cpp netfs/backend_nfs.cpp $(HOST_LIBNFS_OBJ) -lpthread
+
+test-nfs-server: $(NFS_SERVER_TEST)
+	bash tests/nfs_server_test.sh $(NFS_SERVER_TEST)
+
+test-nfs: $(NFS_TEST) $(NFS_LOOP_TEST)
+	ASAN_OPTIONS=detect_leaks=1 $(NFS_TEST)
+	ASAN_OPTIONS=detect_leaks=1 $(NFS_LOOP_TEST)
+
+test: test-nfs
+
 clean:
 	rm -rf build
 
 # the SMB backend against a real Samba (adds `smb-test`, run before the other tests; skipped without smbd)
 include tests/smb/smb.mk
 
-.PHONY: ps5 host test send strip app dist clean
+.PHONY: ps5 host test test-nfs test-nfs-server send strip app dist clean
 .SECONDARY:

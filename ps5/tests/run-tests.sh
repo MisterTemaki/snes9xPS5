@@ -201,6 +201,73 @@ expect "$CHECK $T/dump/flip00220.ppm 960 420 0 255 0 >/dev/null" "Donkey Kong Co
 expect "$CHECK $T/dump/flip00270.ppm 960 420 0 0 255 >/dev/null" "Final Fantasy III shows your own (blue) cover, not the server's"
 expect "$CHECK $T/dump/flip00320.ppm 960 420 255 0 0 >/dev/null" "Super Mario World shows the downloaded (red) cover"
 
+echo "== 9b. covers for fan translations: the ROM's CRC, its words, and its header each find the Japanese art"
+T=$(newroot t9b)
+SRV=$T/srv/Named_Boxarts; mkdir -p "$SRV" "$T/root/covers"
+python3 - "$SRV" <<'PY'
+import sys
+from PIL import Image
+for name in ("Dai-4-ji Super Robot Taisen (Japan)", "Super Robot Taisen EX (Japan)", "Zelda no Densetsu - Kamigami no Triforce (Japan)"):
+    Image.new('RGB', (512, 357), (255, 0, 0)).save(sys.argv[1] + "/" + name + ".png")
+PY
+# a file name that says nothing, forged to the CRC the extra table gives to "Super Robot Wars 4 T-Eng (2026)(Aeon Genesis)"
+python3 tests/make_test_rom.py "$T/root/roms/game1.sfc" ntsc >/dev/null
+python3 tests/forge_crc.py "$T/root/roms/game1.sfc" 72BBACCA >/dev/null
+# a translator's name: the same words as the art
+python3 tests/make_test_rom.py "$T/root/roms/Super Robot Wars EX (English).sfc" ntsc >/dev/null
+# a name that says nothing, a header that does (the title is at $7FC0 of this ROM)
+python3 tests/make_test_rom.py "$T/root/roms/mystery.sfc" ntsc >/dev/null
+python3 - "$T/root/roms/mystery.sfc" <<'PY'
+import sys
+path = sys.argv[1]
+rom = bytearray(open(path, 'rb').read())
+rom[0x7FC0:0x7FD5] = b"ZELDANODENSETSU".ljust(21, b" ")
+open(path, 'wb').write(rom)
+PY
+PORT=18082
+(cd "$T/srv" && exec python3 -m http.server $PORT --bind 127.0.0.1 >/dev/null 2>&1) &
+SRVPID=$!
+sleep 1
+rc=$(OFFLINE= COVER_URL="http://127.0.0.1:$PORT/Named_Boxarts/\${name}.png" SNES9X_HOST_REALTIME=1 run "$T" \
+	"0:0;300:$OPTIONS;302:0;310:$CROSS;312:0" "")
+kill $SRVPID 2>/dev/null
+expect "[ $rc = 0 ]" "exit code 0 (got $rc)"
+expect "grep -q 'game1.sfc -> \"\"' $T/root/logs/boot.log" "game1.sfc: no name from its file name or the No-Intro table"
+expect "[ -f '$T/root/covers/Dai-4-ji Super Robot Taisen (Japan).png' ]" "the CRC of a translation finds the Japanese art"
+expect "[ -f '$T/root/covers/Super Robot Taisen EX (Japan).png' ]" "Super Robot Wars EX (English) finds its Japanese art by its words"
+expect "[ -f '$T/root/covers/Zelda no Densetsu - Kamigami no Triforce (Japan).png' ]" "a header title finds its art"
+
+echo "== 9c. covers a database has and libretro-thumbnails has not: found by the ROM's CRC or by its name's words"
+T=$(newroot t9c)
+mkdir -p "$T/srv/hasheous" "$T/srv/tgdb" "$T/srv/Named_Boxarts" "$T/root/covers"
+python3 - "$T/srv" <<'PY'
+import sys
+from PIL import Image
+# hasheous.org/api/v1/images/<id> has no file extension; TheGamesDB's is <id>-1.jpg
+Image.new('RGB', (300, 400), (0, 255, 0)).save(sys.argv[1] + "/hasheous/AF768536EEED4254A29FE3F540CE879677D5FE1D", "PNG")
+Image.new('RGB', (300, 400), (0, 0, 255)).save(sys.argv[1] + "/tgdb/27252-1.jpg", "JPEG")
+PY
+# a name that says nothing, the CRC of a dump the table has (data/snes-db-art.tsv: Aladdin 2000)
+python3 tests/make_test_rom.py "$T/root/roms/mystery pirate.sfc" ntsc >/dev/null
+python3 tests/forge_crc.py "$T/root/roms/mystery pirate.sfc" 752A25D3 >/dev/null
+# the game's words (a database has "King of Fighters 2000, The"); and one no database lists
+python3 tests/make_test_rom.py "$T/root/roms/King of Fighters 2000.sfc" ntsc >/dev/null
+python3 tests/make_test_rom.py "$T/root/roms/Street Fighter III - Super Version.sfc" ntsc >/dev/null
+PORT=18083
+(cd "$T/srv" && exec python3 -m http.server $PORT --bind 127.0.0.1 >"$T/srv.log" 2>&1) &
+SRVPID=$!
+sleep 1
+rc=$(OFFLINE= COVER_URL="http://127.0.0.1:$PORT/Named_Boxarts/\${name}.png" SNES9X_DBART_HASHEOUS="http://127.0.0.1:$PORT/hasheous/" \
+	SNES9X_DBART_THEGAMESDB="http://127.0.0.1:$PORT/tgdb/" SNES9X_HOST_REALTIME=1 run "$T" "0:0;300:$OPTIONS;302:0;310:$CROSS;312:0" "")
+kill $SRVPID 2>/dev/null
+expect "[ $rc = 0 ]" "exit code 0 (got $rc)"
+expect "[ -n \"\$(find $T/root/covers -name '*.png' -size +100c | grep -e mystery -e Aladdin)\" ]" "the CRC of a dump the table has finds its cover (hasheous.org)"
+is_jpeg() { [ "$(head -c 2 "$1" | od -An -tx1 | tr -d ' \n')" = ffd8 ]; }
+expect "[ -f '$T/root/covers/King of Fighters 2000.png' ] && is_jpeg '$T/root/covers/King of Fighters 2000.png'" "the words of a name find its cover (TheGamesDB, a JPEG)"
+expect "[ ! -e '$T/root/covers/Street Fighter III - Super Version.png' ]" "a game no database lists gets no cover"
+expect "! grep '/hasheous/\|/tgdb/' $T/srv.log | grep -v 'AF768536EEED4254A29FE3F540CE879677D5FE1D\|27252-1.jpg' | grep -q ." "and nothing else is asked of either database"
+expect "! grep -q 'runtime error\|AddressSanitizer' $T/out.txt" "no sanitizer reports"
+
 echo "== 10. offline: no download is tried, the shelf still works"
 T=$(newroot t10)
 python3 tests/make_test_rom.py "$T/root/roms/Super Mario World (USA).sfc" ntsc >/dev/null
@@ -866,6 +933,69 @@ NETFS_RC=$?
 echo "$NETFS_OUT" | sed 's/^/  /'
 expect "[ $NETFS_RC = 0 ]" "netfs: every check passes"
 expect "! echo \"\$NETFS_OUT\" | grep -q 'runtime error\|Sanitizer'" "no sanitizer reports"
+
+echo "== 28. netfs end to end: a share in shares.txt, its games on the shelf, a launch and an MSU-1 track over it"
+# host/netfs_dirbackend.cpp turns every address in shares.txt into a folder on this machine; the app is the real one.
+# The shelf looks for a connected share twice a second of wall time, so these runs are paced (SNES9X_HOST_REALTIME).
+net_prepare() { # dir -> the share is <dir>/share, shares.txt names it
+	mkdir -p "$1/share/Sub"
+	python3 tests/make_test_rom.py "$1/share/Sub/Msu Test.sfc" msu >/dev/null
+	: >"$1/share/Sub/Msu Test.msu"
+	msu_pcm "$1/share/Sub/Msu Test-1.pcm"
+	echo "smb://10.0.0.5/games" >"$1/root/shares.txt"
+}
+net_play() { # dir -> the last "non-zero samples" count; the game is started from the shelf, no local ROM exists
+	SNES9X_HOST_REALTIME=1 MAXFLIPS=900 SNES9X_HOST_NETFS_DIR="$1/share" SNES9X_HOST_AUDIO_STATS=1 run "$1" "0:0;150:$CROSS;152:0;450:$L3R3;455:0;470:$UP;472:0;480:$CROSS;482:0" "" >/dev/null
+	grep '\[host\] audio' "$1/out.txt" | tail -1 | sed 's/.*played, \([0-9]*\) non-zero.*/\1/'
+}
+T=$(newroot t28)
+net_prepare "$T"
+n=$(net_play "$T")
+expect "grep -q '\[net\] 1 share(s) in shares.txt' $T/root/logs/boot.log" "shares.txt was read"
+expect "grep -q '\[net\] Connected to smb://10.0.0.5/games' $T/root/logs/boot.log" "the share connected"
+expect "grep -q 'Using msu file /smb/10.0.0.5/games/Sub/Msu Test.msu' $T/out.txt" "the game was launched from the share and found its .msu there"
+expect "grep -q 'prefetch for Msu Test.sfc: 1/1 track heads' $T/root/logs/boot.log" "the track head was fetched before the first frame"
+expect "[ \"${n:-0}\" -gt 100000 ]" "track 1 plays from the share (${n:-0} non-zero samples)"
+expect "! grep -q 'audio underrun' $T/root/logs/boot.log" "and without an underrun"
+expect "! grep -q 'runtime error\|AddressSanitizer' $T/out.txt" "no sanitizer reports"
+T=$(newroot t28s)
+net_prepare "$T"
+n=$(SNES9X_HOST_NETFS_DELAY_MS=200 net_play "$T")
+expect "[ \"${n:-0}\" -gt 100000 ]" "the same with 200 ms on every read (${n:-0} non-zero samples)"
+expect "! grep -q 'runtime error\|AddressSanitizer' $T/out.txt" "no sanitizer reports"
+T=$(newroot t28f)
+echo "smb://10.0.0.5/games" >"$T/root/shares.txt"
+rc=$(SNES9X_HOST_REALTIME=1 SNES9X_HOST_NETFS_DIR="$T/nothing" run "$T" "0:0;100:$OPTIONS;102:0;110:$CROSS;112:0" "")
+expect "[ $rc = 0 ] && grep -q '\[games\] 0 ROM(s)' $T/root/logs/boot.log" "a share that does not connect leaves the shelf working"
+expect "grep -q '\[net\] The folder games is not on 10.0.0.5' $T/root/logs/boot.log" "and says why"
+expect "! grep -q 'runtime error\|AddressSanitizer' $T/out.txt" "no sanitizer reports"
+
+echo "== 29. netfs: a ROM on a share with a made-up file name is named by its CRC in the background, and its cover follows"
+T=$(newroot t29)
+SRV=$T/srv/Named_Boxarts; mkdir -p "$SRV" "$T/share"
+python3 - "$SRV" <<'PY'
+import sys
+from PIL import Image
+srv = sys.argv[1]
+Image.new('RGB', (512, 357), (0, 255, 0)).save(srv + '/Donkey Kong Country (USA).png')
+open(srv + '/Donkey Kong Country (USA) (Rev 2).png', 'w').write('Donkey Kong Country (USA).png')
+PY
+python3 tests/make_test_rom.py "$T/share/dkc.sfc" ntsc >/dev/null
+python3 tests/forge_crc.py "$T/share/dkc.sfc" $(grep -P "\tDonkey Kong Country \(USA\) \(Rev 2\)$" frontend/data/snes-nointro.tsv | cut -f1) >/dev/null
+echo "smb://10.0.0.5/games" >"$T/root/shares.txt"
+PORT=18081
+(cd "$T/srv" && exec python3 -m http.server $PORT --bind 127.0.0.1 >/dev/null 2>&1) &
+SRVPID=$!
+sleep 1
+OFFLINE= COVER_URL="http://127.0.0.1:$PORT/Named_Boxarts/\${name}.png" SNES9X_HOST_REALTIME=1 MAXFLIPS=420 SNES9X_HOST_NETFS_DIR="$T/share" \
+	run "$T" "0:0" "400" >/dev/null
+kill $SRVPID 2>/dev/null
+expect "grep -q '\[games\] naming 1 network ROM(s) by CRC' $T/root/logs/boot.log" "the pass was started for the ROM the file name could not name"
+expect "grep -q 'dkc.sfc -> \"Donkey Kong Country (USA) (Rev 2)\" (by CRC)' $T/root/logs/boot.log" "the next scan names it by its CRC"
+expect "grep -q '/smb/10.0.0.5/games/dkc.sfc' $T/root/covers/crc-cache.txt" "and the CRC is kept for the next start"
+expect "[ -f '$T/root/covers/Donkey Kong Country (USA) (Rev 2).png' ]" "the cover of the game that came late was downloaded"
+expect "$CHECK $T/dump/flip00400.ppm 960 420 0 255 0 >/dev/null" "the shelf shows that cover (green)"
+expect "! grep -q 'runtime error\|AddressSanitizer' $T/out.txt" "no sanitizer reports"
 
 echo
 echo "passed $PASS, failed $FAIL  (work dir $WORK)"

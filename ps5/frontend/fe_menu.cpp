@@ -202,6 +202,8 @@ std::string RootLabel(const std::string& root)
 		return "Console  (" + root + ")";
 	if (root.rfind("/mnt/usb", 0) == 0)
 		return "USB " + root.substr(8, 1) + "  (" + root + ")";
+	if (root.rfind("/smb/", 0) == 0 || root.rfind("/nfs/", 0) == 0)
+		return "Network: " + root.substr(5) + (root[1] == 's' ? "  (SMB)" : "  (NFS)");
 	return root;
 }
 
@@ -481,7 +483,7 @@ std::string RomBrowser()
 	Settings& cfg = Config();
 	NavReader nav;
 
-	std::vector<std::string> roots = OrbisRomRoots();
+	std::vector<std::string> roots = RomRoots();
 	std::string dir;
 	// Reopen the last folder if it is still there and under one of the roots.
 	if (!cfg.last_dir.empty() && OrbisIsDir(cfg.last_dir))
@@ -496,7 +498,7 @@ std::string RomBrowser()
 	std::vector<Entry> list;
 	int sel = 0, top = 0;
 	auto reload = [&](const std::string& select_path) {
-		roots = OrbisRomRoots();
+		roots = RomRoots();
 		if (dir.empty())
 		{
 			list.clear();
@@ -849,7 +851,24 @@ void MessageBox(const std::string& title, const std::string& text)
 		ps5video::FillRect(bx - 4, by - 4, bw + 8, bh + 8, kAccent);
 		ps5video::FillRect(bx, by, bw, bh, kPanel);
 		DrawText(bx + 40, by + 30, FitText(title, 5, bw - 80).c_str(), 5, kAccent);
-		DrawText(bx + 40, by + 130, FitText(text, 3, bw - 80).c_str(), 3, kText);
+		if (text.find('\n') == std::string::npos)
+			DrawText(bx + 40, by + 130, FitText(text, 3, bw - 80).c_str(), 3, kText);
+		else
+		{
+			// a few lines (a ROM's path, then why it did not open), skipping the blank ones
+			int y = by + 100;
+			for (size_t i = 0, e; i < text.size() && y < by + bh - 80; i = e + 1)
+			{
+				e = text.find('\n', i);
+				if (e == std::string::npos)
+					e = text.size();
+				if (e > i)
+				{
+					DrawText(bx + 40, y, FitText(text.substr(i, e - i), 3, bw - 80).c_str(), 3, kText);
+					y += 46;
+				}
+			}
+		}
 		DrawText(bx + 40, by + bh - 70, (std::string(icon::Cross) + " OK").c_str(), 3, kDim);
 		Present();
 		const Nav n = nav.Read();
