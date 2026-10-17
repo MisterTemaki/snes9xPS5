@@ -41,17 +41,20 @@ CORE_C_SRC := unzip/unzip.c unzip/ioapi.c
 
 # netfs: network shares as folders (SMB and NFS), see netfs/netfs_backend.h. The protocol files are swapped
 # in by the backend work: backend_smb.cpp / backend_nfs.cpp replace the stubs (which fail with "not built in").
-NETFS_CORE_SRC := netfs/netfs_share.cpp netfs/netfs_core.cpp netfs/netfs_vfs.cpp netfs/netfs_wrap.cpp netfs/netfs_shims_ps5.cpp
+NETFS_CORE_SRC := netfs/netfs_share.cpp netfs/netfs_core.cpp netfs/netfs_cache.cpp netfs/netfs_vfs.cpp netfs/netfs_wrap.cpp netfs/netfs_shims_ps5.cpp
 # the libc calls netfs answers for /smb/... and /nfs/... paths (netfs/netfs_wrap.cpp has a __wrap_ function for each).
 # They go into both links as --wrap, so a call anywhere in the app (the core, minizip, libc++'s file streams) lands
 # in netfs first and is passed on to the real call when the path or handle is not netfs's.
-NETFS_WRAPPED := fopen fopen64 fclose fread fseek fseeko fseeko64 ftell ftello ftello64 rewind feof ferror clearerr \
+NETFS_WRAPPED := fopen fclose fread fseek fseeko ftell ftello rewind feof ferror clearerr \
 	fileno fgetc getc ungetc fgets fflush setvbuf flockfile funlockfile open close read pread lseek fstat stat lstat \
 	access realpath opendir readdir closedir
+# glibc only: the console's libc has no 64-bit variants (off_t is 64 bits), and minizip maps its fopen64 calls to
+# fopen on FreeBSD targets (unzip/ioapi.h), so a --wrap of these would leave __real_* undefined in the console link
+NETFS_WRAPPED_LFS64 := fopen64 fseeko64 ftello64
 # console only (netfs/netfs_shims_ps5.cpp): sockets that take SO_NBIO instead of fcntl, and a getaddrinfo that works in a native title
 NETFS_WRAPPED_PS5 := fcntl getaddrinfo freeaddrinfo
 NETFS_WRAP_LLD := $(foreach s,$(NETFS_WRAPPED) $(NETFS_WRAPPED_PS5),--wrap=$(s))
-NETFS_WRAP_GCC := $(foreach s,$(NETFS_WRAPPED),-Wl,--wrap=$(s))
+NETFS_WRAP_GCC := $(foreach s,$(NETFS_WRAPPED) $(NETFS_WRAPPED_LFS64),-Wl,--wrap=$(s))
 NETFS_SMB_SRC := netfs/backend_smb.cpp
 NETFS_NFS_SRC := netfs/backend_nfs_stub.cpp
 NETFS_SRC := $(NETFS_CORE_SRC) $(NETFS_SMB_SRC) $(NETFS_NFS_SRC)
