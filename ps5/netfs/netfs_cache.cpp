@@ -396,9 +396,9 @@ Status Cache::Stat(const std::string& rel, Attr& out, std::string* actual)
 	auto it = l->by_name.find(name);
 	if (it == l->by_name.end())
 	{
-		// SMB shares ignore case; so do we, as long as one name fits
+		// SMB shares ignore case; so do we, as long as one name fits. NFS names are exact.
 		auto fit = l->by_name.end();
-		for (auto e = l->by_name.begin(); e != l->by_name.end(); ++e)
+		for (auto e = l->by_name.begin(); m_share.cfg.scheme == Scheme::Smb && e != l->by_name.end(); ++e)
 			if (strcasecmp(e->first.c_str(), name.c_str()) == 0)
 			{
 				if (fit != l->by_name.end())

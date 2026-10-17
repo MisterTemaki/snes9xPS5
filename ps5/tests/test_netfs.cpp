@@ -596,6 +596,61 @@ static void TestWatchdog()
 	CHECK(true, "netfs_stop released a stuck call");
 }
 
+// A backend that finds its connection gone answers at once; the share must not stay "connected".
+static void TestLostConnection()
+{
+	{
+		Rig rig("smb://192.168.1.50/games/snes\n");
+		FakeServer& s = *rig.srv[0];
+		s.Put("a.sfc", Blob(2048, 5));
+		rig.Mount();
+		const std::string ap = std::string(kBase) + "/a.sfc";
+
+		s.fail_reads = true; // one unreadable file: the share still answers a stat of its location
+		FILE* f = fopen(ap.c_str(), "rb");
+		char b[16];
+		errno = 0;
+		CHECK(f && fread(b, 1, sizeof b, f) == 0 && ferror(f) && errno == EIO, "a read that fails with EIO is an error for that file");
+		CHECK(netfs_shares()[0].state == NetfsState::Ready, "and the share, which still answers, stays connected");
+		if (f)
+			fclose(f);
+		s.fail_reads = false;
+
+		netfs_rescan();
+		s.drop_err = ECONNRESET; // the server dropped the connection: the call fails at once, no timeout involved
+		struct stat st;
+		errno = 0;
+		CHECK(stat(ap.c_str(), &st) == -1, "a stat on a dropped connection fails");
+		CHECK(netfs_shares()[0].state == NetfsState::Dead, "a transport error marks the share lost");
+		CHECK(Has(netfs_shares()[0].error, "lost") && netfs_mount_points().empty(), "the sentence says it was lost and it is no longer a root");
+	}
+	{
+		Rig rig("smb://192.168.1.50/games/snes\n");
+		FakeServer& s = *rig.srv[0];
+		s.Put("a.sfc", Blob(2048, 5));
+		rig.Mount();
+		netfs_rescan();
+		s.drop_err = EIO; // EIO alone is ambiguous: the stat of the location fails too, so the connection is gone
+		struct stat st;
+		CHECK(stat((std::string(kBase) + "/a.sfc").c_str(), &st) == -1, "a listing that fails with EIO fails the call");
+		CHECK(netfs_shares()[0].state == NetfsState::Dead, "EIO from a share that answers nothing marks it lost");
+	}
+}
+
+// NFS names are exact; SMB names ignore case.
+static void TestNfsNamesExact()
+{
+	Rig rig("nfs://192.168.1.50/export/snes\n");
+	rig.srv[0]->Put("Zelda.sfc", Blob(100, 1));
+	rig.Mount();
+	CHECK(!netfs_mount_points().empty(), "the NFS share is mounted");
+	const std::string nb = netfs_mount_points().empty() ? std::string() : netfs_mount_points()[0];
+	struct stat st;
+	CHECK(stat((nb + "/Zelda.sfc").c_str(), &st) == 0, "the exact name is found");
+	errno = 0;
+	CHECK(stat((nb + "/zelda.sfc").c_str(), &st) == -1 && errno == ENOENT, "another spelling is not found on NFS");
+}
+
 static void TestThreads()
 {
 	std::atomic<int64_t> now{1000};
@@ -1221,6 +1276,8 @@ int main()
 	TestFileEdit();
 	TestConnectionTest();
 	TestCacheListings();
+	TestNfsNamesExact();
+	TestLostConnection();
 	TestCacheReads();
 	TestRealtime();
 	TestMsu1();

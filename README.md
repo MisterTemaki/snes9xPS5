@@ -220,6 +220,19 @@ author's line with the GitHub mark: **github.com/MisterTemaki** (PS5SX2 shows it
   - The CRC is taken without a copier header; for a `.zip`, the CRC stored in the zip is used.
   - Loose names (`super mario world.smc`) are recognised too.
   - CRCs are cached in `covers/crc-cache.txt`, so each ROM is read once.
+  - **Fan translations and renamed ROMs** (`Super Robot Wars 4 (English).sfc`) find the cover of the game they come
+    from, whatever the file is called. Three clues are used: the ROM's CRC32 in a second table of fan-translation dumps
+    built into the app (`data/snes-extra-crc.tsv`); the words of the file name (tags, `v1.1`, roman numerals,
+    `Dai-4-ji`, `Wars`/`Taisen` and romanisation spellings are smoothed out; a different number or an ambiguous
+    result never matches); and, last, the title inside the ROM itself. Your file name is what the shelf shows; only
+    the cover comes from the original game.
+  - **Games libretro-thumbnails has no cover for** (pirate carts, hacks, homebrew, and games only some databases list,
+    such as `Aladdin 2000`, `Pokemon Stadium` or `King of Fighters 2000`) get the cover an online database has: a
+    table built into the app (`data/snes-db-art.tsv`, 411 games) names them by CRC32 and by name, and the helper
+    downloads the image from [hasheous.org](https://hasheous.org) or from TheGamesDB's image server, after
+    libretro-thumbnails had none. No checksum or file name of yours is sent to those two: only the image address
+    from the table is fetched. A game no database lists (there is no SNES `Street Fighter III`) still gets a title card; put
+    `<ROM file name>.png` or `.jpg` in `/data/snes9x/covers` for those.
 - **Automatic covers, in the background:** covers come from
   [libretro-thumbnails](https://github.com/libretro-thumbnails/Nintendo_-_Super_Nintendo_Entertainment_System)
   (`Named_Boxarts`) over HTTPS.
@@ -451,6 +464,8 @@ Use the server's IP address. Inside a user name, password or folder, write `& = 
 - A share is read-only. Saves, states, cheats, covers and settings stay on the console.
 - A game is read into memory when it starts. MSU-1 music is fetched before the first frame, and a slow or lost
   connection never stalls the picture or the sound: a track that has not arrived is silent, and the game goes on.
+  This covers loose files beside the ROM (`<rom>.msu`, `<rom>-1.pcm`...). An MSU-1 pack (`<rom>.msu1`, a zip) is not
+  fetched ahead and can make the game wait for the network; unpack its tracks beside the ROM.
 - If a share cannot be reached, a notification says why (no answer, wrong password, share not found...) and the
   same sentence is in `/data/snes9x/logs/boot.log` (`[net]`).
 - The SMB and NFS libraries arrive in separate changes. Until a release has one, its shares report that the
@@ -594,4 +609,8 @@ The build has three stages:
     shelf.
 - **Covers:** [libretro-thumbnails](https://github.com/libretro-thumbnails), downloaded on the console, not
   included. **Names and CRCs:** [libretro-database](https://github.com/libretro/libretro-database) (No-Intro).
+  **CRCs of fan-translation dumps, and covers libretro-thumbnails lacks:** the public SNES dump of
+  [Hasheous](https://hasheous.org), taken 2026-10-17 (`ps5/tools/make_extra_crc.py`, `ps5/tools/make_db_art.py`); those
+  covers are IGDB's, served by Hasheous, or [TheGamesDB](https://thegamesdb.net)'s, downloaded on the console, not
+  included.
 - **Port:** [github.com/MisterTemaki](https://github.com/MisterTemaki).

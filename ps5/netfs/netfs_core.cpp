@@ -329,13 +329,50 @@ int Share::LockConn(std::unique_lock<std::mutex>& lk)
 	return StateErrno(); // the watchdog may have cut the share while this call waited for the lock
 }
 
+// A backend that finds its connection gone answers at once, well inside the watchdog's five seconds, so the
+// timeout alone would leave the share Ready (still a root, no notice) while every call fails. A transport error
+// kills it here. EIO is what a backend says for a dead connection but also for one unreadable file, so it is
+// checked first with a stat of the location: a share that still answers is kept.
+void Share::CheckLost(int err, ErrKind kind)
+{
+	if (State() != NetfsState::Ready)
+		return;
+	bool lost = kind == ErrKind::Closed;
+	switch (err)
+	{
+	case ENOTCONN:
+	case ECONNRESET:
+	case ECONNABORTED:
+	case EPIPE:
+	case ENETDOWN:
+	case ENETUNREACH:
+	case EHOSTUNREACH:
+	case ETIMEDOUT:
+		lost = true;
+		break;
+	case EIO:
+	{
+		Attr a;
+		lost = !m_backend->Stat("", a).ok();
+		break;
+	}
+	default:
+		break;
+	}
+	if (lost)
+		Kill(false);
+}
+
 Status Share::Stat(const std::string& rel, Attr& out)
 {
 	std::unique_lock<std::mutex> lk;
 	if (int e = LockConn(lk))
 		return Status::Errno(e);
 	Timed t(*this);
-	return m_backend->Stat(rel, out);
+	Status st = m_backend->Stat(rel, out);
+	if (!st.ok())
+		CheckLost(st.err, st.kind);
+	return st;
 }
 
 Status Share::List(const std::string& rel, std::vector<DirEntry>& out)
@@ -344,7 +381,10 @@ Status Share::List(const std::string& rel, std::vector<DirEntry>& out)
 	if (int e = LockConn(lk))
 		return Status::Errno(e);
 	Timed t(*this);
-	return m_backend->List(rel, out);
+	Status st = m_backend->List(rel, out);
+	if (!st.ok())
+		CheckLost(st.err, st.kind);
+	return st;
 }
 
 Status Share::Open(const std::string& rel, Handle& out)
@@ -353,7 +393,10 @@ Status Share::Open(const std::string& rel, Handle& out)
 	if (int e = LockConn(lk))
 		return Status::Errno(e);
 	Timed t(*this);
-	return m_backend->Open(rel, out);
+	Status st = m_backend->Open(rel, out);
+	if (!st.ok())
+		CheckLost(st.err, st.kind);
+	return st;
 }
 
 int64_t Share::Read(Handle h, uint64_t off, void* buf, size_t len)
@@ -367,7 +410,10 @@ int64_t Share::Read(Handle h, uint64_t off, void* buf, size_t len)
 		Timed t(*this);
 		int64_t r = m_backend->Pread(h, (char*)buf + done, std::min<size_t>(len - done, 1u << 20), off + done);
 		if (r < 0)
+		{
+			CheckLost(int(-r), ErrKind::None);
 			return done ? (int64_t)done : r;
+		}
 		if (r == 0)
 			break;
 		done += (size_t)r;
