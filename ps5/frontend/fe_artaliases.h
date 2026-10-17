@@ -64,6 +64,10 @@ inline std::string Canonical(const std::string& filename)
         return "Dai-3-ji Super Robot Taisen (Japan)";
     if (key=="bahamutlagoon")
         return "Bahamut Lagoon (Japan)";
+    // The English patch of Seiken Densetsu 3 is widely filed as "Secret of Mana 2"; no such game was released, and
+    // without this the name is taken for Secret of Mana plus a sequel number.
+    if (key=="secretofmana2")
+        return "Seiken Densetsu 3 (Japan)";
     // No Libretro SNES art for Pokemon Gold & Silver (unlicensed platformer)
     // or Aladdin 2000 (unlicensed Genesis-to-SNES port). Do not fabricate a match.
     return "";

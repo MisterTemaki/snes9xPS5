@@ -1400,16 +1400,20 @@ python3 tests/make_test_rom.py "$T/root/roms/Super Mario World.sfc" ntsc >/dev/n
 printf 'border=1\nborder_download=0\n' >>"$T/root/snes9x-ps5.ini"
 rc=$(run "$T" "0:0;$(QUITAT 60)" "" "$T/root/roms/Super Mario World.sfc")
 expect "[ $rc = 0 ] && ! grep -q 'asking the helper' $T/root/logs/boot.log && [ ! -e $T/root/borders/priority.txt ] && grep -q '^border_download=0$' $T/root/snes9x-ps5.ini" "border_download=0: the helper is not asked (and the setting is kept)"
-# Settings > Download all borders (the row before Back: Up twice from the top), with two ROMs of one game and one without a border
+# Settings > Download all borders (the row before Back: Up twice from the top), with two ROMs of one game, the same game's Europe
+# release (The Bezel Project has a border for each region), a Japan-only game (its border is in The Bezel Project's Super Famicom
+# repository) and one ROM without a border
 T=$(newroot t36c)
 python3 tests/make_test_rom.py "$T/root/roms/Super Mario World (USA).sfc" ntsc >/dev/null
+python3 tests/make_test_rom.py "$T/root/roms/Super Mario World.sfc" ntsc >/dev/null
 python3 tests/make_test_rom.py "$T/root/roms/Super Mario World (Europe).sfc" pal >/dev/null
+python3 tests/make_test_rom.py "$T/root/roms/Star Ocean (Japan).sfc" ntsc >/dev/null
 python3 tests/make_test_rom.py "$T/root/roms/Totally Unknown Homebrew.sfc" ntsc >/dev/null
 export SNES9X_BORDER_URL="http://127.0.0.1:$PORT/GameBezels/"
 rc=$(run "$T" "0:0;30:$TRIANGLE;32:0;40:$UP;42:0;46:$UP;48:0;52:$CROSS;54:0;66:$CIRCLE;68:0;76:$OPTIONS;78:0;86:$CROSS;88:0" "")
 unset SNES9X_BORDER_URL
-expect "[ $rc = 0 ] && grep -q '\[border\] user asked for the borders of the library: 1 to download' $T/root/logs/boot.log" "Download all borders: one picture for the library (two ROMs share it, the unknown one has none)"
-expect "[ \$(wc -l <$T/root/borders/wanted.txt) = 1 ] && grep -q '^Super Mario World (USA).png.http://127.0.0.1:$PORT/GameBezels/Super%20Mario%20World%20%28USA%29.png\$' $T/root/borders/wanted.txt" "borders/wanted.txt lists it for the helper"
+expect "[ $rc = 0 ] && grep -q '\[border\] user asked for the borders of the library: 3 to download' $T/root/logs/boot.log" "Download all borders: three pictures for the library (two ROMs share one, the Europe release and the Japan-only game have their own, the unknown one has none)"
+expect "[ \$(wc -l <$T/root/borders/wanted.txt) = 3 ] && grep -q '^Super Mario World (USA).png.http://127.0.0.1:$PORT/GameBezels/Super%20Mario%20World%20%28USA%29.png\$' $T/root/borders/wanted.txt && grep -q '^Super Mario World (Europe).png.http://127.0.0.1:$PORT/GameBezels/Super%20Mario%20World%20%28Europe%29.png\$' $T/root/borders/wanted.txt && grep -q '^Star Ocean (Japan).png.http://127.0.0.1:$PORT/GameBezels/Star%20Ocean%20%28Japan%29.png\$' $T/root/borders/wanted.txt" "borders/wanted.txt lists all three for the helper"
 expect "! grep -q 'runtime error\|AddressSanitizer' $T/out.txt" "no sanitizer reports"
 
 echo
