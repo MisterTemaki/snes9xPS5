@@ -15,7 +15,7 @@ jobs:
       - name: Install image-test dependency
         run: |
           sudo apt-get update
-          sudo apt-get install -y python3-pil
+          sudo apt-get install -y python3-pil samba
           python3 -c "import PIL" || python3 -m pip install --break-system-packages Pillow
       - name: Test ROM and artwork fuzzy matching
         run: |

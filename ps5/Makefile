@@ -56,20 +56,23 @@ NETFS_WRAPPED_LFS64 := fopen64 fseeko64 ftello64 stat64 lstat64 fstat64 readdir6
 NETFS_WRAPPED_PS5 := fcntl getaddrinfo freeaddrinfo
 NETFS_WRAP_LLD := $(foreach s,$(NETFS_WRAPPED) $(NETFS_WRAPPED_PS5),--wrap=$(s))
 NETFS_WRAP_GCC := $(foreach s,$(NETFS_WRAPPED) $(NETFS_WRAPPED_LFS64),-Wl,--wrap=$(s))
-NETFS_SMB_SRC := netfs/backend_smb_stub.cpp
+NETFS_SMB_SRC := netfs/backend_smb.cpp
 NETFS_NFS_SRC := netfs/backend_nfs.cpp
 NETFS_SRC := $(NETFS_CORE_SRC) $(NETFS_SMB_SRC) $(NETFS_NFS_SRC)
 # libsmb2 and libnfs (LGPL-2.1) are vendored into these folders, with their notices. While a folder is absent
-# its list is empty and nothing is built. The flags are a start: the backend work tunes them (PS4_PLATFORM,
-# config.h, the PS5 resolver and socket shims).
+# its list is empty and nothing is built. libsmb2 6.2 is built from a config.h of ours (no CMake). It needs no
+# PS4_PLATFORM: prospero-clang defines __FreeBSD__, which selects libsmb2's FreeBSD headers. Its fcntl and
+# getaddrinfo calls reach the console shims through the --wrap list above.
 LIBSMB2 := third_party/libsmb2
 LIBNFS := third_party/libnfs
 LIBSMB2_SRC := $(sort $(wildcard $(LIBSMB2)/lib/*.c))
 LIBNFS_SRC := $(sort $(foreach d,lib mount nfs nfs4 portmap nlm nsm rquota,$(wildcard $(LIBNFS)/$(d)/*.c)))
-LIBSMB2_FLAGS := -I$(LIBSMB2)/include -I$(LIBSMB2)/include/smb2 -I$(LIBSMB2)/lib
+LIBSMB2_INC := -I$(LIBSMB2)/include -I$(LIBSMB2)/include/smb2 -I$(LIBSMB2)/lib
+LIBSMB2_FLAGS := -I$(LIBSMB2) $(LIBSMB2_INC) -DHAVE_CONFIG_H -D_FILE_OFFSET_BITS=64 '-D_U_=__attribute__((unused))'
 LIBNFS_FLAGS := -DHAVE_CONFIG_H -I$(LIBNFS) -I$(LIBNFS)/include -I$(LIBNFS)/include/nfsc \
 	$(addprefix -I$(LIBNFS)/,mount nfs nfs4 nlm nsm portmap rquota)
-%/port/netfs/backend_smb.o: EXTRA_FLAGS = $(LIBSMB2_FLAGS)
+# netfs/backend_smb.cpp includes libsmb2's headers as system headers (they are not ours to keep -Werror clean)
+%/port/netfs/backend_smb.o: EXTRA_FLAGS = $(patsubst -I%,-isystem %,$(LIBSMB2_INC))
 %/port/netfs/backend_nfs.o: EXTRA_FLAGS = $(LIBNFS_FLAGS)
 %/port/tests/test_netfs.o: EXTRA_FLAGS = -Inetfs
 
@@ -167,7 +170,7 @@ $(PS5_OUT)/zlib/%.o: $(ZLIB)/%.c
 
 $(PS5_OUT)/libsmb2/%.o: $(LIBSMB2)/%.c
 	@mkdir -p $(dir $@)
-	$(PS5_CC) -O2 -fPIC -march=znver2 -DPS4_PLATFORM $(LIBSMB2_FLAGS) -w -c -o $@ $<
+	$(PS5_CC) -O2 -fPIC -march=znver2 $(LIBSMB2_FLAGS) -w -c -o $@ $<
 
 $(PS5_OUT)/libnfs/%.o: $(LIBNFS)/%.c
 	@mkdir -p $(dir $@)
@@ -347,7 +350,7 @@ $(HOST_OUT)/zlib/%.o: $(ZLIB)/%.c
 
 $(HOST_OUT)/libsmb2/%.o: $(LIBSMB2)/%.c
 	@mkdir -p $(dir $@)
-	$(HOST_CC) -O2 -g1 $(LIBSMB2_FLAGS) -w -c -o $@ $<
+	$(HOST_CC) -O2 -g1 -D_GNU_SOURCE $(LIBSMB2_FLAGS) -w -c -o $@ $<
 
 $(HOST_OUT)/libnfs/%.o: $(LIBNFS)/%.c
 	@mkdir -p $(dir $@)
@@ -421,6 +424,9 @@ test: test-nfs
 
 clean:
 	rm -rf build
+
+# the SMB backend against a real Samba (adds `smb-test`, run before the other tests; skipped without smbd)
+include tests/smb/smb.mk
 
 .PHONY: ps5 host test test-nfs test-nfs-server send strip app dist clean
 .SECONDARY:
