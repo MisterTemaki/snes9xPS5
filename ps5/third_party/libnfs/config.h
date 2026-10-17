@@ -25,17 +25,17 @@
 #define HAVE_UNISTD_H 1
 #define HAVE_UTIME_H 1
 #define HAVE_STRUCT_STAT_ST_MTIM_TV_NSEC 1
+#define HAVE_SYS_STATVFS_H 1
 
 #ifdef __PROSPERO__
-/* FreeBSD-based: sockaddr carries sa_len; no pwd.h, statvfs-by-path or Linux-only headers. The console
- * has no coarse monotonic clock. */
+/* FreeBSD-based: sockaddr carries sa_len; no pwd.h or Linux-only headers. The console has no coarse
+ * monotonic clock. */
 #define HAVE_SOCKADDR_LEN 1
 #ifndef CLOCK_MONOTONIC_COARSE
 #define CLOCK_MONOTONIC_COARSE CLOCK_MONOTONIC
 #endif
 #else
 #define HAVE_SO_BINDTODEVICE 1
-#define HAVE_SYS_STATVFS_H 1
 #define HAVE_SYS_VFS_H 1
 #define HAVE_SYS_SYSMACROS_H 1
 #endif
