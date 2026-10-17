@@ -41,7 +41,7 @@ bool IniSaysLogsOff()
 	return off;
 }
 
-const char* const kSubdirs[] = {"roms", "saves", "states", "screenshots", "cheats", "patches", "bios", "logs", "covers"};
+const char* const kSubdirs[] = {"roms", "saves", "states", "screenshots", "cheats", "patches", "bios", "logs", "covers", "borders/games"};
 } // namespace
 
 const std::string& OrbisRoot()

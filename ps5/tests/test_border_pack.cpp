@@ -1,0 +1,583 @@
+// Border pack tests: PNG decode, finding the window, the backdrop and the rim, the lookup order and the Select / Reselect /
+// Release calls (frontend/fe_border.cpp, fe_borderimg.cpp). The renderer, the cover matcher and the game naming are
+// stand-ins below: the real ones are covered by the host groups in run-tests.sh. Pictures are generated PNGs.
+// SPDX-License-Identifier: MIT
+
+#include "fe_border.h"
+#include "fe_borderimg.h"
+#include "fe_covers.h"
+#include "fe_games.h"
+#include "fe_settings.h"
+
+#include "OrbisPaths.h"
+#include "ProsperoVideo.h"
+
+#include <zlib.h>
+
+#include <sys/stat.h>
+#include <unistd.h>
+
+#include <algorithm>
+#include <chrono>
+#include <cstdio>
+#include <cstdlib>
+#include <cstring>
+#include <string>
+#include <vector>
+
+// ---- stand-ins for what the border code calls ----
+namespace ps5video
+{
+std::shared_ptr<const Border> g_shown;
+int g_set_calls = 0;
+void SetBorder(std::shared_ptr<const Border> border)
+{
+	g_shown = std::move(border);
+	g_set_calls++;
+}
+} // namespace ps5video
+
+namespace fe
+{
+// The real matcher is MatchArtName over the pack's names (fe_covers.cpp); here a name is matched when it is the game's
+// No-Intro name, which is the one rule these tests need.
+std::string MatchPackName(const std::vector<std::string>& names, const GameInfo& game)
+{
+	return std::find(names.begin(), names.end(), game.nointro) != names.end() ? game.nointro : std::string();
+}
+
+GameInfo DescribeGame(const std::string& path, uint32_t rom_crc)
+{
+	GameInfo g;
+	g.path = path;
+	const std::string name = path.substr(path.find_last_of('/') + 1);
+	g.file_base = name.substr(0, name.find_last_of('.'));
+	g.crc = rom_crc;
+	// "Mapped Name.sfc" is the ROM of the game the pack calls "Mapped Name (USA)"
+	g.nointro = g.file_base.rfind("Mapped", 0) == 0 ? g.file_base + " (USA)" : g.file_base;
+	return g;
+}
+} // namespace fe
+
+namespace
+{
+int g_failed = 0;
+int g_checked = 0;
+#define CHECK(cond, what)                                                                          \
+	do                                                                                             \
+	{                                                                                              \
+		g_checked++;                                                                               \
+		if (!(cond))                                                                               \
+		{                                                                                          \
+			g_failed++;                                                                            \
+			printf("FAIL %s:%d: %s\n", __FILE__, __LINE__, what);                                  \
+		}                                                                                          \
+	} while (0)
+
+using ps5video::Rect;
+using fe::border::Image;
+
+// ---- a PNG writer: just enough for the tests (filter 0, one IDAT) ----
+struct Px
+{
+	uint8_t r, g, b, a;
+};
+
+void Be32(std::vector<uint8_t>& o, uint32_t v)
+{
+	for (int s = 24; s >= 0; s -= 8)
+		o.push_back(uint8_t(v >> s));
+}
+
+void Chunk(std::vector<uint8_t>& o, const char* type, const std::vector<uint8_t>& data)
+{
+	Be32(o, uint32_t(data.size()));
+	std::vector<uint8_t> body(type, type + 4);
+	body.insert(body.end(), data.begin(), data.end());
+	o.insert(o.end(), body.begin(), body.end());
+	Be32(o, uint32_t(crc32(0, body.data(), uInt(body.size()))));
+}
+
+std::vector<uint8_t> Png(int w, int h, int depth, int ctype, const std::vector<uint8_t>& scan, const std::vector<uint8_t>& plte = {},
+	const std::vector<uint8_t>& trns = {})
+{
+	std::vector<uint8_t> o = {0x89, 'P', 'N', 'G', 0x0d, 0x0a, 0x1a, 0x0a};
+	std::vector<uint8_t> ihdr;
+	Be32(ihdr, uint32_t(w));
+	Be32(ihdr, uint32_t(h));
+	ihdr.insert(ihdr.end(), {uint8_t(depth), uint8_t(ctype), 0, 0, 0});
+	Chunk(o, "IHDR", ihdr);
+	if (!plte.empty())
+		Chunk(o, "PLTE", plte);
+	if (!trns.empty())
+		Chunk(o, "tRNS", trns);
+	uLongf n = compressBound(uLong(scan.size()));
+	std::vector<uint8_t> z(n);
+	compress2(z.data(), &n, scan.data(), uLong(scan.size()), 1);
+	z.resize(n);
+	Chunk(o, "IDAT", z);
+	Chunk(o, "IEND", {});
+	return o;
+}
+
+template <class F> std::vector<uint8_t> PngRgba(int w, int h, F px, int depth = 8)
+{
+	std::vector<uint8_t> scan;
+	for (int y = 0; y < h; y++)
+	{
+		scan.push_back(0);
+		for (int x = 0; x < w; x++)
+		{
+			const Px p = px(x, y);
+			for (uint8_t c : {p.r, p.g, p.b, p.a})
+			{
+				scan.push_back(c);
+				if (depth == 16)
+					scan.push_back(c);
+			}
+		}
+	}
+	return Png(w, h, depth, 6, scan);
+}
+
+template <class F> std::vector<uint8_t> PngRgb(int w, int h, F px)
+{
+	std::vector<uint8_t> scan;
+	for (int y = 0; y < h; y++)
+	{
+		scan.push_back(0);
+		for (int x = 0; x < w; x++)
+		{
+			const Px p = px(x, y);
+			scan.insert(scan.end(), {p.r, p.g, p.b});
+		}
+	}
+	return Png(w, h, 8, 2, scan);
+}
+
+// ---- the art: a frame with a clear window, a soft 2 pixel edge inside it, a soft ring outside it, one opaque corner ----
+const Rect kWinA = {261, 21, 1398, 1038};
+const Rect kWinB = {200, 40, 1500, 1000};
+const Rect kWinC = {300, 60, 1300, 960};
+const Rect kWinD = {100, 100, 1000, 700};
+
+Px Art(const Rect& win, int x, int y)
+{
+	const bool in = x >= win.x && x < win.x + win.w && y >= win.y && y < win.y + win.h;
+	if (in)
+	{
+		if (x == win.x && y == win.y)
+			return {200, 100, 50, 255}; // a rounded corner of the glass, opaque
+		const int d = std::min(std::min(x - win.x, win.x + win.w - 1 - x), std::min(y - win.y, win.y + win.h - 1 - y));
+		if (d < 2)
+			return {255, 255, 255, 10}; // the soft edge: counts as clear, still drawn over the picture
+		return {0, 0, 0, 0};
+	}
+	const int dx = std::max(std::max(win.x - x, x - (win.x + win.w - 1)), 0);
+	const int dy = std::max(std::max(win.y - y, y - (win.y + win.h - 1)), 0);
+	if (std::max(dx, dy) <= 3)
+		return {20, 30, 40, 128}; // the frame's own soft edge, outside the window
+	return {200, 40, 40, 255};
+}
+
+std::vector<uint8_t> ArtPng(const Rect& win)
+{
+	return PngRgba(1920, 1080, [&](int x, int y) { return Art(win, x, y); });
+}
+
+// ---- files ----
+std::string g_root;
+
+void WriteBytes(const std::string& path, const std::vector<uint8_t>& b)
+{
+	FILE* f = fopen(path.c_str(), "wb");
+	if (f)
+	{
+		fwrite(b.data(), 1, b.size(), f);
+		fclose(f);
+	}
+}
+
+void WriteText(const std::string& path, const std::string& text)
+{
+	WriteBytes(path, std::vector<uint8_t>(text.begin(), text.end()));
+}
+
+void Remove(const std::string& path)
+{
+	unlink(path.c_str());
+}
+
+bool SameRect(const Rect& a, const Rect& b)
+{
+	return a.x == b.x && a.y == b.y && a.w == b.w && a.h == b.h;
+}
+
+fe::GameInfo Game(const char* file_base, const char* nointro = "")
+{
+	fe::GameInfo g;
+	g.file_base = file_base;
+	g.nointro = nointro;
+	return g;
+}
+
+// ---- the tests ----
+void TestDecode()
+{
+	using fe::border::DecodePng;
+	Image img;
+	std::string why;
+
+	const std::vector<uint8_t> rgba = ArtPng(kWinA);
+	CHECK(DecodePng(rgba.data(), rgba.size(), &img, &why), "an RGBA 1920x1080 PNG decodes");
+	CHECK(img.w == 1920 && img.h == 1080 && img.px.size() == 1920u * 1080u, "decoded size");
+	CHECK(img.px[0] == 0xff2828c8u, "pixel (0,0) is 0xAABBGGRR of the frame colour (200, 40, 40)");
+	CHECK(img.px[size_t(540) * 1920 + 960] == 0u, "the centre is clear (alpha 0)");
+
+	const std::vector<uint8_t> rgb = PngRgb(1920, 1080, [](int, int) { return Px{10, 20, 30, 0}; });
+	CHECK(DecodePng(rgb.data(), rgb.size(), &img, &why), "an RGB PNG decodes");
+	CHECK(img.px[12345] == (0xff000000u | (30u << 16) | (20u << 8) | 10u), "RGB gets alpha 255");
+
+	// palette + tRNS, as The Bezel Project's files are: index 0 clear, 1 the frame, 2 half-clear white
+	std::vector<uint8_t> scan;
+	for (int y = 0; y < 1080; y++)
+	{
+		scan.push_back(0);
+		for (int x = 0; x < 1920; x++)
+			scan.push_back(x >= 261 && x < 1659 && y >= 21 && y < 1059 ? (x == 261 ? 2 : 0) : 1);
+	}
+	const std::vector<uint8_t> pal =
+		Png(1920, 1080, 8, 3, scan, {0, 0, 0, 200, 40, 40, 255, 255, 255}, {0, 255, 128});
+	CHECK(DecodePng(pal.data(), pal.size(), &img, &why), "a palette PNG with tRNS decodes");
+	CHECK((img.px[size_t(540) * 1920 + 960] >> 24) == 0, "palette index 0 is clear through tRNS");
+	CHECK((img.px[5] >> 24) == 255, "palette index 1 is opaque");
+	CHECK((img.px[size_t(540) * 1920 + 261] >> 24) == 128, "palette index 2 has alpha 128");
+
+	const std::vector<uint8_t> small = PngRgba(100, 100, [](int, int) { return Px{0, 0, 0, 0}; });
+	CHECK(!DecodePng(small.data(), small.size(), &img, &why) && why.find("100 x 100") != std::string::npos,
+		"a PNG that is not 1920x1080 is refused, naming its size");
+
+	const std::vector<uint8_t> deep = PngRgba(1920, 1080, [](int, int) { return Px{0, 0, 0, 0}; }, 16);
+	CHECK(!DecodePng(deep.data(), deep.size(), &img, &why) && why.find("16 bits") != std::string::npos, "16 bits per channel is refused");
+
+	const std::vector<uint8_t> junk(300, 0x41);
+	CHECK(!DecodePng(junk.data(), junk.size(), &img, &why) && why.find("not a PNG") != std::string::npos, "bytes that are no PNG are refused");
+	CHECK(!DecodePng(junk.data(), 0, &img, &why) && why.find("empty") != std::string::npos, "an empty file is refused");
+
+	std::vector<uint8_t> cut(rgba.begin(), rgba.begin() + long(rgba.size() / 2));
+	CHECK(!DecodePng(cut.data(), cut.size(), &img, &why), "a truncated PNG is refused");
+	CHECK(why.find("damaged") != std::string::npos, "and called damaged");
+
+	std::vector<uint8_t> big(fe::border::kMaxFileBytes + 1, 0);
+	CHECK(!DecodePng(big.data(), big.size(), &img, &why) && why.find("8 MiB") != std::string::npos, "a file over 8 MiB is refused");
+}
+
+void TestWindow()
+{
+	using fe::border::FindWindow;
+	Image img;
+	std::string why;
+	Rect win = {};
+
+	const std::vector<uint8_t> a = ArtPng(kWinA);
+	fe::border::DecodePng(a.data(), a.size(), &img, &why);
+	CHECK(FindWindow(img, &win, &why) && SameRect(win, kWinA), "the window is the bounding box of the clear region (261,21 1398x1038)");
+
+	// a clear island far away and a clear diagonal that touches the window only at a corner are not part of it
+	Image tricky = img;
+	for (int y = 600; y < 610; y++)
+		for (int x = 40; x < 50; x++)
+			tricky.px[size_t(y) * 1920 + x] = 0;
+	for (int k = 0; k < 10; k++)
+		tricky.px[size_t(kWinA.y - k) * 1920 + size_t(kWinA.x - 1 - k)] = 0;
+	CHECK(FindWindow(tricky, &win, &why) && SameRect(win, kWinA), "a clear island, and a diagonal-only link, do not widen the window");
+
+	Image opaque = img;
+	for (int y = 530; y < 550; y++)
+		for (int x = 950; x < 970; x++)
+			opaque.px[size_t(y) * 1920 + x] = 0xff000000u;
+	CHECK(!FindWindow(opaque, &win, &why) && why.find("centre") != std::string::npos, "an opaque centre is refused");
+
+	const std::vector<uint8_t> tiny = ArtPng({900, 500, 300, 200});
+	Image t;
+	fe::border::DecodePng(tiny.data(), tiny.size(), &t, &why);
+	CHECK(!FindWindow(t, &win, &why) && why.find("too small") != std::string::npos, "a window under 480x270 is refused");
+
+	Image wrong;
+	wrong.w = 100;
+	wrong.h = 100;
+	CHECK(!FindWindow(wrong, &win, &why), "an image of the wrong size is refused");
+
+	CHECK(fe::border::WindowFits({0, 0, 1920, 1080}), "a window may be the whole surface");
+	CHECK(fe::border::WindowFits({100, 50, 480, 270}), "480x270 is the smallest given window");
+	CHECK(!fe::border::WindowFits({100, 50, 479, 270}), "a given window under 480 wide is refused");
+	CHECK(!fe::border::WindowFits({100, 50, 480, 269}), "a given window under 270 high is refused");
+	CHECK(!fe::border::WindowFits({1700, 0, 400, 400}), "a window past the right edge is refused");
+	CHECK(!fe::border::WindowFits({0, 700, 400, 400}), "a window past the bottom edge is refused");
+	CHECK(!fe::border::WindowFits({-1, 0, 400, 400}), "a window left of the surface is refused");
+}
+
+void TestBuild()
+{
+	using fe::border::BuildBorder;
+	Image img;
+	std::string why;
+	const std::vector<uint8_t> a = ArtPng(kWinA);
+	fe::border::DecodePng(a.data(), a.size(), &img, &why);
+	const auto b = BuildBorder(img, kWinA, &why);
+	CHECK(b != nullptr, "a border is built");
+	if (!b)
+		return;
+	CHECK(SameRect(b->window, kWinA), "the border keeps its window");
+	CHECK(b->backdrop.size() == 1920u * 1080u, "the backdrop is the whole surface");
+	CHECK(b->backdrop[0] == 0xff2828c8u, "an opaque frame pixel is itself, alpha 255");
+	CHECK(b->backdrop[size_t(540) * 1920 + 960] == 0xff000000u, "a clear window pixel is black");
+	// the frame's soft ring at (260, 500): colour (20,30,40) at alpha 128 on black
+	CHECK(b->backdrop[size_t(500) * 1920 + 260] == 0xff140f0au, "a half-clear pixel outside the window is composited on black");
+	// the soft edge inside the window: white at alpha 10 -> 10 on black, and it is a rim pixel
+	const uint32_t edge = uint32_t(500) * 1920 + 262; // two in from the window's left edge: d = 1
+	CHECK(b->backdrop[edge - 1] == 0xff0a0a0au, "a soft edge pixel inside the window is on black in the backdrop");
+
+	size_t expected = 0;
+	for (int y = kWinA.y; y < kWinA.y + kWinA.h; y++)
+		for (int x = kWinA.x; x < kWinA.x + kWinA.w; x++)
+			expected += Art(kWinA, x, y).a != 0;
+	CHECK(b->rim.size() == expected && expected > 0, "the rim holds every window pixel with alpha 1..255");
+	CHECK(std::is_sorted(b->rim.begin(), b->rim.end(), [](const ps5video::RimPixel& p, const ps5video::RimPixel& q) { return p.index < q.index; }),
+		"the rim is sorted by index");
+	const auto find = [&](uint32_t index) { return std::find_if(b->rim.begin(), b->rim.end(), [&](const ps5video::RimPixel& p) { return p.index == index; }); };
+	const auto soft = find(edge - 1);
+	CHECK(soft != b->rim.end() && soft->pre == 0x000a0a0au && soft->inv == 245u, "a soft edge pixel: colour times alpha, and 255 - alpha");
+	const auto corner = find(uint32_t(kWinA.y) * 1920 + uint32_t(kWinA.x));
+	CHECK(corner != b->rim.end() && corner->pre == 0x003264c8u && corner->inv == 0u, "an opaque corner of the glass is in the rim, inv 0");
+	CHECK(find(uint32_t(540) * 1920 + 960) == b->rim.end(), "a clear pixel is not in the rim");
+	CHECK(find(uint32_t(500) * 1920 + 260) == b->rim.end(), "a pixel outside the window is not in the rim");
+
+	// art that covers most of the window is refused: it would cost frame time
+	Image veil = img;
+	for (uint32_t& p : veil.px)
+		if ((p >> 24) == 0)
+			p = 0x20000000u;
+	CHECK(BuildBorder(veil, kWinA, &why) == nullptr && why.find("covered") != std::string::npos, "a window covered by art is refused");
+
+	Image bad;
+	bad.w = 10;
+	bad.h = 10;
+	CHECK(BuildBorder(bad, kWinA, &why) == nullptr, "an image of the wrong size builds nothing");
+}
+
+// ---- the pack ----
+void MakePack(const std::string& root)
+{
+	mkdir((root + "/borders").c_str(), 0777);
+	mkdir((root + "/borders/games").c_str(), 0777);
+}
+
+void ClearPack(const std::string& pack)
+{
+	const std::string games = pack + "/games";
+	if (FILE* p = popen(("rm -rf '" + games + "' '" + pack + "/default.png' '" + pack + "/default.ini'").c_str(), "r"))
+		pclose(p);
+	mkdir(games.c_str(), 0777);
+}
+
+void TestChoose()
+{
+	using fe::border::Choose;
+	const std::string pack = g_root + "/borders";
+	const std::string games = pack + "/games/";
+	ClearPack(pack);
+
+	const std::vector<uint8_t> png_a = ArtPng(kWinA), png_b = ArtPng(kWinB), png_c = ArtPng(kWinC), png_d = ArtPng(kWinD);
+
+	// nothing in the pack: the built-in frame
+	fe::border::Pick pick = Choose(pack, 1, Game("Super Mario World (USA)", "Super Mario World (USA)"));
+	CHECK(pick.border && pick.source == "built-in", "an empty pack falls back to the built-in frame");
+	CHECK(pick.border && pick.border->window.w >= 480 && pick.border->window.h >= 270, "the built-in frame has a usable window");
+	pick = Choose("/nonexistent/pack", 1, Game("X"));
+	CHECK(pick.border && pick.source == "built-in", "a missing pack folder falls back to the built-in frame");
+
+	// default.png
+	WriteBytes(pack + "/default.png", png_d);
+	pick = Choose(pack, 1, Game("Super Mario World (USA)", "Super Mario World (USA)"));
+	CHECK(pick.source == "default.png" && pick.border && SameRect(pick.border->window, kWinD), "no border of its own: default.png");
+
+	// the matcher: the pack calls the game by its No-Intro name, the ROM is called something else
+	WriteBytes(games + "Super Mario World (USA).png", png_c);
+	pick = Choose(pack, 1, Game("smw", "Super Mario World (USA)"));
+	CHECK(pick.source == "matched" && pick.border && SameRect(pick.border->window, kWinC), "a renamed ROM finds its game's border by the matcher");
+	CHECK(pick.file == "Super Mario World (USA).png", "and the pick names the file");
+
+	// the ROM's own file name wins over the matcher
+	WriteBytes(games + "smw.png", png_b);
+	pick = Choose(pack, 1, Game("smw", "Super Mario World (USA)"));
+	CHECK(pick.source == "own file" && pick.border && SameRect(pick.border->window, kWinB), "games/<ROM name>.png wins over the matcher");
+
+	// Default frame ignores games/
+	pick = Choose(pack, 2, Game("smw", "Super Mario World (USA)"));
+	CHECK(pick.source == "default.png" && pick.border && SameRect(pick.border->window, kWinD), "Default frame uses default.png, not the game's border");
+	Remove(pack + "/default.png");
+	pick = Choose(pack, 2, Game("smw", "Super Mario World (USA)"));
+	CHECK(pick.source == "built-in", "Default frame without default.png uses the built-in frame");
+	WriteBytes(pack + "/default.png", png_d);
+
+	// a file that is there but unusable is skipped, the next choice applies
+	WriteBytes(games + "smw.png", std::vector<uint8_t>(500, 7));
+	pick = Choose(pack, 1, Game("smw", "Super Mario World (USA)"));
+	CHECK(pick.source == "matched" && pick.border && SameRect(pick.border->window, kWinC), "a corrupt own file falls through to the matcher");
+	WriteBytes(games + "Super Mario World (USA).png", ArtPng({900, 500, 300, 200}));
+	pick = Choose(pack, 1, Game("smw", "Super Mario World (USA)"));
+	CHECK(pick.source == "default.png", "own and matched both unusable (corrupt, tiny window): default.png");
+	WriteBytes(pack + "/default.png", PngRgba(64, 64, [](int, int) { return Px{0, 0, 0, 0}; }));
+	pick = Choose(pack, 1, Game("smw", "Super Mario World (USA)"));
+	CHECK(pick.source == "built-in" && pick.border, "a default.png of the wrong size falls through to the built-in frame");
+	WriteBytes(pack + "/default.png", png_d);
+	WriteBytes(games + "smw.png", png_b);
+	WriteBytes(games + "Super Mario World (USA).png", png_c);
+
+	// .ini: off
+	WriteText(games + "smw.ini", "off=1\n");
+	pick = Choose(pack, 1, Game("smw", "Super Mario World (USA)"));
+	CHECK(pick.source == "off" && !pick.border, "smw.ini with off=1: no border at all");
+	Remove(games + "smw.png");
+	pick = Choose(pack, 1, Game("smw", "Super Mario World (USA)"));
+	CHECK(pick.source == "off" && !pick.border, "off=1 beside the ROM's name works without a picture of that name");
+	Remove(games + "smw.ini");
+	WriteText(games + "Super Mario World (USA).ini", "# no border here\noff = 1\n");
+	pick = Choose(pack, 1, Game("smw", "Super Mario World (USA)"));
+	CHECK(pick.source == "off" && !pick.border, "off=1 beside the matched picture: no border");
+	pick = Choose(pack, 2, Game("smw", "Super Mario World (USA)"));
+	CHECK(pick.source == "default.png", "off=1 does not touch the Default frame setting");
+	WriteText(games + "Super Mario World (USA).ini", "off=maybe\n");
+	pick = Choose(pack, 1, Game("smw", "Super Mario World (USA)"));
+	CHECK(pick.source == "matched", "a bad off value is ignored");
+	Remove(games + "Super Mario World (USA).ini");
+
+	// .ini: window
+	WriteText(games + "Super Mario World (USA).ini", "window=100, 80, 1200, 900\n");
+	pick = Choose(pack, 1, Game("smw", "Super Mario World (USA)"));
+	CHECK(pick.source == "matched" && pick.border && SameRect(pick.border->window, Rect{100, 80, 1200, 900}), "window= replaces the one found");
+	WriteText(games + "Super Mario World (USA).ini", "window=100,80,10,10\nunknown=1\n");
+	pick = Choose(pack, 1, Game("smw", "Super Mario World (USA)"));
+	CHECK(pick.border && SameRect(pick.border->window, kWinC), "a window= that is too small is ignored, the picture's own window is found");
+	WriteText(games + "Super Mario World (USA).ini", "window=1,2,3\n");
+	pick = Choose(pack, 1, Game("smw", "Super Mario World (USA)"));
+	CHECK(pick.border && SameRect(pick.border->window, kWinC), "a window= with three numbers is ignored");
+	WriteText(pack + "/default.ini", "window=50,50,800,600\n");
+	pick = Choose(pack, 2, Game("smw"));
+	CHECK(pick.border && SameRect(pick.border->window, Rect{50, 50, 800, 600}), "default.ini gives default.png a window");
+	Remove(pack + "/default.ini");
+	Remove(games + "Super Mario World (USA).ini");
+
+	// the RGB PNG has no alpha: no window to find, but a window= punches one out (and with it any rim)
+	WriteBytes(games + "plain.png", PngRgb(1920, 1080, [](int x, int y) { return Px{uint8_t(x), uint8_t(y), 9, 255}; }));
+	pick = Choose(pack, 1, Game("plain"));
+	CHECK(pick.source == "default.png", "an RGB PNG has no clear centre: refused without a window=, default.png");
+	WriteText(games + "plain.ini", "window=300,100,1200,800\n");
+	pick = Choose(pack, 1, Game("plain"));
+	CHECK(pick.source == "own file" && pick.border && SameRect(pick.border->window, Rect{300, 100, 1200, 800}), "with a window= an RGB PNG is a frame");
+	CHECK(pick.border && pick.border->rim.empty(), "whose window has no rim");
+	CHECK(pick.border && pick.border->backdrop[size_t(400) * 1920 + 900] == 0xff000000u, "and is black inside the window");
+	CHECK(pick.border && pick.border->backdrop[size_t(99) * 1920 + 900] != 0xff000000u, "while the picture outside it is kept");
+	WriteText(games + "plain.ini", "window=300,100,479,400\n");
+	pick = Choose(pack, 1, Game("plain"));
+	CHECK(pick.source == "default.png", "a window= under 480 wide is ignored, so the RGB PNG has no window again");
+	// an RGBA picture with a window= loses its soft edge: the rectangle is a hole
+	WriteBytes(games + "soft.png", png_a);
+	WriteText(games + "soft.ini", "window=261,21,1398,1038\n");
+	pick = Choose(pack, 1, Game("soft"));
+	CHECK(pick.source == "own file" && pick.border && pick.border->rim.empty(), "window= clears the soft edge and the corner inside it: no rim");
+	Remove(games + "soft.png");
+	Remove(games + "soft.ini");
+	Remove(games + "plain.png");
+	Remove(games + "plain.ini");
+
+	// upper-case extension, odd characters in the name
+	WriteBytes(games + "Dr. Mario & Co! (USA).PNG", png_a);
+	pick = Choose(pack, 1, Game("Dr. Mario & Co! (USA)"));
+	CHECK(pick.source == "own file" && pick.border && SameRect(pick.border->window, kWinA), "a .PNG file with dots and symbols in its name is found");
+
+	// time one choice: a typical file, decoded, searched, built (host figure; the console is slower)
+	const auto t0 = std::chrono::steady_clock::now();
+	pick = Choose(pack, 1, Game("Dr. Mario & Co! (USA)"));
+	const auto t1 = std::chrono::steady_clock::now();
+	printf("info: one choice (decode, window, backdrop, rim) took %lld ms on the host\n",
+		(long long)std::chrono::duration_cast<std::chrono::milliseconds>(t1 - t0).count());
+}
+
+void TestSelect()
+{
+	const std::string pack = g_root + "/borders";
+	const std::string games = pack + "/games/";
+	ClearPack(pack);
+	WriteBytes(games + "Mapped Game.png", ArtPng(kWinB));
+	WriteBytes(games + "Mapped Game (USA).png", ArtPng(kWinC));
+
+	fe::Config().border = 0;
+	ps5video::g_set_calls = 0;
+	fe::border::Select("/data/snes9x/roms/Mapped Game.sfc", 0x1234);
+	CHECK(ps5video::g_set_calls == 0 && !ps5video::g_shown, "Border Off: the renderer is not touched");
+
+	fe::Config().border = 1;
+	fe::border::Reselect();
+	CHECK(ps5video::g_set_calls == 1 && ps5video::g_shown && SameRect(ps5video::g_shown->window, kWinB), "Off -> Auto while a game runs: its own border is set");
+
+	fe::border::Reselect();
+	CHECK(ps5video::g_set_calls == 1, "Reselect with the setting unchanged does nothing (every settings change comes through it)");
+
+	fe::Config().border = 2;
+	fe::border::Reselect();
+	CHECK(ps5video::g_set_calls == 2 && ps5video::g_shown && ps5video::g_shown->window.w >= 480, "Auto -> Default frame: the built-in frame");
+
+	fe::Config().border = 0;
+	fe::border::Reselect();
+	CHECK(ps5video::g_set_calls == 3 && !ps5video::g_shown, "-> Off: the border is cleared");
+	fe::border::Reselect();
+	CHECK(ps5video::g_set_calls == 3, "and clearing again does not touch the renderer");
+
+	fe::Config().border = 1;
+	fe::border::Select("/data/snes9x/roms/Mapped Game.sfc", 0x1234);
+	CHECK(ps5video::g_shown && SameRect(ps5video::g_shown->window, kWinB), "Select sets the border of the loaded game");
+	fe::border::Release();
+	CHECK(!ps5video::g_shown, "Release clears it");
+	const int calls = ps5video::g_set_calls;
+	fe::Config().border = 2;
+	fe::border::Reselect();
+	CHECK(ps5video::g_set_calls == calls, "Reselect with no game does nothing");
+	fe::border::Release();
+	CHECK(ps5video::g_set_calls == calls, "and Release with nothing shown does not touch the renderer");
+
+	// a corrupt pack never fails Select
+	WriteBytes(games + "Mapped Game.png", std::vector<uint8_t>(10, 1));
+	WriteBytes(games + "Mapped Game (USA).png", std::vector<uint8_t>(10, 1));
+	fe::Config().border = 1;
+	fe::border::Select("/data/snes9x/roms/Mapped Game.sfc", 0);
+	CHECK(ps5video::g_shown != nullptr, "a pack of corrupt files still ends in the built-in frame");
+	fe::border::Release();
+}
+} // namespace
+
+int main()
+{
+	char dir[] = "/tmp/border-pack-test-XXXXXX";
+	if (!mkdtemp(dir))
+	{
+		perror("mkdtemp");
+		return 2;
+	}
+	g_root = dir;
+	setenv("SNES9X_PS5_ROOT", dir, 1);
+	MakePack(g_root);
+	OrbisLogSetEnabled(true);
+
+	TestDecode();
+	TestWindow();
+	TestBuild();
+	TestChoose();
+	TestSelect();
+
+	if (FILE* p = popen(("rm -rf '" + g_root + "'").c_str(), "r"))
+		pclose(p);
+	printf("%d checks, %d failed\n", g_checked, g_failed);
+	return g_failed ? 1 : 0;
+}

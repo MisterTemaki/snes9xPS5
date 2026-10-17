@@ -90,7 +90,8 @@ const std::vector<std::string>& SnapArtNames()
     static const auto names = ParseArtIndex(s9x_snap_index_begin, s9x_snap_index_end);
     return names;
 }
-std::string MatchArtName(const std::vector<std::string>& names, const GameInfo& game)
+std::string MatchArtName(const std::vector<std::string>& names, const titles::Index& index, const artmatch::Index& words,
+    const GameInfo& game)
 {
     if (artaliases::DistinctBootleg(game.file_base))
     {
@@ -108,8 +109,6 @@ std::string MatchArtName(const std::vector<std::string>& names, const GameInfo& 
         ? game.file_base : game.nointro;
     auto exact = std::find(names.begin(), names.end(), requested);
     if (exact != names.end()) return *exact; // preserve revisions and git symlinks
-    const titles::Index& index = titles::IndexOf(names); // names: one of the built-in art lists
-    const artmatch::Index& words = artmatch::IndexOf(names);
     // What the ROM's CRC is called in the extra table (a fan translation, a hack): the database knows this very file.
     std::string result;
     if (!game.crc_name.empty())
@@ -133,6 +132,11 @@ std::string MatchArtName(const std::vector<std::string>& names, const GameInfo& 
     if (result.empty() && !game.header_title.empty())
         result = artmatch::ResolveHeader(words, game.header_title, game.header_japan);
     return result;
+}
+// names: one of the built-in art lists, which live as long as the program (their indexes are cached by address)
+std::string MatchArtName(const std::vector<std::string>& names, const GameInfo& game)
+{
+    return MatchArtName(names, titles::IndexOf(names), artmatch::IndexOf(names), game);
 }
 std::string MatchFallbackArt(const std::vector<std::string>& names, const GameInfo& game)
 {
@@ -440,6 +444,17 @@ std::string CoverNameFor(const GameInfo& game)
         cache.emplace(cache_key,best);
     }
     return best;
+}
+
+std::string MatchPackName(const std::vector<std::string>& names, const GameInfo& game)
+{
+    // a list that changes between calls: its indexes are made here and thrown away (IndexOf would hand back a stale
+    // one for a different list of the same size at the same address)
+    titles::Index index;
+    titles::Build(index, names);
+    artmatch::Index words;
+    artmatch::Build(words, names);
+    return MatchArtName(names, index, words, game);
 }
 
 std::string ThumbnailName(const std::string& nointro)

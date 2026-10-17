@@ -65,6 +65,10 @@ std::string Title(const std::string& nointro);
 std::string Region(const std::string& nointro);
 } // namespace gamedb
 
+// The GameInfo of a ROM that is being loaded, named exactly as ScanGames names it. rom_crc: the CRC the core computed
+// (0 when not known: the cache or the file then supplies it, a ROM on a share only from the cache).
+GameInfo DescribeGame(const std::string& path, uint32_t rom_crc);
+
 // The folders to look for ROMs in: OrbisRomRoots() plus the network shares that are connected (in memory, no I/O).
 std::vector<std::string> RomRoots();
 

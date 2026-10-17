@@ -13,6 +13,7 @@
 
 #include "fe_emu.h"
 
+#include "fe_border.h"
 #include "fe_games.h"
 #include "fe_cheatlookup.h"
 #include "fe_settings.h"
@@ -713,6 +714,7 @@ bool LoadGame(const std::string& path)
 	ApplySettings();
 	OrbisLog("[emu] \"%s\" %s, %d fps, %s", Memory.ROMName, Memory.ROMFilename.c_str(), Memory.ROMFramesPerSecond,
 		Settings.PAL ? "PAL" : "NTSC");
+	fe::border::Select(path, Memory.ROMCRC32); // reads /data (and maybe the ROM's header on a share): before realtime starts
 	netfs_set_realtime(true); // from here nothing on this thread waits for a share
 	return true;
 }
@@ -727,6 +729,7 @@ void CloseGame()
 		SaveCheats();
 	g.loaded = false;
 	g.rom_path.clear();
+	fe::border::Release();
 	netfs_set_realtime(false);
 	netfs_end_game();
 }
@@ -840,6 +843,7 @@ void ApplySettings()
 	Settings.Mute = !cfg.audio;
 	S9xSetSoundMute(Settings.Mute);
 	ps5video::InvalidateSnes();
+	fe::border::Reselect();
 }
 
 void Osd(const char* fmt, ...)
