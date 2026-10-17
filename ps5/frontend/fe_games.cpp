@@ -377,6 +377,48 @@ void Walk(const std::string& dir, int depth, bool usb, bool net, std::vector<Gam
 	}
 	closedir(d);
 }
+
+// Names one game, in the order the header describes: its file name, its CRC (crc_given, else the cache's or the file's),
+// the file name loosely, then fuzzily; a ROM none of that names keeps its header's title. ScanGames and DescribeGame
+// (a game that is being loaded) both come through here, so the shelf and the border name a game alike.
+void NameGame(CrcCache& cache, GameInfo& g, const uint32_t* crc_given)
+{
+	g.nointro = gamedb::Exact(g.file_base);
+	if (g.nointro.empty())
+	{
+		uint32_t crc = 0;
+		bool known = false;
+		bool have = false;
+		if (crc_given)
+		{
+			crc = *crc_given;
+			have = known = true;
+		}
+		else
+			have = CachedCrc(cache, g.path, &crc, !g.on_network, &known);
+		if (have)
+		{
+			g.crc = crc;
+			g.nointro = gamedb::ByCrc(crc);
+			g.name_by_crc = !g.nointro.empty();
+			if (g.nointro.empty())
+				g.crc_name = gamedb::ByExtraCrc(crc);
+		}
+		g.crc_pending = g.on_network && !known; // NetNaming reads it later
+	}
+	if (g.nointro.empty())
+		g.nointro = gamedb::Loose(g.file_base);
+	if (g.nointro.empty())
+	{
+		g.nointro = gamedb::Fuzzy(g.file_base);
+		if (!g.nointro.empty())
+			OrbisLog("[games] fuzzy: %s -> %s", g.file_base.c_str(), g.nointro.c_str());
+	}
+	if (g.nointro.empty())
+		LoadHeaderHint(cache, g);
+	g.title = g.nointro.empty() ? g.file_base : gamedb::Title(g.nointro);
+	g.region = gamedb::Region(g.nointro);
+}
 } // namespace
 
 namespace gamedb
@@ -662,33 +704,7 @@ std::vector<GameInfo> ScanGames(const ScanProgress& progress)
 	{
 		if (progress)
 			progress(1, identified++, games.size());
-		g.nointro = gamedb::Exact(g.file_base);
-		if (g.nointro.empty())
-		{
-			uint32_t crc = 0;
-			bool known = false;
-			if (CachedCrc(cache, g.path, &crc, !g.on_network, &known))
-			{
-				g.crc = crc;
-				g.nointro = gamedb::ByCrc(crc);
-				g.name_by_crc = !g.nointro.empty();
-				if (g.nointro.empty())
-					g.crc_name = gamedb::ByExtraCrc(crc);
-			}
-			g.crc_pending = g.on_network && !known; // NetNaming reads it later
-		}
-		if (g.nointro.empty())
-			g.nointro = gamedb::Loose(g.file_base);
-		if (g.nointro.empty())
-		{
-			g.nointro = gamedb::Fuzzy(g.file_base);
-			if (!g.nointro.empty())
-				OrbisLog("[games] fuzzy: %s -> %s", g.file_base.c_str(), g.nointro.c_str());
-		}
-		if (g.nointro.empty())
-			LoadHeaderHint(cache, g);
-		g.title = g.nointro.empty() ? g.file_base : gamedb::Title(g.nointro);
-		g.region = gamedb::Region(g.nointro);
+		NameGame(cache, g, nullptr);
 	}
 	cache.Save(true);
 
@@ -706,6 +722,22 @@ std::vector<GameInfo> ScanGames(const ScanProgress& progress)
 		OrbisLog("[games]   ... and %zu more", games.size() - kLogged);
 	return games;
 }
+
+GameInfo DescribeGame(const std::string& path, uint32_t rom_crc)
+{
+	GameInfo g;
+	g.path = path;
+	const size_t slash = path.find_last_of('/');
+	const std::string name = slash == std::string::npos ? path : path.substr(slash + 1);
+	const size_t dot = name.find_last_of('.');
+	g.file_base = dot == std::string::npos || dot == 0 ? name : name.substr(0, dot);
+	g.ext = dot == std::string::npos || dot == 0 ? std::string() : Lower(name.substr(dot));
+	g.on_usb = path.rfind("/mnt/", 0) == 0;
+	g.on_network = netfs_is_network_path(path.c_str());
+	NameGame(SharedCrcCache(), g, rom_crc ? &rom_crc : nullptr);
+	return g;
+}
+
 // How much of a ROM holds every place a header can be: ExHiROM's ($40FFC0), behind a copier header, and its 64 bytes.
 constexpr size_t kHeaderPrefix = 0x410000 + 512 + 64;
 

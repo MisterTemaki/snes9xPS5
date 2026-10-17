@@ -51,6 +51,11 @@ std::string ThumbnailName(const std::string& nointro);
 // Use the closest verified Libretro artwork filename; never guess an unsupported remote file.
 std::string CoverNameFor(const GameInfo& game);
 
+// The entry of `names` (file names without extension, a list that may differ every call: a border pack) that is this
+// game's art, by the same matcher as the cover: the No-Intro name, aliases, the extra CRC name, spelling, words and the
+// ROM header. "" when none fits.
+std::string MatchPackName(const std::vector<std::string>& names, const GameInfo& game);
+
 // The download address of a game's box art (the libretro-thumbnails template, SNES9X_COVER_URL on the host).
 std::string CoverUrlFor(const std::string& nointro);
 // Resolve box, title screen and screenshot names independently from verified Libretro lists.
