@@ -5,6 +5,7 @@
 #include "fe_titlematch.h"
 
 #include "OrbisPaths.h"
+#include "ProsperoThread.h"
 #include "netfs.h"
 
 #include "unzip.h"
@@ -15,10 +16,13 @@
 #include <sys/stat.h>
 
 #include <algorithm>
+#include <atomic>
 #include <cctype>
 #include <cstdio>
 #include <cstring>
+#include <deque>
 #include <mutex>
+#include <set>
 #include <unordered_map>
 
 #define S9X_INCBIN(sym, path)                                                                                  \
@@ -146,15 +150,23 @@ bool HasRomExt(const std::string& ext)
 }
 
 // ---- CRC cache: path \t size \t mtime \t crc ----
+// One per process: the scan and the pass that names network ROMs (NetNaming) share it, each under the lock.
 struct CrcCache
 {
 	std::mutex lock;
 	std::unordered_map<std::string, std::string> lines; // path -> "size\tmtime\tcrc" (or "size\tmtime\tfail")
 	std::unordered_map<std::string, bool> seen; // the paths this scan looked up
 	bool dirty = false;
+	bool loaded = false;
 	std::string file;
-	void Load()
+	// A new scan: reads the file the first time, forgets which paths the last scan saw.
+	void Begin()
 	{
+		std::lock_guard<std::mutex> g(lock);
+		seen.clear();
+		if (loaded)
+			return;
+		loaded = true;
 		file = OrbisDir("covers") + "/crc-cache.txt";
 		FILE* f = fopen(file.c_str(), "r");
 		if (!f)
@@ -172,11 +184,13 @@ struct CrcCache
 		}
 		fclose(f);
 	}
-	void Save()
+	// prune: the scan's end drops the entries of files that are gone; the naming pass (mid-scan, maybe) keeps all.
+	void Save(bool prune)
 	{
+		std::lock_guard<std::mutex> g(lock);
 		// entries of files that are gone are dropped (a USB drive that isn't plugged in, or a share that is not
 		// connected, keeps its own)
-		for (auto it = lines.begin(); it != lines.end();)
+		for (auto it = lines.begin(); prune && it != lines.end();)
 		{
 			if (!seen.count(it->first) && it->first.rfind("/mnt/", 0) != 0 && !netfs_is_network_path(it->first.c_str()))
 			{
@@ -203,25 +217,48 @@ struct CrcCache
 		}
 		dirty = false;
 	}
+	void Put(const std::string& path, const char* key, const char* val)
+	{
+		std::lock_guard<std::mutex> g(lock);
+		lines[path] = std::string(key) + val;
+		dirty = true;
+	}
 };
 
-// read: false for a ROM on a share, where only a CRC already in the cache is used (reading every ROM over the
-// network is what makes a scan slow)
-bool CachedCrc(CrcCache& cache, const std::string& path, uint32_t* crc, bool read)
+CrcCache& SharedCrcCache()
 {
-	cache.seen[path] = true;
+	static CrcCache* c = new CrcCache; // never freed: the naming pass may still run at exit
+	return *c;
+}
+
+// read: false for a ROM on a share, where only a CRC already in the cache is used (reading every ROM over the
+// network is what makes a scan slow). known (if given): the cache holds an answer for this file as it is now,
+// "could not be read" included.
+bool CachedCrc(CrcCache& cache, const std::string& path, uint32_t* crc, bool read, bool* known = nullptr)
+{
+	if (known)
+		*known = false;
+	{
+		std::lock_guard<std::mutex> g(cache.lock);
+		cache.seen[path] = true;
+	}
 	struct stat st = {};
 	if (stat(path.c_str(), &st) != 0)
 		return false;
 	char key[64];
 	snprintf(key, sizeof(key), "%lld\t%lld\t", (long long)st.st_size, (long long)st.st_mtime);
-	auto it = cache.lines.find(path);
-	if (it != cache.lines.end() && it->second.compare(0, strlen(key), key) == 0)
 	{
-		if (it->second.compare(strlen(key), std::string::npos, "fail") == 0)
-			return false; // couldn't be read last time, and hasn't changed since
-		*crc = uint32_t(strtoul(it->second.c_str() + strlen(key), nullptr, 16));
-		return true;
+		std::lock_guard<std::mutex> g(cache.lock);
+		auto it = cache.lines.find(path);
+		if (it != cache.lines.end() && it->second.compare(0, strlen(key), key) == 0)
+		{
+			if (known)
+				*known = true;
+			if (it->second.compare(strlen(key), std::string::npos, "fail") == 0)
+				return false; // couldn't be read last time, and hasn't changed since
+			*crc = uint32_t(strtoul(it->second.c_str() + strlen(key), nullptr, 16));
+			return true;
+		}
 	}
 	if (!read)
 		return false;
@@ -229,14 +266,11 @@ bool CachedCrc(CrcCache& cache, const std::string& path, uint32_t* crc, bool rea
 	if (!RomCrc32(path, crc))
 	{
 		// unreadable (or an empty zip): remembered, so the next scans don't read it again until it changes
-		snprintf(val, sizeof(val), "%sfail", key);
-		cache.lines[path] = val;
-		cache.dirty = true;
+		cache.Put(path, key, "fail");
 		return false;
 	}
-	snprintf(val, sizeof(val), "%s%08X", key, *crc);
-	cache.lines[path] = val;
-	cache.dirty = true;
+	snprintf(val, sizeof(val), "%08X", *crc);
+	cache.Put(path, key, val);
 	return true;
 }
 
@@ -344,8 +378,9 @@ std::string Region(const std::string& nointro)
 }
 } // namespace gamedb
 
-bool RomCrc32(const std::string& path, uint32_t* crc)
+bool RomCrc32(const std::string& path, uint32_t* crc, const std::atomic<bool>* cancel)
 {
+	auto stopped = [cancel] { return cancel && cancel->load(); };
 	const std::string ext = Lower(path.substr(path.find_last_of('.') == std::string::npos ? path.size() : path.find_last_of('.')));
 	if (ext == ".zip")
 	{
@@ -354,7 +389,7 @@ bool RomCrc32(const std::string& path, uint32_t* crc)
 			return false;
 		bool ok = false;
 		uLong best_size = 0;
-		for (int r = unzGoToFirstFile(z); r == UNZ_OK; r = unzGoToNextFile(z))
+		for (int r = unzGoToFirstFile(z); r == UNZ_OK && !stopped(); r = unzGoToNextFile(z))
 		{
 			unz_file_info info;
 			char name[512];
@@ -379,7 +414,7 @@ bool RomCrc32(const std::string& path, uint32_t* crc)
 			std::vector<uint8_t> buf(1 << 16);
 			uLong skip = 512;
 			int n;
-			while ((n = unzReadCurrentFile(z, buf.data(), unsigned(buf.size()))) > 0)
+			while (!stopped() && (n = unzReadCurrentFile(z, buf.data(), unsigned(buf.size()))) > 0)
 			{
 				uLong off = std::min<uLong>(skip, uLong(n));
 				skip -= off;
@@ -390,7 +425,7 @@ bool RomCrc32(const std::string& path, uint32_t* crc)
 			ok = true;
 		}
 		unzClose(z);
-		return ok;
+		return ok && !stopped();
 	}
 	if (ext == ".gz")
 		return false;
@@ -403,11 +438,115 @@ bool RomCrc32(const std::string& path, uint32_t* crc)
 	uLong c = crc32(0L, Z_NULL, 0);
 	std::vector<uint8_t> buf(1 << 16);
 	size_t n;
-	while ((n = fread(buf.data(), 1, buf.size(), f)) > 0)
+	while (!stopped() && (n = fread(buf.data(), 1, buf.size(), f)) > 0)
 		c = crc32(c, buf.data(), uInt(n));
 	fclose(f);
+	if (stopped())
+		return false;
 	*crc = uint32_t(c);
 	return true;
+}
+
+// ---- the naming pass for ROMs on shares ----
+
+struct NetNaming::Impl
+{
+	std::mutex lock;
+	std::deque<std::string> todo;
+	std::set<std::string> tried; // every path ever queued: a ROM is read once per run
+	std::atomic<bool> stop{false};
+	std::atomic<int> resolved{0};
+	std::atomic<bool> busy{false};
+	ps5::BigThread thread;
+
+	void Run()
+	{
+		CrcCache& cache = SharedCrcCache();
+		int named = 0, since_save = 0;
+		for (;;)
+		{
+			std::string path;
+			{
+				std::unique_lock<std::mutex> g(lock);
+				if (stop.load() || todo.empty() || netfs_realtime())
+				{
+					busy = false;
+					break;
+				}
+				path = todo.front();
+				todo.pop_front();
+			}
+			struct stat st = {};
+			if (stat(path.c_str(), &st) != 0)
+				continue; // the share went away; the next scan will list it again
+			char key[64];
+			snprintf(key, sizeof(key), "%lld\t%lld\t", (long long)st.st_size, (long long)st.st_mtime);
+			uint32_t crc = 0;
+			const bool ok = RomCrc32(path, &crc, &stop);
+			if (stop.load())
+				break; // cancelled half way: nothing recorded
+			char val[16];
+			snprintf(val, sizeof(val), "%08X", crc);
+			cache.Put(path, key, ok ? val : "fail");
+			named++;
+			resolved++;
+			if (++since_save >= 20)
+			{
+				cache.Save(false);
+				since_save = 0;
+			}
+		}
+		cache.Save(false);
+		busy = false;
+		OrbisLog("[games] network CRC pass: %d ROM(s) read%s", named, stop.load() ? " (stopped)" : "");
+	}
+};
+
+NetNaming::NetNaming() : m_i(new Impl) {}
+
+NetNaming::~NetNaming()
+{
+	Stop();
+}
+
+void NetNaming::Add(const std::vector<GameInfo>& games)
+{
+	size_t added = 0;
+	{
+		std::lock_guard<std::mutex> g(m_i->lock);
+		for (const GameInfo& game : games)
+			if (game.crc_pending && m_i->tried.insert(game.path).second)
+			{
+				m_i->todo.push_back(game.path);
+				added++;
+			}
+	}
+	if (!added)
+		return;
+	OrbisLog("[games] naming %zu network ROM(s) by CRC in the background", added);
+	if (m_i->busy.load())
+		return; // the running pass takes the new ones too
+	m_i->thread.join();
+	m_i->stop = false;
+	m_i->busy = true;
+	m_i->thread = ps5::BigThread([this] { m_i->Run(); }, 256 * 1024);
+}
+
+void NetNaming::Stop()
+{
+	m_i->stop = true;
+	m_i->thread.join();
+	m_i->busy = false;
+}
+
+int NetNaming::Resolved() const
+{
+	return m_i->resolved.load();
+}
+
+bool NetNaming::Busy() const
+{
+	return m_i->busy.load();
 }
 
 std::vector<std::string> RomRoots()
@@ -424,8 +563,8 @@ std::vector<GameInfo> ScanGames(const ScanProgress& progress)
 	for (const std::string& root : RomRoots())
 		Walk(root, 0, root.rfind("/mnt/", 0) == 0, netfs_is_network_path(root.c_str()), games, progress);
 
-	CrcCache cache;
-	cache.Load();
+	CrcCache& cache = SharedCrcCache();
+	cache.Begin();
 	size_t identified = 0;
 	for (GameInfo& g : games)
 	{
@@ -435,11 +574,13 @@ std::vector<GameInfo> ScanGames(const ScanProgress& progress)
 		if (g.nointro.empty())
 		{
 			uint32_t crc = 0;
-			if (CachedCrc(cache, g.path, &crc, !g.on_network))
+			bool known = false;
+			if (CachedCrc(cache, g.path, &crc, !g.on_network, &known))
 			{
 				g.nointro = gamedb::ByCrc(crc);
 				g.name_by_crc = !g.nointro.empty();
 			}
+			g.crc_pending = g.on_network && !known; // NetNaming reads it later
 		}
 		if (g.nointro.empty())
 			g.nointro = gamedb::Loose(g.file_base);
@@ -452,7 +593,7 @@ std::vector<GameInfo> ScanGames(const ScanProgress& progress)
 		g.title = g.nointro.empty() ? g.file_base : gamedb::Title(g.nointro);
 		g.region = gamedb::Region(g.nointro);
 	}
-	cache.Save();
+	cache.Save(true);
 
 	std::sort(games.begin(), games.end(), [](const GameInfo& a, const GameInfo& b) {
 		const int c = strcasecmp(a.title.c_str(), b.title.c_str());
