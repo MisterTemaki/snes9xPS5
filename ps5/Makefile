@@ -379,6 +379,16 @@ $(NFS_LOOP_TEST): tests/nfs_loopback_test.cpp netfs/backend_nfs.cpp netfs/backen
 	$(HOST_CXX) -std=c++17 $(HOST_OPT) $(HOST_SAN) $(PORT_WARN) $(LIBNFS_FLAGS) -Inetfs -o $@ \
 		tests/nfs_loopback_test.cpp netfs/backend_nfs.cpp $(HOST_LIBNFS_OBJ) -lpthread
 
+# the same backend against a real NFSv3 server (unfs3): not part of `make test`, needs rpcbind and unfsd
+NFS_SERVER_TEST := $(HOST_OUT)/nfs-server-test
+$(NFS_SERVER_TEST): tests/nfs_server_test.cpp netfs/backend_nfs.cpp netfs/backend_nfs.h netfs/netfs_backend.h $(HOST_LIBNFS_OBJ)
+	@mkdir -p $(dir $@)
+	$(HOST_CXX) -std=c++17 $(HOST_OPT) $(HOST_SAN) $(PORT_WARN) $(LIBNFS_FLAGS) -Inetfs -o $@ \
+		tests/nfs_server_test.cpp netfs/backend_nfs.cpp $(HOST_LIBNFS_OBJ) -lpthread
+
+test-nfs-server: $(NFS_SERVER_TEST)
+	bash tests/nfs_server_test.sh $(NFS_SERVER_TEST)
+
 test-nfs: $(NFS_TEST) $(NFS_LOOP_TEST)
 	ASAN_OPTIONS=detect_leaks=1 $(NFS_TEST)
 	ASAN_OPTIONS=detect_leaks=1 $(NFS_LOOP_TEST)
@@ -388,5 +398,5 @@ test: test-nfs
 clean:
 	rm -rf build
 
-.PHONY: ps5 host test test-nfs send strip app dist clean
+.PHONY: ps5 host test test-nfs test-nfs-server send strip app dist clean
 .SECONDARY:

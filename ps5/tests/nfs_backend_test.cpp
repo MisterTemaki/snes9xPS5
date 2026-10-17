@@ -399,18 +399,62 @@ TEST(pread_at_or_past_the_end_returns_zero_and_a_tail_is_short)
 	b->Close(h);
 }
 
-TEST(pread_never_asks_libnfs_for_more_than_one_mib)
+static std::string Pattern(size_t n)
+{
+	std::string s(n, '\0');
+	for (size_t i = 0; i < n; i++)
+		s[i] = static_cast<char>(i % 251);
+	return s;
+}
+
+TEST(pread_splits_a_big_read_into_small_pipelined_requests)
 {
 	Fixture();
-	mocknfs::AddFile("/export/snes/Big.bin", std::string(3u << 20, 'x'));
+	const std::string data = Pattern(3u << 20);
+	mocknfs::AddFile("/export/snes/Big.bin", data);
 	ShareConfig cfg = Cfg();
 	auto b = MakeNfsBackend();
 	b->Connect(cfg);
 	Handle h = nullptr;
 	b->Open("Big.bin", h);
 	std::vector<char> buf(2u << 20);
+	CHECK(b->Pread(h, buf.data(), buf.size(), 5) == (1 << 20)); // the contract's 1 MiB limit
+	CHECK(std::memcmp(buf.data(), data.data() + 5, 1 << 20) == 0);
+	CHECK(S().max_read_len == (128 << 10)); // no READ above 128 KiB: libnfs cannot join a fragmented reply
+	CHECK(S().max_in_flight == 8);          // all eight queued before the first is serviced
+	b->Close(h);
+}
+
+TEST(pread_uses_the_servers_smaller_limit)
+{
+	Fixture();
+	S().rtmax = 32 << 10;
+	mocknfs::AddFile("/export/snes/Big.bin", Pattern(2u << 20));
+	ShareConfig cfg = Cfg();
+	auto b = MakeNfsBackend();
+	b->Connect(cfg);
+	Handle h = nullptr;
+	b->Open("Big.bin", h);
+	std::vector<char> buf(1u << 20);
 	CHECK(b->Pread(h, buf.data(), buf.size(), 0) == (1 << 20));
-	CHECK(S().last_read_len == (1 << 20));
+	CHECK(S().max_read_len == (32 << 10));
+	b->Close(h);
+}
+
+TEST(pread_near_the_end_of_a_big_file_returns_just_the_tail)
+{
+	Fixture();
+	const std::string data = Pattern(3u << 20);
+	mocknfs::AddFile("/export/snes/Big.bin", data);
+	ShareConfig cfg = Cfg();
+	auto b = MakeNfsBackend();
+	b->Connect(cfg);
+	Handle h = nullptr;
+	b->Open("Big.bin", h);
+	std::vector<char> buf(1u << 20);
+	CHECK(b->Pread(h, buf.data(), buf.size(), data.size() - 10) == 10);
+	CHECK(std::memcmp(buf.data(), data.data() + data.size() - 10, 10) == 0);
+	CHECK(b->Pread(h, buf.data(), buf.size(), data.size()) == 0);
 	b->Close(h);
 }
 

@@ -37,6 +37,11 @@ constexpr int kCallTimeoutMs = 4500;    // one metadata call or read; the watchd
 constexpr int kConnectTimeoutMs = 4500; // the whole Connect(), every mount attempt together
 constexpr int kExportsTimeoutMs = 2000; // asking the server which exports it has (blocking, error path only)
 constexpr size_t kMaxRead = 1u << 20;   // the Backend contract's limit for one Pread
+// One READ request is at most this long, and a Pread keeps up to kMaxRead / kReadChunk of them in flight.
+// libnfs 6.0.2 sends a single request per call (it clamps to the negotiated size) and cannot reassemble an
+// RPC reply the server split into fragments, which servers on libtirpc (unfs3) do above 256 KiB: a smaller
+// request keeps those servers working and the pipelining keeps the wire busy.
+constexpr size_t kReadChunk = 128u << 10;
 constexpr int kMaxMountTries = 8;       // export, then one folder higher each time
 
 NfsTestHooks g_hooks;
@@ -153,6 +158,7 @@ public:
 private:
 	bool NewContext();
 	int Wait(std::unique_ptr<Call>& c, int64_t deadline);
+	int WaitAll(std::vector<std::unique_ptr<Call>>& calls, int64_t deadline);
 	std::string Full(const std::string& rel) const;
 	std::string LastError() const;
 	const std::vector<std::string>& Exports();
@@ -211,6 +217,7 @@ bool NfsBackend::NewContext()
 	nfs_set_version(m_ctx, m_cfg->nfs_version == 4 ? 4 : 3);
 	nfs_set_autoreconnect(m_ctx, 0); // a lost connection is final: netfs builds a new backend
 	nfs_set_dircache(m_ctx, 0);      // netfs has its own listing cache
+	nfs_set_readmax(m_ctx, kReadChunk);
 	const int nfsport = m_cfg->nfsport > 0 ? m_cfg->nfsport : m_cfg->port;
 	if (nfsport > 0)
 		nfs_set_nfsport(m_ctx, nfsport);
@@ -223,12 +230,29 @@ bool NfsBackend::NewContext()
 	return true;
 }
 
-// Services the connection until `c` has finished. Returns 0 then. Otherwise an errno (ECANCELED: Abort();
-// ETIMEDOUT: deadline; EIO: the socket failed), the call is parked in m_orphans and the connection is dead.
+// Services the connection until every call has finished. Returns 0 then. Otherwise an errno (ECANCELED:
+// Abort(); ETIMEDOUT: deadline; EIO: the socket failed), the calls are parked in m_orphans and the
+// connection is dead.
 int NfsBackend::Wait(std::unique_ptr<Call>& c, int64_t deadline)
 {
+	std::vector<std::unique_ptr<Call>> one;
+	one.push_back(std::move(c));
+	const int err = WaitAll(one, deadline);
+	if (!err)
+		c = std::move(one[0]);
+	return err;
+}
+
+int NfsBackend::WaitAll(std::vector<std::unique_ptr<Call>>& calls, int64_t deadline)
+{
 	int err = 0;
-	while (!c->done)
+	const auto pending = [&calls] {
+		for (const auto& c : calls)
+			if (!c->done)
+				return true;
+		return false;
+	};
+	while (pending())
 	{
 		if (m_aborted.load(std::memory_order_acquire))
 		{
@@ -269,7 +293,9 @@ int NfsBackend::Wait(std::unique_ptr<Call>& c, int64_t deadline)
 	if (err)
 	{
 		m_dead.store(true, std::memory_order_release);
-		m_orphans.push_back(std::move(c));
+		for (auto& c : calls)
+			m_orphans.push_back(std::move(c));
+		calls.clear();
 	}
 	return err;
 }
@@ -513,12 +539,40 @@ int64_t NfsBackend::Pread(Handle h, void* buf, size_t len, uint64_t offset)
 	if (len == 0)
 		return 0;
 	len = std::min(len, kMaxRead);
-	auto c = NewCall();
-	if (nfs_pread_async(m_ctx, static_cast<nfsfh*>(h), buf, len, offset, OnDone, c.get()) != 0)
+	const size_t chunk = std::max<size_t>(1, std::min(kReadChunk, nfs_get_readmax(m_ctx)));
+
+	std::vector<std::unique_ptr<Call>> calls;
+	std::vector<size_t> lens;
+	for (size_t done = 0; done < len; done += chunk)
+	{
+		const size_t n = std::min(chunk, len - done);
+		calls.push_back(NewCall());
+		lens.push_back(n);
+		if (nfs_pread_async(m_ctx, static_cast<nfsfh*>(h), static_cast<char*>(buf) + done, n, offset + done, OnDone,
+		                    calls.back().get()) != 0)
+		{
+			// The ones already queued are still in flight: wait for them before giving up.
+			calls.pop_back();
+			lens.pop_back();
+			break;
+		}
+	}
+	if (calls.empty())
 		return -EIO;
-	if (Wait(c, NowMs() + kCallTimeoutMs))
+	if (WaitAll(calls, NowMs() + kCallTimeoutMs))
 		return -EIO;
-	return c->status; // byte count, or -errno
+
+	// The bytes from the start that arrived whole; a short or failed chunk ends them (netfs asks again).
+	int64_t total = 0;
+	for (size_t i = 0; i < calls.size(); i++)
+	{
+		if (calls[i]->status < 0)
+			return total > 0 ? total : calls[i]->status;
+		total += calls[i]->status;
+		if (static_cast<size_t>(calls[i]->status) < lens[i])
+			break;
+	}
+	return total;
 }
 
 void NfsBackend::Close(Handle h)

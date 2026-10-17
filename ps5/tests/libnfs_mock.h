@@ -32,6 +32,7 @@ struct Server
 	bool hang = false;                 // no call ever completes
 	bool exports_denied = false;       // MOUNT of an existing path fails with EACCES
 	int short_read = 0;                // > 0: a read returns at most this many bytes
+	size_t rtmax = 1u << 20;           // the server's largest READ (FSINFO)
 	int fail_service_at = -1;          // the n-th nfs_service call reports a dead socket (-1)
 
 	// Observations
@@ -42,6 +43,9 @@ struct Server
 	int services = 0;          // nfs_service calls
 	int calls_after_death = 0; // libnfs calls made after a service failure (the backend must make none)
 	int last_read_len = 0;
+	int max_read_len = 0;   // the largest single READ asked for
+	int in_flight = 0;      // READs queued and not yet completed
+	int max_in_flight = 0;
 	std::function<void()> on_service; // runs at the start of every nfs_service
 };
 

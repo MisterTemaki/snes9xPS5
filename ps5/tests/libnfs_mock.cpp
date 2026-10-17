@@ -6,6 +6,7 @@
 #include <poll.h>
 #include <sys/stat.h>
 
+#include <algorithm>
 #include <cerrno>
 #include <cstdlib>
 #include <cstring>
@@ -23,6 +24,7 @@ struct nfs_context
 	std::string rpc_error;
 	std::string root;
 	int version = 3;
+	size_t readmax = 1u << 20;
 	bool dead = false;
 	std::deque<std::function<void(bool cancel)>> queue; // completions, run one per nfs_service
 	std::set<nfsfh*> open;                              // libnfs leaves these to the caller; the mock tidies up
@@ -149,6 +151,9 @@ void nfs_destroy_context(nfs_context* c)
 	delete c;
 }
 
+void nfs_set_readmax(nfs_context* c, size_t n) { c->readmax = n; }
+size_t nfs_get_readmax(nfs_context* c) { return c->readmax; }
+
 int nfs_set_version(nfs_context* c, int v)
 {
 	c->version = v;
@@ -213,7 +218,10 @@ int nfs_mount_async(nfs_context* c, const char* server, const char* exp, nfs_cb 
 			status = -EACCES;
 		}
 		else
+		{
 			c->root = path;
+			c->readmax = std::min(c->readmax, S().rtmax); // the server's FSINFO
+		}
 	}
 	Complete(c, cb, priv, status);
 	return 0;
@@ -325,8 +333,13 @@ int nfs_open_async(nfs_context* c, const char* path, int, nfs_cb cb, void* priv)
 int nfs_pread_async(nfs_context* c, nfsfh* fh, void* buf, size_t count, uint64_t offset, nfs_cb cb, void* priv)
 {
 	Touch(c);
+	count = std::min(count, c->readmax); // like libnfs: one request, never more than the negotiated size
 	S().last_read_len = static_cast<int>(count);
+	S().max_read_len = std::max(S().max_read_len, static_cast<int>(count));
+	S().in_flight++;
+	S().max_in_flight = std::max(S().max_in_flight, S().in_flight);
 	Enqueue(c, [=](bool cancel) {
+		S().in_flight--;
 		if (cancel)
 		{
 			cb(-ECANCELED, c, nullptr, priv);
