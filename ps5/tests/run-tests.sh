@@ -506,10 +506,10 @@ expect "$CHECK $T/dump/flip00090.ppm 960 540 255 0 0 >/dev/null" "the game runs"
 expect "[ \"\$(cat $T/root/logs/boot.log)\" = 'OLD RUN' ] && [ ! -e $T/root/logs/boot.prev.log ]" "the earlier boot.log is kept as it was, nothing new written"
 expect "! grep -q '^\[snes9x-ps5' $T/out.txt" "nothing on stdout either"
 expect "! grep -q 'runtime error\|AddressSanitizer' $T/out.txt" "no sanitizer reports"
-# Settings (Triangle) -> Debug logs (Up six times from Shader: Back, Repair missing covers, Controller shortcuts, Network shares, Updates, Debug logs) -> Off
+# Settings (Triangle) -> Debug logs (Up seven times from Shader: Back, Download all borders, Repair missing covers, Controller shortcuts, Network shares, Updates, Debug logs) -> Off
 T=$(newroot t18b)
 python3 tests/make_test_rom.py "$T/root/roms/test.sfc" ntsc >/dev/null
-rc=$(run "$T" "0:0;30:$TRIANGLE;32:0;50:$UP;52:0;60:$UP;62:0;70:$UP;72:0;80:$UP;82:0;90:$UP;92:0;100:$UP;102:0;110:$CROSS;112:0;130:$CIRCLE;132:0;$(SHELFQUIT_AT 160)" "")
+rc=$(run "$T" "0:0;30:$TRIANGLE;32:0;50:$UP;52:0;60:$UP;62:0;70:$UP;72:0;80:$UP;82:0;90:$UP;92:0;100:$UP;102:0;110:$UP;112:0;120:$CROSS;122:0;140:$CIRCLE;142:0;$(SHELFQUIT_AT 170)" "")
 expect "[ $rc = 0 ]" "exit code 0 (got $rc)"
 expect "grep -q '^debug_logs=0' $T/root/snes9x-ps5.ini" "Debug logs Off saved"
 expect "tail -1 $T/root/logs/boot.log | grep -q 'debug logs turned off'" "the last line of boot.log says the logs were turned off"
@@ -517,7 +517,7 @@ expect "tail -1 $T/root/logs/boot.log | grep -q 'debug logs turned off'" "the la
 T=$(newroot t18c)
 python3 tests/make_test_rom.py "$T/root/roms/test.sfc" ntsc >/dev/null
 echo "debug_logs=0" >>"$T/root/snes9x-ps5.ini"
-rc=$(run "$T" "0:0;30:$TRIANGLE;32:0;50:$UP;52:0;60:$UP;62:0;70:$UP;72:0;80:$UP;82:0;90:$UP;92:0;100:$UP;102:0;110:$CROSS;112:0;130:$CIRCLE;132:0;$(SHELFQUIT_AT 160)" "")
+rc=$(run "$T" "0:0;30:$TRIANGLE;32:0;50:$UP;52:0;60:$UP;62:0;70:$UP;72:0;80:$UP;82:0;90:$UP;92:0;100:$UP;102:0;110:$UP;112:0;120:$CROSS;122:0;140:$CIRCLE;142:0;$(SHELFQUIT_AT 170)" "")
 expect "grep -q '^debug_logs=1' $T/root/snes9x-ps5.ini" "Debug logs On saved"
 expect "head -1 $T/root/logs/boot.log | grep -q 'debug logs turned on'" "boot.log starts at the switch (nothing from before it)"
 expect "! grep -q 'runtime error\|AddressSanitizer' $T/out.txt" "no sanitizer reports"
@@ -909,7 +909,7 @@ expect "waitfor22 $T/inst2.txt 'a newer version is installed'" "an older payload
 expect "grep -q 'eboot v9.9' $T/homebrew/PPSA99922/eboot.bin && grep -q 'new art' $T/appmeta/PPSA99922/icon0.png" "and leaves the update (and its art) as they are"
 expect "$UPD check 9.9 --until uptodate,available,failed | grep -q '^uptodate|9.9|'" "the app says which version it is: an older helper finds it up to date"
 stop22
-# the app: at start the daily check (the helper finds 9.9); Settings (Triangle), Up five times to "Updates" (Back, Repair missing covers, Controller shortcuts, Network shares) (it shows
+# the app: at start the daily check (the helper finds 9.9); Settings (Triangle), Up six times to "Updates" (Back, Download all borders, Repair missing covers, Controller shortcuts, Network shares) (it shows
 # "Install 9.9"), Cross: the helper installs it
 T2=$(newroot t22b)
 (cd "$SRV" && exec python3 -m http.server $SPORT --bind 127.0.0.1 >/dev/null 2>&1) &
@@ -917,7 +917,7 @@ SNES9X_UPDATE_API=http://127.0.0.1:$SPORT/latest.json SNES9X_PS5_ROOT=$T2/root S
 	ASAN_OPTIONS=detect_leaks=0 timeout 120 "$INSTALLER" >"$T2/inst.txt" 2>&1 &
 waitfor22 $T2/root/logs/installer.log 'listening on 127.0.0.1'
 python3 tests/make_test_rom.py "$T2/root/roms/test.sfc" ntsc >/dev/null
-rc=$(SNES9X_HOST_REALTIME=1 SNES9X_PS5_APPMETA=$T2/appmeta run "$T2" "0:0;30:$TRIANGLE;32:0;40:$UP;42:0;46:$UP;48:0;52:$UP;54:0;58:$UP;60:0;64:$UP;66:0;72:$CROSS;74:0;150:$CIRCLE;152:0;170:$OPTIONS;172:0;180:$CROSS;182:0" "70,140")
+rc=$(SNES9X_HOST_REALTIME=1 SNES9X_PS5_APPMETA=$T2/appmeta run "$T2" "0:0;30:$TRIANGLE;32:0;40:$UP;42:0;46:$UP;48:0;52:$UP;54:0;58:$UP;60:0;64:$UP;66:0;70:$UP;72:0;78:$CROSS;80:0;150:$CIRCLE;152:0;170:$OPTIONS;172:0;180:$CROSS;182:0" "70,140")
 expect "grep -q 'daily check asked of the helper' $T2/root/logs/boot.log && [ -f $T2/root/update-check.txt ]" "at start: the daily check asked of the helper"
 expect "grep -q 'update install' $T2/root/logs/installer.log && grep -q 'eboot v9.9' $T2/homebrew/PPSA99922/eboot.bin" "Cross on \"Install 9.9\": the helper installs it"
 expect "grep -q 'is available: Settings, Updates' $T2/inst.txt $T2/root/logs/installer.log" "the daily check found 9.9: a notification says so"
@@ -1017,8 +1017,8 @@ expect "$CHECK $T/dump/flip00400.ppm 960 420 0 255 0 >/dev/null" "the shelf show
 expect "! grep -q 'runtime error\|AddressSanitizer' $T/out.txt" "no sanitizer reports"
 
 echo "== 31. the Network shares screen: add, change, test and remove a share with the on-screen keyboard (Settings, Network shares)"
-# tests/osk_pad.py turns the steps into a pad script (the keyboard's layout is its model). Settings is Triangle on the shelf; Up four times from
-# Shader reaches Network shares (Back, Repair missing covers, Controller shortcuts, Network shares). Every run ends: Circle twice, OPTIONS, Cross.
+# tests/osk_pad.py turns the steps into a pad script (the keyboard's layout is its model). Settings is Triangle on the shelf; Up five times from
+# Shader reaches Network shares (Back, Download all borders, Repair missing covers, Controller shortcuts, Network shares). Every run ends: Circle twice, OPTIONS, Cross.
 net_pad() { python3 tests/osk_pad.py 2>/dev/null; }
 net_quit='press CIRCLE 2
 press OPTIONS
@@ -1030,7 +1030,7 @@ mkdir -p "$T/share"
 PAD=$(net_pad <<STEPS
 frame 40
 press TRIANGLE
-press UP 4
+press UP 5
 press CROSS
 press CROSS
 field 10.0.0.5
@@ -1063,7 +1063,7 @@ printf '# my shares\nsmb://old/x   # my note\nnfs://nas/export/snes\n' >"$T/root
 PAD=$(net_pad <<STEPS
 frame 40
 press TRIANGLE
-press UP 4
+press UP 5
 press CROSS
 press CROSS
 press DOWN 3
@@ -1096,7 +1096,7 @@ T=$(newroot t31c)
 PAD=$(net_pad <<STEPS
 frame 40
 press TRIANGLE
-press UP 4
+press UP 5
 press CROSS
 press CROSS
 press DOWN 10
