@@ -15,8 +15,10 @@
 
 #include "fe_romheader.h"
 
+#include <atomic>
 #include <cstdint>
 #include <functional>
+#include <memory>
 #include <string>
 #include <vector>
 
@@ -31,7 +33,9 @@ struct GameInfo
 	std::string title; // what the shelf shows
 	std::string region; // "USA", "Europe"... from the name's tags
 	bool on_usb = false;
+	bool on_network = false; // on a share (/smb/..., /nfs/...): named without reading the ROM (netfs)
 	bool name_by_crc = false; // the name came from the CRC (not the file name)
+	bool crc_pending = false; // on a share, named from its file name only so far: NetNaming reads its CRC
 	std::string crc_name; // the name the ROM's CRC has in the extra table (a translation, a hack), "" if none
 	std::string header_title; // the ROM header's title, only for a ROM no name or CRC identified; "" otherwise
 	bool header_japan = false; // that header's country byte says Japan
@@ -61,11 +65,33 @@ std::string Title(const std::string& nointro);
 std::string Region(const std::string& nointro);
 } // namespace gamedb
 
+// The folders to look for ROMs in: OrbisRomRoots() plus the network shares that are connected (in memory, no I/O).
+std::vector<std::string> RomRoots();
+
 // The internal header of a ROM file (a .zip or .gz is read through); false if there is none to find.
 bool ReadRomHeader(const std::string& path, romheader::Info* info);
 
 // The headerless CRC32 of a ROM file (or the CRC a .zip stores for its ROM); false if it can't be read.
-bool RomCrc32(const std::string& path, uint32_t* crc);
+bool RomCrc32(const std::string& path, uint32_t* crc, const std::atomic<bool>* cancel = nullptr);
+
+// Names the games on shares by their ROM's CRC, in the background. A scan does not read network ROMs (it would
+// make a big library crawl); this does, one at a time, only for the games with crc_pending, and remembers each
+// CRC in crc-cache.txt, so the next ScanGames names them. Add() starts or extends the pass; it stops by itself
+// when a game starts (netfs_realtime) and when Stop() or the destructor is called (leaving the shelf).
+class NetNaming
+{
+public:
+	NetNaming();
+	~NetNaming();
+	void Add(const std::vector<GameInfo>& games);
+	void Stop();
+	int Resolved() const; // ROMs read so far (named or not)
+	bool Busy() const;
+
+private:
+	struct Impl;
+	std::unique_ptr<Impl> m_i;
+};
 
 // Every ROM under the ROM folders (sub-folders included, 4 levels), sorted by title. Names that need a
 // CRC are resolved here too, with a cache (/data/snes9x/covers/crc-cache.txt) so each ROM is read once.

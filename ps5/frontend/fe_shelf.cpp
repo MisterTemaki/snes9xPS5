@@ -12,11 +12,13 @@
 
 #include "OrbisPaths.h"
 #include "ProsperoInput.h"
+#include "ProsperoNotify.h"
 #include "ProsperoSce.h"
 #include "ProsperoCrash.h"
 #include "ProsperoThread.h"
 #include "ProsperoVideo.h"
 
+#include "netfs.h"
 #include "snes9x.h"
 
 #include <immintrin.h>
@@ -627,6 +629,7 @@ std::string Shelf()
 	// a big library takes a while the first time (each new ROM is read once for its CRC): say how far it is,
 	// redrawn at most ten times a second
 	double drawn = Now();
+	std::vector<std::string> net_seen = netfs_mount_points(); // taken first: a share that connects during the scan is seen below
 	std::vector<GameInfo> games = ScanGames([&drawn](int stage, size_t done, size_t total) {
 		const double now = Now();
 		if (now - drawn < 0.1)
@@ -657,7 +660,11 @@ std::string Shelf()
 		st.covers.Start(st.games, cfg.covers_download && ShelfDownloads(), cfg.covers_download && BackgroundCovers());
 		st.started = true;
 	}
-	const int n = int(st.games.size());
+	int n = int(st.games.size());
+	NetNaming naming; // names the games on shares by CRC while the shelf is up; stops with it
+	naming.Add(st.games);
+	int naming_seen = 0;
+	double naming_refreshed = Now();
 
 	int sel = 0;
 	for (int i = 0; i < n; i++)
@@ -679,6 +686,7 @@ std::string Shelf()
 	uint32_t prev = ps5input::Pad(0).buttons;
 	double last = Now();
 	bool dirty = true;
+	double next_net = Now() + 0.5;
 	int last_status = -1;
 	int bulk_covers = 0;
 	double bulk_covers_until = 0;
@@ -689,6 +697,44 @@ std::string Shelf()
 		const double now = Now();
 		const float dt = float(std::min(0.05, now - last));
 		last = now;
+
+		// -- shares: one that connected (or dropped out) after the scan changes what is on the shelf
+		if (now >= next_net)
+		{
+			next_net = now + 0.5;
+			for (const std::string& ev : netfs_take_events())
+			{
+				OrbisLog("[net] %s", ev.c_str());
+				ProsperoNotify("Snes9x: %s", ev.c_str());
+			}
+			std::vector<std::string> mounts = netfs_mount_points();
+			// names from the CRC pass count when it is done, or a minute after the last look
+			const int resolved = naming.Resolved();
+			const bool named = resolved != naming_seen && (!naming.Busy() || now - naming_refreshed >= 60.0);
+			if (mounts != net_seen || named)
+			{
+				net_seen = mounts;
+				naming_seen = resolved;
+				naming_refreshed = now;
+				const std::string keep = n > 0 ? st.games[size_t(sel)].path : std::string();
+				std::vector<GameInfo> fresh = ScanGames();
+				if (!ShelfDownloads()) // the console: covers of games that came late are fetched by the prefetch of a restart
+					CoversRestartIfNeeded(fresh, cfg.covers_download, false, Loading);
+				st.games = std::move(fresh);
+				st.slots.assign(st.games.size(), nullptr);
+				st.covers.Start(st.games, cfg.covers_download && ShelfDownloads(), cfg.covers_download && BackgroundCovers());
+				naming.Add(st.games);
+				n = int(st.games.size());
+				sel = std::min(sel, std::max(0, n - 1));
+				for (int i = 0; i < n; i++)
+					if (st.games[size_t(i)].path == keep)
+						sel = i;
+				pos = float(sel);
+				st.covers.SetFocus(sel);
+				sel_since = now;
+				dirty = true;
+			}
+		}
 
 		// -- input
 		ps5input::Poll();
@@ -883,6 +929,8 @@ std::string Shelf()
 			sub += ext;
 			if (g.on_usb)
 				sub += "   USB";
+			if (g.on_network)
+				sub += "   NET";
 			if (sel_tex && !sel_tex->real)
 				sub += "   no cover";
 			CenterText(880, sub, 3, Rgb(175, 170, 205));

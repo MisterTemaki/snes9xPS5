@@ -438,6 +438,33 @@ Good to know:
 - The host tests play an MSU-1 track from a test ROM through to the console's sound output (files beside the ROM
   and a `.msu1` pack); it has not yet been tried with a real MSU-1 hack on a console.
 
+## Network shares (SMB and NFS)
+
+Games can be read from a Windows, Samba, NAS or router share instead of a drive. The first run writes
+`/data/snes9x/shares.txt` with examples; put one address per line (up to 8):
+
+```
+smb://192.168.1.50/games/snes
+smb://jason@192.168.1.50/games/snes?password=secret
+nfs://192.168.1.50/export/snes
+```
+
+Use the server's IP address. Inside a user name, password or folder, write `& = % # @ ; / ? ` and spaces as `%XX`
+(`p@ss` is `p%40ss`). The password sits in this file in plain text.
+
+- The shelf shows the share's games (badge `NET`) as soon as it has connected; the others do not wait for it.
+  Network games are first named from their file names; a background pass then reads each ROM once to name it
+  by checksum (the answer is remembered), and a cover for a game that shows up late is fetched when it does.
+- A share is read-only. Saves, states, cheats, covers and settings stay on the console.
+- A game is read into memory when it starts. MSU-1 music is fetched before the first frame, and a slow or lost
+  connection never stalls the picture or the sound: a track that has not arrived is silent, and the game goes on.
+  This covers loose files beside the ROM (`<rom>.msu`, `<rom>-1.pcm`...). An MSU-1 pack (`<rom>.msu1`, a zip) is not
+  fetched ahead and can make the game wait for the network; unpack its tracks beside the ROM.
+- If a share cannot be reached, a notification says why (no answer, wrong password, share not found...) and the
+  same sentence is in `/data/snes9x/logs/boot.log` (`[net]`).
+- The SMB and NFS libraries arrive in separate changes. Until a release has one, its shares report that the
+  protocol is not built in.
+
 ## Picture and sound
 
 - 1920x1080 output through `libSceVideoOut`, flipping on vsync. With little video memory it falls back to

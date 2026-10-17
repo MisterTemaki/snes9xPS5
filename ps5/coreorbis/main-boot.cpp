@@ -30,6 +30,7 @@
 #include "fe_prefetch.h"
 #include "fe_shelf.h"
 #include "fe_settings.h"
+#include "netfs.h"
 
 #include <cstdio>
 #include <cstring>
@@ -58,16 +59,26 @@ bool PlayGame(const std::string& rom)
 {
 	if (!emu::LoadGame(rom))
 	{
-		ProsperoNotify("Snes9x: could not open %s", rom.c_str());
-		fe::MessageBox("Could not open the game", rom);
+		// a ROM on a share says why (no answer, wrong password...); netfs's sentences carry no password
+		const std::string why = netfs_is_network_path(rom.c_str()) ? netfs_last_error() : std::string();
+		ProsperoNotify("Snes9x: could not open %s%s%s", rom.c_str(), why.empty() ? "" : " - ", why.c_str());
+		fe::MessageBox("Could not open the game", why.empty() ? rom : rom + "\n\n" + why);
 		return true;
 	}
 	emu::Osd("%s", emu::GameName().c_str());
+	unsigned frames = 0;
 	for (;;)
 	{
 		switch (emu::RunFrame())
 		{
 			case emu::FrameResult::Continue:
+				// a share that was lost mid-game: the notice comes once; the game goes on from what it has in memory
+				if (++frames % 60 == 0)
+					for (const std::string& ev : netfs_take_events())
+					{
+						OrbisLog("[net] %s", ev.c_str());
+						ProsperoNotify("Snes9x: %s", ev.c_str());
+					}
 				break;
 			case emu::FrameResult::Quit:
 				emu::CloseGame();
@@ -182,6 +193,22 @@ int Run(int argc, char** argv)
 	}
 	fe::Config().Load();
 
+	if (have_data)
+	{
+		// network shares (shares.txt): connecting happens in the background, the shelf picks the games up when it is done
+		netfs_set_log([](const std::string& l) { OrbisLog("[net] %s", l.c_str()); });
+		const int shares = netfs_load(OrbisRoot() + "/shares.txt");
+		OrbisLog("[net] %d share(s) in shares.txt", shares);
+		int shown = 0;
+		for (const std::string& n : netfs_notices())
+		{
+			OrbisLog("[net] shares.txt: %s", n.c_str());
+			if (shown++ < 3)
+				ProsperoNotify("Snes9x: shares.txt: %s", n.c_str());
+		}
+		netfs_start();
+	}
+
 	S9X_STAGE(Boot, "video");
 	if (!ps5video::Init())
 	{
@@ -234,6 +261,7 @@ int Run(int argc, char** argv)
 	fe::ShelfShutdown();
 	fe::Config().Save();
 	emu::DeinitCore();
+	netfs_stop();
 	ps5input::Shutdown();
 	ps5audio::Shutdown();
 	ps5video::Shutdown();
