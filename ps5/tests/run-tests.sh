@@ -1253,6 +1253,80 @@ rc=$(bordercase "Super Robot Wars EX (English).sfc")
 expect "grep -q '\[border\] Super Robot Wars EX (English) -> default.png (default.png)' $T/root/logs/boot.log" "Default frame: the game's own border is not looked for"
 expect "! grep -q 'runtime error\|AddressSanitizer' $T/out.txt" "no sanitizer reports"
 
+echo "== 35. borders: Off changes nothing; Auto draws the game's border around the picture (the pause menu darkens both); Default frame is built in; the Border row"
+# A border is a 1920x1080 PNG with a clear window (261,21 1398x1038, the picture fills it). The test one is blue with a clear window; the
+# test ROM's picture is red. The pause menu darkens the whole surface twice (a quarter of each colour: red 255 -> 63).
+LEFT=80
+mkborder() { # file: a blue border with a clear window, named for the game it is for
+	mkdir -p "$(dirname "$1")"
+	python3 -c "
+import sys
+from PIL import Image
+im = Image.new('RGBA', (1920, 1080), (0, 0, 255, 255))
+im.paste((0, 0, 0, 0), (261, 21, 1659, 1059))
+im.save(sys.argv[1])" "$1"
+}
+border_around() { # dump: blue outside the window, the picture inside it, all the way to its edges
+	local f=$1
+	$CHECK "$f" 100 540 0 0 255 >/dev/null && $CHECK "$f" 250 540 0 0 255 >/dev/null && $CHECK "$f" 270 540 255 0 0 >/dev/null \
+		&& $CHECK "$f" 1650 540 255 0 0 >/dev/null && $CHECK "$f" 1665 540 0 0 255 >/dev/null \
+		&& $CHECK "$f" 960 15 0 0 255 >/dev/null && $CHECK "$f" 960 25 255 0 0 >/dev/null \
+		&& $CHECK "$f" 960 1050 255 0 0 >/dev/null && $CHECK "$f" 960 1065 0 0 255 >/dev/null
+}
+# a. Border Off (the default): a border in the pack is not drawn; the picture is the 4:3 one of group 1
+T=$(newroot t35a)
+python3 tests/make_test_rom.py "$T/root/roms/test.sfc" ntsc >/dev/null
+mkborder "$T/root/borders/games/test.png"
+rc=$(run "$T" "0:0;$(QUITAT 120)" "90" "$T/root/roms/test.sfc")
+expect "[ $rc = 0 ]" "exit code 0 (got $rc)"
+expect "$CHECK $T/dump/flip00090.ppm 100 540 0 0 0 >/dev/null && $CHECK $T/dump/flip00090.ppm 245 540 255 0 0 >/dev/null" "Border Off: black bars, the 4:3 picture from x=240, whatever is in borders/"
+expect "! grep -q 'border' $T/root/logs/boot.log" "Border Off: nothing about borders in boot.log"
+# b. Auto: the game's own file (test.png for test.sfc); the pause menu darkens it with the picture; Resume restores it
+T=$(newroot t35b)
+python3 tests/make_test_rom.py "$T/root/roms/test.sfc" ntsc >/dev/null
+mkborder "$T/root/borders/games/test.png"
+echo "border=1" >>"$T/root/snes9x-ps5.ini"
+rc=$(run "$T" "0:0;60:$L3R3;65:0;100:$CIRCLE;102:0;$(QUITAT 160)" "50,90,130" "$T/root/roms/test.sfc")
+expect "[ $rc = 0 ]" "exit code 0 (got $rc)"
+expect "border_around $T/dump/flip00050.ppm" "Border Auto: the game's border outside the window, the picture inside it, edge to edge"
+expect "$CHECK $T/dump/flip00090.ppm 100 100 0 0 63 >/dev/null && $CHECK $T/dump/flip00090.ppm 300 100 63 0 0 >/dev/null" "the pause menu darkens the border and the picture together"
+expect "border_around $T/dump/flip00130.ppm" "Resume: the border and the picture are back, undarkened"
+expect "! grep -q 'runtime error\|AddressSanitizer' $T/out.txt" "no sanitizer reports"
+# c. Default frame: the built-in one, even with a border of the game's own in the pack; Auto with nothing in the pack falls back to it
+def_frame=$(python3 -c "
+from PIL import Image
+r, g, b, a = Image.open('frontend/assets/borders/default.png').convert('RGBA').getpixel((30, 540))
+print(r * a // 255, g * a // 255, b * a // 255)")
+for mode in "2 with" "1 without"; do
+	set -- $mode
+	T=$(newroot t35c$1)
+	python3 tests/make_test_rom.py "$T/root/roms/test.sfc" ntsc >/dev/null
+	[ "$2" = with ] && mkborder "$T/root/borders/games/test.png"
+	echo "border=$1" >>"$T/root/snes9x-ps5.ini"
+	rc=$(run "$T" "0:0;$(QUITAT 120)" "90" "$T/root/roms/test.sfc")
+	expect "[ $rc = 0 ] && $CHECK $T/dump/flip00090.ppm 30 540 $def_frame 2 >/dev/null && $CHECK $T/dump/flip00090.ppm 960 540 255 0 0 >/dev/null" "border=$1, $2 a border of the game's own: the built-in frame around the picture"
+done
+# d. the Settings row on the shelf: Triangle, Down twice (Shader, Aspect ratio, Border), Right twice: Off -> Auto -> Default frame; Right wraps to Off
+T=$(newroot t35d)
+python3 tests/make_test_rom.py "$T/root/roms/Alpha (USA).sfc" ntsc >/dev/null
+rc=$(run "$T" "0:0;30:$TRIANGLE;32:0;40:$DOWN;42:0;46:$DOWN;48:0;52:$RIGHT;54:0;58:$RIGHT;60:0;66:$CIRCLE;68:0;76:$OPTIONS;78:0;86:$CROSS;88:0" "")
+expect "[ $rc = 0 ] && grep -q '^border=2$' $T/root/snes9x-ps5.ini" "Settings > Border: Right twice is Default frame (border=2)"
+rc=$(run "$T" "0:0;30:$TRIANGLE;32:0;40:$DOWN;42:0;46:$DOWN;48:0;52:$RIGHT;54:0;60:$CIRCLE;62:0;70:$OPTIONS;72:0;80:$CROSS;82:0" "")
+expect "[ $rc = 0 ] && grep -q '^border=0$' $T/root/snes9x-ps5.ini" "Right again wraps round to Off (border=0)"
+rc=$(run "$T" "0:0;30:$TRIANGLE;32:0;40:$DOWN;42:0;46:$DOWN;48:0;52:$LEFT;54:0;60:$CIRCLE;62:0;70:$OPTIONS;72:0;80:$CROSS;82:0" "")
+expect "[ $rc = 0 ] && grep -q '^border=2$' $T/root/snes9x-ps5.ini" "and Left from Off wraps to Default frame (border=2)"
+# e. the pause menu has the row too (Resume, Save, Load, Slot, Cheats, Shortcuts, Shader, Aspect ratio, Border: Down eight times) and it works at once
+T=$(newroot t35e)
+python3 tests/make_test_rom.py "$T/root/roms/test.sfc" ntsc >/dev/null
+mkborder "$T/root/borders/games/test.png"
+pad="0:0;60:$L3R3;65:0"; t=80
+for i in 1 2 3 4 5 6 7 8; do pad="$pad;$t:$DOWN;$((t + 2)):0"; t=$((t + 6)); done
+rc=$(run "$T" "$pad;$((t + 6)):$RIGHT;$((t + 8)):0;$((t + 16)):$CIRCLE;$((t + 18)):0;$(QUITAT $((t + 70)))" "50,$((t + 60))" "$T/root/roms/test.sfc")
+expect "[ $rc = 0 ] && grep -q '^border=1$' $T/root/snes9x-ps5.ini" "the pause menu's Border row sets Auto (border=1, saved)"
+expect "$CHECK $T/dump/flip00050.ppm 100 540 0 0 0 >/dev/null" "before: no border"
+expect "border_around $T/dump/flip$(printf %05d $((t + 60))).ppm" "after Resume the game's border is there, without restarting the game"
+expect "! grep -q 'runtime error\|AddressSanitizer' $T/out.txt" "no sanitizer reports"
+
 echo
 echo "passed $PASS, failed $FAIL  (work dir $WORK)"
 [ $FAIL = 0 ]
