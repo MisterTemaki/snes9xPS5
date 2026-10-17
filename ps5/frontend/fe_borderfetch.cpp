@@ -126,7 +126,7 @@ const Index& TheIndex()
 
 const PackMatcher& Matcher()
 {
-	static const PackMatcher matcher(IndexNames()); // the index never changes: made once
+	static const PackMatcher matcher(IndexNames(), true); // the index never changes: made once; a toss-up takes the USA border
 	return matcher;
 }
 

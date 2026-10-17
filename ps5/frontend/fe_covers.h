@@ -58,10 +58,12 @@ std::string MatchPackName(const std::vector<std::string>& names, const GameInfo&
 
 // MatchPackName for many games over one list: the indexes are made once, in the constructor (a list of 1500 names takes a
 // few milliseconds), and the list is copied, so it may change afterwards. Match may be called from any thread.
+// usa_on_tie: a name that fits a USA and a Japanese entry alike (a retranslation of a game released in both) gets the USA
+// one, where the cover matcher gives none (artmatch::Resolve).
 class PackMatcher
 {
 public:
-	explicit PackMatcher(const std::vector<std::string>& names);
+	explicit PackMatcher(const std::vector<std::string>& names, bool usa_on_tie = false);
 	~PackMatcher();
 	std::string Match(const GameInfo& game) const;
 
