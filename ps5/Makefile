@@ -83,7 +83,7 @@ EMU_SRC := coreorbis/main-boot.cpp \
 	coreorbis/orbis-shims/ProsperoInput.cpp coreorbis/orbis-shims/ProsperoJailbreak.cpp \
 	coreorbis/orbis-shims/ProsperoCrash.cpp coreorbis/orbis-shims/ProsperoCrt.cpp coreorbis/orbis-shims/ProsperoUpdate.cpp \
 	frontend/fe_emu.cpp frontend/fe_menu.cpp frontend/fe_netscreen.cpp frontend/fe_osk.cpp frontend/fe_ui.cpp frontend/fe_settings.cpp frontend/fe_text.cpp \
-	frontend/fe_games.cpp frontend/fe_http.cpp frontend/fe_covers.cpp frontend/fe_shelf.cpp frontend/fe_border.cpp frontend/fe_borderimg.cpp \
+	frontend/fe_games.cpp frontend/fe_http.cpp frontend/fe_covers.cpp frontend/fe_shelf.cpp frontend/fe_border.cpp frontend/fe_borderimg.cpp frontend/fe_borderfetch.cpp \
 	frontend/fe_prefetch.cpp frontend/fe_coverfetch.cpp frontend/fe_coverworker.cpp $(NETFS_SRC)
 # the payloads: the helper, and the installer (= helper + install)
 # (the helper also downloads the covers in the background: fe_coverworker.cpp, with the app's HTTPS code)
@@ -116,6 +116,9 @@ GAMEDB_DEFS := -DGAMEDB_TSV='"$(abspath frontend/data/snes-nointro.tsv)"' -DEXTR
 # the border pack code: the built-in frame is embedded in fe_border.o; stb_image in fe_borderimg.o has warnings of its own
 %/port/frontend/fe_border.o: EXTRA_FLAGS = -DBORDER_DEFAULT_PNG='"$(abspath frontend/assets/borders/default.png)"'
 %/port/frontend/fe_border.o: frontend/assets/borders/default.png
+# the names of the borders The Bezel Project has are embedded in fe_borderfetch.o (the pictures are downloaded, ADR 006)
+%/port/frontend/fe_borderfetch.o: EXTRA_FLAGS = -DBORDER_INDEX_TXT='"$(abspath frontend/data/snes-border-index.txt)"'
+%/port/frontend/fe_borderfetch.o: frontend/data/snes-border-index.txt
 %/port/frontend/fe_borderimg.o: EXTRA_FLAGS = -Wno-error -Wno-sign-compare -Wno-unused-but-set-variable -Wno-implicit-fallthrough
 # the UI fonts (PS5SX2's: PCSX2's Roboto Regular and PromptFont) built into fe_text.o
 %/port/frontend/fe_text.o: EXTRA_FLAGS = -DFE_FONT_DIR='"$(abspath frontend/assets/fonts)"' -Wno-error -Wno-sign-compare -Wno-unused-function
@@ -437,7 +440,7 @@ test-tabs: $(TABS_TEST)
 # stood in for by the test: generated PNGs through the lookup order, the window, the backdrop and the rim
 BORDER_TEST := $(HOST_OUT)/border-pack-test
 BORDER_TEST_OBJ := $(patsubst %.cpp,$(HOST_OUT)/port/%.o,tests/test_border_pack.cpp frontend/fe_border.cpp frontend/fe_borderimg.cpp \
-	frontend/fe_settings.cpp coreorbis/orbis-shims/orbis_paths.cpp)
+	frontend/fe_borderfetch.cpp frontend/fe_coverfetch.cpp frontend/fe_settings.cpp coreorbis/orbis-shims/orbis_paths.cpp)
 $(BORDER_TEST): $(BORDER_TEST_OBJ) $(HOST_ZLIB_OBJ)
 	$(HOST_CXX) $(HOST_SAN) -o $@ $^ -lpthread
 
@@ -459,11 +462,24 @@ test-border-render: $(BORDER_RENDER_TEST)
 test: test-border-render
 .PHONY: test-border-render
 
+# the helper's download loop with its covers and borders lanes (fe_coverworker.cpp), against a fake HTTP client
+DOWNLOAD_WORKER_TEST := $(HOST_OUT)/download-worker-test
+DOWNLOAD_WORKER_OBJ := $(patsubst %.cpp,$(HOST_OUT)/port/%.o,tests/test_download_worker.cpp frontend/fe_coverworker.cpp frontend/fe_coverfetch.cpp \
+	frontend/fe_http.cpp coreorbis/orbis-shims/orbis_paths.cpp coreorbis/orbis-shims/ProsperoCrash.cpp host/sce_host.cpp)
+$(DOWNLOAD_WORKER_TEST): $(DOWNLOAD_WORKER_OBJ)
+	$(HOST_CXX) $(HOST_SAN) -o $@ $^ -lpthread
+
+test-download-worker: $(DOWNLOAD_WORKER_TEST)
+	ASAN_OPTIONS=detect_leaks=1 $(DOWNLOAD_WORKER_TEST)
+
+test: test-download-worker
+.PHONY: test-download-worker
+
 clean:
 	rm -rf build
 
 # the SMB backend against a real Samba (adds `smb-test`, run before the other tests; skipped without smbd)
 include tests/smb/smb.mk
 
-.PHONY: ps5 host test test-nfs test-nfs-server test-tabs test-border send strip app dist clean
+.PHONY: ps5 host test test-nfs test-nfs-server test-tabs test-border test-download-worker send strip app dist clean
 .SECONDARY:

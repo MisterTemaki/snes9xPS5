@@ -22,4 +22,7 @@ std::string Shelf();
 void ShelfShutdown();
 // Mark missing covers for helper retry; safe to call from the Settings menu.
 int RepairMissingCovers();
+// Asks the helper for the border of every game in the library that The Bezel Project has one for and the pack lacks
+// (borders/wanted.txt, fe_borderfetch.h). Returns how many pictures that is.
+int DownloadBorders();
 } // namespace fe

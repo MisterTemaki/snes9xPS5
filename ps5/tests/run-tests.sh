@@ -1327,6 +1327,56 @@ expect "$CHECK $T/dump/flip00050.ppm 100 540 0 0 0 >/dev/null" "before: no borde
 expect "border_around $T/dump/flip$(printf %05d $((t + 60))).ppm" "after Resume the game's border is there, without restarting the game"
 expect "! grep -q 'runtime error\|AddressSanitizer' $T/out.txt" "no sanitizer reports"
 
+echo "== 36. border downloads: Auto asks the helper for the game's border, it lands in borders/games and goes up while the game runs; Settings, Download all borders queues the library"
+# The Bezel Project's SNES picture for the game is served by a local HTTP server (SNES9X_BORDER_URL moves the app's base address there; the
+# helper just follows the address in borders/priority.txt). The first flips show the built-in frame, the later ones the downloaded border.
+stop_helpers
+T=$(newroot t36a)
+SRV=$T/srv/GameBezels
+mkborder "$SRV/Super Mario World (USA).png"
+python3 tests/make_test_rom.py "$T/root/roms/Super Mario World.sfc" ntsc >/dev/null
+echo "border=1" >>"$T/root/snes9x-ps5.ini"
+PORT=18136
+SERVER_DELAY=1 python3 tests/https_server.py "$T/srv" $PORT >/dev/null 2>&1 &
+SRVPID=$!
+SNES9X_PS5_ROOT=$T/root ASAN_OPTIONS=detect_leaks=0 timeout 120 "$HELPER" >"$T/helper.txt" 2>&1 &
+waitfor "$T/root/logs/helper.log" "listening" || sleep 1
+export SNES9X_BORDER_URL="http://127.0.0.1:$PORT/GameBezels/"
+rc=$(OFFLINE= SNES9X_HOST_REALTIME=1 run "$T" "0:0;$(QUITAT 400)" "30,380" "$T/root/roms/Super Mario World.sfc")
+unset SNES9X_BORDER_URL
+expect "[ $rc = 0 ]" "exit code 0 (got $rc)"
+expect "grep -q '\[border\] Super Mario World: asking the helper for Super Mario World (USA).png' $T/root/logs/boot.log" "Auto, no border in the pack: the app asks the helper for The Bezel Project's name for the game"
+expect "grep -q 'Super Mario World (USA).png' $T/root/borders/priority.txt" "borders/priority.txt names it"
+expect "grep -q '\[borders\] Super Mario World (USA).png -> 200' $T/root/logs/helper.log && cmp -s '$T/root/borders/games/Super Mario World (USA).png' '$SRV/Super Mario World (USA).png'" "the helper downloaded it into borders/games/"
+expect "$CHECK $T/dump/flip00030.ppm 30 540 $def_frame 2 >/dev/null" "the game started with the built-in frame"
+expect "grep -q '\[border\] Super Mario World -> Super Mario World (USA).png (downloaded): window 261,21 1398x1038' $T/root/logs/boot.log" "the downloaded border is loaded while the game runs"
+expect "border_around $T/dump/flip00380.ppm" "and drawn around the picture"
+expect "grep -q '^0 1 idle' $T/root/borders/progress.txt" "borders/progress.txt: nothing left, 1 fetched"
+expect "! grep -q 'runtime error\|AddressSanitizer' $T/out.txt" "no sanitizer reports"
+kill $SRVPID 2>/dev/null
+stop_helpers
+# the next start: the file is in the pack, found at once, the helper is not asked
+rm -f "$T/root/borders/priority.txt"
+rc=$(run "$T" "0:0;$(QUITAT 60)" "" "$T/root/roms/Super Mario World.sfc")
+expect "[ $rc = 0 ] && grep -q '\[border\] Super Mario World -> Super Mario World (USA).png (matched)' $T/root/logs/boot.log && ! grep -q 'asking the helper' $T/root/logs/boot.log && [ ! -e $T/root/borders/priority.txt ]" "the next start finds the downloaded border in the pack and asks for nothing"
+# border_download=0: Auto never asks
+T=$(newroot t36b)
+python3 tests/make_test_rom.py "$T/root/roms/Super Mario World.sfc" ntsc >/dev/null
+printf 'border=1\nborder_download=0\n' >>"$T/root/snes9x-ps5.ini"
+rc=$(run "$T" "0:0;$(QUITAT 60)" "" "$T/root/roms/Super Mario World.sfc")
+expect "[ $rc = 0 ] && ! grep -q 'asking the helper' $T/root/logs/boot.log && [ ! -e $T/root/borders/priority.txt ] && grep -q '^border_download=0$' $T/root/snes9x-ps5.ini" "border_download=0: the helper is not asked (and the setting is kept)"
+# Settings > Download all borders (the row before Back: Up twice from the top), with two ROMs of one game and one without a border
+T=$(newroot t36c)
+python3 tests/make_test_rom.py "$T/root/roms/Super Mario World (USA).sfc" ntsc >/dev/null
+python3 tests/make_test_rom.py "$T/root/roms/Super Mario World (Europe).sfc" pal >/dev/null
+python3 tests/make_test_rom.py "$T/root/roms/Totally Unknown Homebrew.sfc" ntsc >/dev/null
+export SNES9X_BORDER_URL="http://127.0.0.1:$PORT/GameBezels/"
+rc=$(run "$T" "0:0;30:$TRIANGLE;32:0;40:$UP;42:0;46:$UP;48:0;52:$CROSS;54:0;66:$CIRCLE;68:0;76:$OPTIONS;78:0;86:$CROSS;88:0" "")
+unset SNES9X_BORDER_URL
+expect "[ $rc = 0 ] && grep -q '\[border\] user asked for the borders of the library: 1 to download' $T/root/logs/boot.log" "Download all borders: one picture for the library (two ROMs share it, the unknown one has none)"
+expect "[ \$(wc -l <$T/root/borders/wanted.txt) = 1 ] && grep -q '^Super Mario World (USA).png.http://127.0.0.1:$PORT/GameBezels/Super%20Mario%20World%20%28USA%29.png\$' $T/root/borders/wanted.txt" "borders/wanted.txt lists it for the helper"
+expect "! grep -q 'runtime error\|AddressSanitizer' $T/out.txt" "no sanitizer reports"
+
 echo
 echo "passed $PASS, failed $FAIL  (work dir $WORK)"
 [ $FAIL = 0 ]

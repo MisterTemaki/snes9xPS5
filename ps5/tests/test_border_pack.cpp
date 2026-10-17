@@ -4,6 +4,7 @@
 // SPDX-License-Identifier: MIT
 
 #include "fe_border.h"
+#include "fe_borderfetch.h"
 #include "fe_borderimg.h"
 #include "fe_covers.h"
 #include "fe_games.h"
@@ -15,21 +16,33 @@
 #include <zlib.h>
 
 #include <sys/stat.h>
+#include <sys/time.h>
 #include <unistd.h>
 
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <set>
 #include <string>
 #include <vector>
 
 // ---- stand-ins for what the border code calls ----
+// BigThread arms the crash handler per thread; the host test has none.
+namespace crashlog
+{
+void* ArmThread() { return nullptr; }
+void DisarmThread(void*) {}
+} // namespace crashlog
+
+// g_shown is set before g_set_calls goes up, so a test that has seen the count may read the border (the download watcher sets
+// it from its own thread).
 namespace ps5video
 {
 std::shared_ptr<const Border> g_shown;
-int g_set_calls = 0;
+std::atomic<int> g_set_calls{0};
 void SetBorder(std::shared_ptr<const Border> border)
 {
 	g_shown = std::move(border);
@@ -46,6 +59,31 @@ std::string MatchPackName(const std::vector<std::string>& names, const GameInfo&
 	return std::find(names.begin(), names.end(), game.nointro) != names.end() ? game.nointro : std::string();
 }
 
+// fe_coverfetch.cpp follows git symlinks with it; nothing here downloads.
+std::string UrlEncode(const std::string& s)
+{
+	return s;
+}
+
+// The index of The Bezel Project's names: a game is matched by its No-Intro name, or by the name its CRC has in the extra
+// table when that is one of them (the real matcher is covered by the host groups).
+struct PackMatcher::Impl
+{
+	std::vector<std::string> names;
+};
+PackMatcher::PackMatcher(const std::vector<std::string>& names) : m_i(new Impl)
+{
+	m_i->names = names;
+}
+PackMatcher::~PackMatcher() = default;
+std::string PackMatcher::Match(const GameInfo& game) const
+{
+	const auto& n = m_i->names;
+	if (std::find(n.begin(), n.end(), game.nointro) != n.end())
+		return game.nointro;
+	return !game.crc_name.empty() && std::find(n.begin(), n.end(), game.crc_name) != n.end() ? game.crc_name : std::string();
+}
+
 GameInfo DescribeGame(const std::string& path, uint32_t rom_crc)
 {
 	GameInfo g;
@@ -55,6 +93,9 @@ GameInfo DescribeGame(const std::string& path, uint32_t rom_crc)
 	g.crc = rom_crc;
 	// "Mapped Name.sfc" is the ROM of the game the pack calls "Mapped Name (USA)"
 	g.nointro = g.file_base.rfind("Mapped", 0) == 0 ? g.file_base + " (USA)" : g.file_base;
+	// "Loose Name.sfc" is a translation of Super Mario World: the CRC table knows it by the index's name
+	if (g.file_base.rfind("Loose", 0) == 0)
+		g.crc_name = "Super Mario World (USA)";
 	return g;
 }
 } // namespace fe
@@ -555,6 +596,232 @@ void TestSelect()
 	CHECK(ps5video::g_shown != nullptr, "a pack of corrupt files still ends in the built-in frame");
 	fe::border::Release();
 }
+
+// ---- the names The Bezel Project has, the downloads, and the border that arrives while a game runs ----
+std::string ReadText(const std::string& path)
+{
+	std::string out;
+	if (FILE* f = fopen(path.c_str(), "rb"))
+	{
+		char buf[4096];
+		size_t n;
+		while ((n = fread(buf, 1, sizeof(buf), f)) > 0)
+			out.append(buf, n);
+		fclose(f);
+	}
+	return out;
+}
+
+bool Exists(const std::string& path)
+{
+	struct stat st = {};
+	return stat(path.c_str(), &st) == 0;
+}
+
+// The helper's way of saving: the whole file appears at once.
+void Land(const std::string& path, const std::vector<uint8_t>& b)
+{
+	WriteBytes(path + ".part", b);
+	rename((path + ".part").c_str(), path.c_str());
+}
+
+bool WaitForCalls(int calls, int ms = 4000)
+{
+	for (int t = 0; t < ms; t += 20)
+	{
+		if (ps5video::g_set_calls >= calls)
+			return true;
+		usleep(20 * 1000);
+	}
+	return ps5video::g_set_calls >= calls;
+}
+
+void TestFetch()
+{
+	using namespace fe::border;
+	using fe::WantedCover;
+	const std::string pack = g_root + "/borders";
+	const std::string games = pack + "/games/";
+	ClearPack(pack);
+	unlink((pack + "/wanted.txt").c_str());
+	unsetenv("SNES9X_BORDER_URL");
+
+	const std::vector<std::string>& names = IndexNames();
+	CHECK(names.size() > 1400 && names.size() < 1600, "the index has the 1445 SNES borders The Bezel Project had on 2026-10-04");
+	CHECK(std::find(names.begin(), names.end(), "Super Mario World (USA)") != names.end(), "Super Mario World (USA) is in it");
+	CHECK(std::find(names.begin(), names.end(), "Joe & Mac (USA)") != names.end(), "so is a name with an ampersand, as the repository spells it");
+	CHECK(std::set<std::string>(names.begin(), names.end()).size() == names.size(), "no name twice");
+	bool clean = true;
+	for (const std::string& n : names)
+		clean = clean && !n.empty() && n.find('/') == std::string::npos && n.find('\t') == std::string::npos &&
+			n.size() < 200 && (n.size() < 4 || n.compare(n.size() - 4, 4, ".png") != 0);
+	CHECK(clean, "every name is a plain file name without the extension");
+
+	CHECK(BezelUrl("Joe & Mac (USA)") ==
+			"https://raw.githubusercontent.com/thebezelproject/bezelproject-SNES/master/retroarch/overlay/GameBezels/SNES/"
+			"Joe%20%26%20Mac%20%28USA%29.png",
+		"the address is the repository's raw file, every odd character escaped");
+	CHECK(BezelUrl("Super Mario World 2 - Yoshi's Island (USA)").find("Yoshi%27s%20Island") != std::string::npos, "an apostrophe is escaped");
+	setenv("SNES9X_BORDER_URL", "http://127.0.0.1:1/b/", 1);
+	CHECK(BezelUrl("A (USA)") == "http://127.0.0.1:1/b/A%20%28USA%29.png", "SNES9X_BORDER_URL replaces the base (the host tests)");
+	unsetenv("SNES9X_BORDER_URL");
+
+	WantedCover w;
+	CHECK(BorderWanted(pack, Game("Super Mario World (USA)", "Super Mario World (USA)"), &w) && w.file == "Super Mario World (USA).png" &&
+			w.url == BezelUrl("Super Mario World (USA)"),
+		"a game The Bezel Project has a border for, and the pack lacks, is wanted");
+	CHECK(!BorderWanted(pack, Game("Not In Any Pack (USA)", "Not In Any Pack (USA)"), &w), "a game it has none for is not");
+	CHECK(BorderWanted(pack, Game("Super Mario World", "Super Mario World"), &w) == false, "(the stand-in matcher knows only exact names)");
+
+	// the loose translation: matched through the name its CRC has
+	fe::GameInfo loose = Game("Loose Translation", "Loose Translation");
+	loose.crc_name = "Super Mario World (USA)";
+	CHECK(BezelNameFor(loose) == "Super Mario World (USA)", "a translation is given its game's border by the CRC name");
+
+	WriteBytes(games + "Super Mario World (USA).png", ArtPng(kWinA));
+	CHECK(!BorderWanted(pack, Game("Super Mario World (USA)", "Super Mario World (USA)"), &w), "a border already in the pack is not wanted again");
+	unlink((games + "Super Mario World (USA).png").c_str());
+
+	// a 404 is not asked again for 30 days, and only for the same address
+	const std::string marker = games + "Super Mario World (USA).missing";
+	if (FILE* f = fopen(marker.c_str(), "w"))
+	{
+		fprintf(f, "%s\n", BezelUrl("Super Mario World (USA)").c_str());
+		fclose(f);
+	}
+	CHECK(!BorderWanted(pack, Game("Super Mario World (USA)", "Super Mario World (USA)"), &w), "a recent 404 for the address: not wanted");
+	setenv("SNES9X_BORDER_URL", "http://127.0.0.1:1/b/", 1);
+	CHECK(BorderWanted(pack, Game("Super Mario World (USA)", "Super Mario World (USA)"), &w), "a 404 for another address does not count");
+	unsetenv("SNES9X_BORDER_URL");
+	struct timeval old[2] = {{time(nullptr) - 31L * 24 * 3600, 0}, {time(nullptr) - 31L * 24 * 3600, 0}};
+	utimes(marker.c_str(), old);
+	CHECK(BorderWanted(pack, Game("Super Mario World (USA)", "Super Mario World (USA)"), &w), "a 404 older than 30 days is tried again");
+	unlink(marker.c_str());
+
+	// the library: one picture per bezel, none for a ROM with its own border, none for a game without one
+	WriteBytes(games + "Chrono Trigger (USA).png", ArtPng(kWinA)); // the player's own border for this ROM name
+	std::vector<fe::GameInfo> library = {Game("Super Mario World (USA)", "Super Mario World (USA)"), Game("Super Mario World (USA)", "Super Mario World (USA)"), Game("Chrono Trigger (USA)", "Chrono Trigger (USA)"),
+		Game("F-Zero (USA)", "F-Zero (USA)"), Game("Not In Any Pack (USA)", "Not In Any Pack (USA)"), loose};
+	const std::vector<WantedCover> missing = MissingBorders(pack, library);
+	CHECK(missing.size() == 2 && missing[0].file == "Super Mario World (USA).png" && missing[1].file == "F-Zero (USA).png",
+		"the library list has Super Mario World (once, though two ROMs and a translation share it) and F-Zero");
+
+	WriteWantedBorders(pack, missing);
+	WritePriorityBorders(pack, {missing[1]});
+	const std::vector<WantedCover> read = fe::ParseWantedList(ReadText(pack + "/wanted.txt"));
+	CHECK(read.size() == 2 && read[0].file == missing[0].file && read[0].url == missing[0].url, "borders/wanted.txt is the helper's wanted-list format");
+	const std::vector<WantedCover> prio = fe::ParseWantedList(ReadText(pack + "/priority.txt"));
+	CHECK(prio.size() == 1 && prio[0].file == "F-Zero (USA).png", "borders/priority.txt holds the one given");
+	WriteWantedBorders(pack, {});
+	CHECK(fe::ParseWantedList(ReadText(pack + "/wanted.txt")).empty(), "and an empty list empties the file");
+}
+
+void TestAutoDownload()
+{
+	const std::string pack = g_root + "/borders";
+	const std::string games = pack + "/games/";
+	const std::string rom = "/data/snes9x/roms/Super Mario World (USA).sfc";
+	ClearPack(pack);
+	unlink((pack + "/priority.txt").c_str());
+	fe::Config().border = 1;
+	fe::Config().border_download = true;
+
+	// Auto, no border for the game yet: the built-in frame at once, the helper asked, the border put up when it lands
+	ps5video::g_set_calls = 0;
+	fe::border::Select(rom, 0);
+	CHECK(ps5video::g_set_calls == 1 && ps5video::g_shown && ps5video::g_shown->window.w >= 480, "no border yet: the game starts with the built-in frame");
+	const std::vector<fe::WantedCover> asked = fe::ParseWantedList(ReadText(pack + "/priority.txt"));
+	CHECK(asked.size() == 1 && asked[0].file == "Super Mario World (USA).png", "and the helper is asked for it, first (borders/priority.txt)");
+	usleep(700 * 1000);
+	CHECK(ps5video::g_set_calls == 1, "nothing changes while the picture has not arrived");
+	Land(games + "Super Mario World (USA).png", ArtPng(kWinD));
+	CHECK(WaitForCalls(2), "the picture lands: the game's border is put up");
+	CHECK(ps5video::g_shown && SameRect(ps5video::g_shown->window, kWinD), "it is the downloaded picture");
+	fe::border::Release();
+	CHECK(!ps5video::g_shown, "Release clears it");
+
+	// the next time the game starts, the file is in the pack: found at once, nothing asked
+	unlink((pack + "/priority.txt").c_str());
+	ps5video::g_set_calls = 0;
+	fe::border::Select(rom, 0);
+	CHECK(ps5video::g_set_calls == 1 && SameRect(ps5video::g_shown->window, kWinD), "the next start finds the downloaded border in the pack");
+	CHECK(!Exists(pack + "/priority.txt"), "and asks for nothing");
+	fe::border::Release();
+
+	// the game's name is not the bezel's: the file is found by the index name, not by the pack's own matcher
+	ps5video::g_set_calls = 0;
+	fe::border::Select("/data/snes9x/roms/Loose Translation.sfc", 0);
+	CHECK(ps5video::g_set_calls == 1 && SameRect(ps5video::g_shown->window, kWinD), "a translation finds the downloaded border by The Bezel Project's name for its game");
+	fe::border::Release();
+
+	// the game closes before the picture arrives: it is not put up afterwards, and Release does not wait for the helper
+	unlink((games + "Super Mario World (USA).png").c_str());
+	ps5video::g_set_calls = 0;
+	fe::border::Select(rom, 0);
+	const auto t0 = std::chrono::steady_clock::now();
+	fe::border::Release();
+	const long ms = long(std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - t0).count());
+	CHECK(ms < 400, "Release stops the watcher at once");
+	const int calls = ps5video::g_set_calls;
+	Land(games + "Super Mario World (USA).png", ArtPng(kWinB));
+	usleep(1200 * 1000);
+	CHECK(ps5video::g_set_calls == calls, "a picture that arrives after the game closed is not put up");
+
+	// another game starts before it arrives
+	unlink((games + "Super Mario World (USA).png").c_str());
+	fe::border::Select(rom, 0);
+	fe::border::Select("/data/snes9x/roms/Unknown Game.sfc", 0);
+	const int calls2 = ps5video::g_set_calls;
+	Land(games + "Super Mario World (USA).png", ArtPng(kWinB));
+	usleep(1200 * 1000);
+	CHECK(ps5video::g_set_calls == calls2, "nor when another game has started meanwhile");
+	fe::border::Release();
+
+	// the setting changes while it waits
+	unlink((games + "Super Mario World (USA).png").c_str());
+	fe::border::Select(rom, 0);
+	fe::Config().border = 2;
+	fe::border::Reselect();
+	const int calls3 = ps5video::g_set_calls;
+	Land(games + "Super Mario World (USA).png", ArtPng(kWinB));
+	usleep(1200 * 1000);
+	CHECK(ps5video::g_set_calls == calls3, "nor after Auto was switched to Default frame");
+	fe::border::Release();
+
+	// a 404: the watcher gives up, the frame stays
+	fe::Config().border = 1;
+	unlink((games + "Super Mario World (USA).png").c_str());
+	fe::border::Select(rom, 0);
+	const int calls4 = ps5video::g_set_calls;
+	if (FILE* f = fopen((games + "Super Mario World (USA).missing").c_str(), "w"))
+	{
+		fprintf(f, "%s\n", fe::border::BezelUrl("Super Mario World (USA)").c_str());
+		fclose(f);
+	}
+	usleep(1200 * 1000);
+	CHECK(ps5video::g_set_calls == calls4, "a 404 leaves the built-in frame");
+	fe::border::Release();
+	unlink((games + "Super Mario World (USA).missing").c_str());
+
+	// downloads off: nothing asked, nothing watched
+	fe::Config().border_download = false;
+	unlink((pack + "/priority.txt").c_str());
+	fe::border::Select(rom, 0);
+	CHECK(!Exists(pack + "/priority.txt"), "border_download=0: the helper is not asked");
+	fe::border::Release();
+	fe::Config().border_download = true;
+
+	// Default frame never asks, a game with its own file never asks
+	fe::Config().border = 2;
+	fe::border::Select(rom, 0);
+	CHECK(!Exists(pack + "/priority.txt"), "Default frame: the helper is not asked");
+	fe::border::Release();
+	fe::Config().border = 1;
+	WriteBytes(games + "Super Mario World (USA).ini", std::vector<uint8_t>{'o', 'f', 'f', '=', '1', '\n'});
+	fe::border::Select(rom, 0);
+	CHECK(!Exists(pack + "/priority.txt"), "off=1 in the game's .ini: the helper is not asked");
+	fe::border::Release();
+}
 } // namespace
 
 int main()
@@ -575,6 +842,8 @@ int main()
 	TestBuild();
 	TestChoose();
 	TestSelect();
+	TestFetch();
+	TestAutoDownload();
 
 	if (FILE* p = popen(("rm -rf '" + g_root + "'").c_str(), "r"))
 		pclose(p);

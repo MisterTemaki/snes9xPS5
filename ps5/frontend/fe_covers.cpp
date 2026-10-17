@@ -446,15 +446,32 @@ std::string CoverNameFor(const GameInfo& game)
     return best;
 }
 
+struct PackMatcher::Impl
+{
+    std::vector<std::string> names;
+    titles::Index index;
+    artmatch::Index words;
+};
+
+PackMatcher::PackMatcher(const std::vector<std::string>& names) : m_i(new Impl)
+{
+    m_i->names = names;
+    titles::Build(m_i->index, m_i->names);
+    artmatch::Build(m_i->words, m_i->names);
+}
+
+PackMatcher::~PackMatcher() = default;
+
+std::string PackMatcher::Match(const GameInfo& game) const
+{
+    return MatchArtName(m_i->names, m_i->index, m_i->words, game);
+}
+
 std::string MatchPackName(const std::vector<std::string>& names, const GameInfo& game)
 {
     // a list that changes between calls: its indexes are made here and thrown away (IndexOf would hand back a stale
     // one for a different list of the same size at the same address)
-    titles::Index index;
-    titles::Build(index, names);
-    artmatch::Index words;
-    artmatch::Build(words, names);
-    return MatchArtName(names, index, words, game);
+    return PackMatcher(names).Match(game);
 }
 
 std::string ThumbnailName(const std::string& nointro)

@@ -56,6 +56,20 @@ std::string CoverNameFor(const GameInfo& game);
 // ROM header. "" when none fits.
 std::string MatchPackName(const std::vector<std::string>& names, const GameInfo& game);
 
+// MatchPackName for many games over one list: the indexes are made once, in the constructor (a list of 1500 names takes a
+// few milliseconds), and the list is copied, so it may change afterwards. Match may be called from any thread.
+class PackMatcher
+{
+public:
+	explicit PackMatcher(const std::vector<std::string>& names);
+	~PackMatcher();
+	std::string Match(const GameInfo& game) const;
+
+private:
+	struct Impl;
+	std::unique_ptr<Impl> m_i;
+};
+
 // The download address of a game's box art (the libretro-thumbnails template, SNES9X_COVER_URL on the host).
 std::string CoverUrlFor(const std::string& nointro);
 // Resolve box, title screen and screenshot names independently from verified Libretro lists.
