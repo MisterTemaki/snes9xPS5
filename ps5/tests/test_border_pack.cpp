@@ -446,7 +446,8 @@ void TestFit()
 	CHECK(OpeningRatio(ps5video::Aspect::Ratio4x3, &rw, &rh) && rw == 4 && rh == 3, "4:3 gives a 4:3 opening");
 	CHECK(OpeningRatio(ps5video::Aspect::PixelPerfect, &rw, &rh) && rw == 8 && rh == 7, "pixel perfect gives an 8:7 opening");
 	CHECK(OpeningRatio(ps5video::Aspect::Stretch, &rw, &rh) && rw == 16 && rh == 9, "stretch gives a 16:9 opening");
-	CHECK(!OpeningRatio(ps5video::Aspect::Integer, &rw, &rh), "integer scale keeps the art as drawn");
+	CHECK(!OpeningRatio(ps5video::Aspect::Integer, &rw, &rh), "integer scale has a size, not a shape");
+	CHECK(!OpeningRatio(ps5video::Aspect::Count, &rw, &rh), "and no aspect ratio at all keeps the art as drawn");
 
 	// where the window goes
 	CHECK(SameRect(FitOpening(kWinA, 4, 3), kWinA), "a window within 3% of 4:3 stays in 4:3 (1398x1038 is 1.347)");
@@ -459,6 +460,13 @@ void TestFit()
 	CHECK(Shaped(wb, 4, 3) && wb.h == kWinB.h && (wb.w & 1) == 0, "a 3:2 window becomes 4:3 at the same height, even width");
 	CHECK(SameRect(FitOpening({0, 0, 1920, 1080}, 4, 3), Rect{240, 0, 1440, 1080}), "a window that fills the screen is centred when it narrows");
 	CHECK(SameRect(FitOpening({0, 0, 1920, 1080}, 16, 9), Rect{0, 0, 1920, 1080}), "and stays when it already has the shape");
+	// Integer scale: the opening is the whole-multiple picture, 4x = 1024x896 for most windows
+	CHECK(SameRect(IntegerOpening(kWinA), Rect{448, 92, 1024, 896}), "Integer scale: 1398x1038 becomes 1024x896 (4x), a centred frame stays centred");
+	CHECK(SameRect(IntegerOpening(Rect{448, 92, 1024, 896}), Rect{448, 92, 1024, 896}), "a window that is 4x already stays");
+	CHECK(SameRect(IntegerOpening(kWinB), Rect{427, 92, 1024, 896}), "an off-centre frame keeps its side margins in proportion (200 : 220 -> 427 : 469)");
+	CHECK(SameRect(IntegerOpening(Rect{480, 270, 480, 270}), Rect{555, 285, 256, 224}), "a window that only fits 1x gets 256x224");
+	CHECK(SameRect(IntegerOpening(Rect{0, 0, 1920, 1080}), Rect{448, 92, 1024, 896}), "a window that fills the screen is cut to 4x and centred");
+	CHECK(SameRect(IntegerOpening(kWinC), Rect{434, 92, 1024, 896}), "the height decides the multiple (kWinC: 960 / 224 = 4)");
 	// every window and shape ends up inside the surface, even, in shape (or untouched), and with margins that keep their proportions
 	bool sane = true;
 	for (const Rect& win : {kWinA, kWinB, kWinC, kWinD, Rect{0, 0, 1920, 1080}, Rect{480, 270, 960, 540}, Rect{100, 20, 1700, 960}})
@@ -472,12 +480,23 @@ void TestFit()
 			sane = sane && inside && (same || ((r.w & 1) == 0 && Shaped(r, ratio.first, ratio.second) && kept));
 		}
 	CHECK(sane, "FitOpening stays inside the surface, in shape, with the margins in proportion, for a range of windows");
+	sane = true;
+	for (const Rect& win : {kWinA, kWinB, kWinC, kWinD, Rect{0, 0, 1920, 1080}, Rect{480, 270, 960, 540}, Rect{100, 20, 1700, 960}, Rect{448, 92, 1024, 896}})
+	{
+		const Rect r = IntegerOpening(win);
+		const int k = r.w / 256;
+		const int mw = 1920 - win.w, mh = 1080 - win.h;
+		const bool inside = r.x >= 0 && r.y >= 0 && r.x + r.w <= 1920 && r.y + r.h <= 1080 && r.w <= win.w && r.h <= win.h;
+		const bool kept = (mw == 0 || std::abs(r.x * mw - win.x * (1920 - r.w)) <= mw) && (mh == 0 || std::abs(r.y * mh - win.y * (1080 - r.h)) <= mh);
+		sane = sane && inside && kept && k >= 1 && r.w == 256 * k && r.h == 224 * k;
+	}
+	CHECK(sane, "IntegerOpening is a whole multiple of 256x224 inside the drawn window, with the margins in proportion, for a range of windows");
 
 	// the art
 	Image src = GradientArt();
 	Image img = src;
 	Rect win = kWinA;
-	CHECK(FitToAspect(&img, &win, ps5video::Aspect::Integer, &why) && SameRect(win, kWinA) && img.px == src.px, "Integer scale: nothing is touched");
+	CHECK(FitToAspect(&img, &win, ps5video::Aspect::Count, &why) && SameRect(win, kWinA) && img.px == src.px, "no aspect ratio: nothing is touched");
 	CHECK(FitToAspect(&img, &win, ps5video::Aspect::Ratio4x3, &why) && SameRect(win, kWinA) && img.px == src.px, "4:3 on a 4:3 window: nothing is touched");
 
 	// 8:7: x changes (margins stretch), y does not
@@ -516,6 +535,24 @@ void TestFit()
 	CHECK(corner_same, "the corner is as drawn");
 	CHECK((px(0, 0) & 0x00ffffff) == (src_px(0, 0) & 0x00ffffff), "the outer corner of the frame is the art's");
 	CHECK(BuildBorder(img, win, &why) != nullptr, "the 16:9 art builds into a border");
+
+	// Integer scale: the window is 1024x896; both axes shrink, so the margins stretch (4.4x tall at the top and bottom)
+	img = src;
+	win = kWinA;
+	const Rect wint = {448, 92, 1024, 896};
+	CHECK(FitToAspect(&img, &win, ps5video::Aspect::Integer, &why) && SameRect(win, wint), "Integer scale: the window is the whole-multiple picture");
+	CHECK(FindWindow(img, &found, &why) && SameRect(found, wint), "and it is the clear hole the window search finds in the stretched art");
+	CHECK(px(0, 0) == src_px(0, 0) && px(1919, 1079) == src_px(1919, 1079), "the outer corners of the frame are the art's");
+	CHECK(px(wint.x - 1, 300) == src_px(kWinA.x - 1, 300) && px(wint.x + wint.w, 300) == src_px(kWinA.x + kWinA.w, 300), "no blend across the cut at the sides");
+	corner_same = true;
+	for (int y = 0; y < 64; y++)
+		for (int x = 0; x < 64; x++)
+			corner_same = corner_same && px(wint.x + x, wint.y + y) == src_px(kWinA.x + x, kWinA.y + y);
+	CHECK(corner_same, "the corner of the window is as drawn");
+	CHECK(BuildBorder(img, win, &why) != nullptr, "the Integer art builds into a border");
+	img = src;
+	win = wint;
+	CHECK(FitToAspect(&img, &win, ps5video::Aspect::Integer, &why) && SameRect(win, wint) && img.px == src.px, "a window that is the whole multiple already: nothing is touched");
 
 	// a window given by hand, an RGB picture (no hole of its own): punched, then stretched with its window
 	Image rgb;
@@ -997,13 +1034,14 @@ void TestAspect()
 	pick = fe::border::Choose(pack, 1, game, Aspect::Stretch);
 	CHECK(pick.border && Shaped(pick.border->window, 16, 9), "Stretch: a 16:9 window");
 	pick = fe::border::Choose(pack, 1, game, Aspect::Integer);
-	CHECK(pick.border && SameRect(pick.border->window, kWinB), "Integer scale: the window as drawn");
+	CHECK(pick.border && SameRect(pick.border->window, fe::border::IntegerOpening(kWinB)) && pick.border->window.w == 1024 && pick.border->window.h == 896,
+		"Integer scale: the window is the 1024x896 picture, no black around it");
 	pick = fe::border::Choose(pack, 1, game);
-	CHECK(pick.border && SameRect(pick.border->window, kWinB), "and that is what no aspect ratio asked for gives");
+	CHECK(pick.border && SameRect(pick.border->window, kWinB), "and the window as drawn is what no aspect ratio asked for gives");
 
 	// the built-in frame, which is 1398x1038 (4:3) as drawn
 	ClearPack(pack);
-	const Rect frame = fe::border::Choose(pack, 2, game, Aspect::Integer).border->window;
+	const Rect frame = fe::border::Choose(pack, 2, game, Aspect::Count).border->window;
 	CHECK(SameRect(fe::border::Choose(pack, 2, game, Aspect::Ratio4x3).border->window, frame), "the built-in frame is already 4:3: unchanged");
 	const Rect frame87 = fe::border::Choose(pack, 2, game, Aspect::PixelPerfect).border->window;
 	const Rect frame169 = fe::border::Choose(pack, 2, game, Aspect::Stretch).border->window;
@@ -1012,9 +1050,9 @@ void TestAspect()
 
 	// Reselect: the aspect ratio changes while a game runs
 	WriteBytes(games + "Super Mario World (USA).png", ArtPng(kWinB));
-	fe::Config().aspect = int(Aspect::Integer);
+	fe::Config().aspect = int(Aspect::Count);
 	fe::border::Select(rom, 0);
-	CHECK(ps5video::g_shown && SameRect(ps5video::g_shown->window, kWinB), "Integer scale: the picture as drawn");
+	CHECK(ps5video::g_shown && SameRect(ps5video::g_shown->window, kWinB), "no aspect ratio: the picture as drawn");
 	int calls = ps5video::g_set_calls;
 	fe::Config().aspect = int(Aspect::PixelPerfect);
 	fe::border::Reselect();
@@ -1032,7 +1070,7 @@ void TestAspect()
 	CHECK(ps5video::g_set_calls == calls + 3, "and with Border Off the aspect ratio has nothing to fit");
 	fe::Config().border = 1;
 	fe::border::Reselect();
-	CHECK(ps5video::g_set_calls == calls + 4 && SameRect(ps5video::g_shown->window, kWinB), "Border back to Auto: the picture, fitted to the aspect ratio set meanwhile");
+	CHECK(ps5video::g_set_calls == calls + 4 && SameRect(ps5video::g_shown->window, fe::border::IntegerOpening(kWinB)), "Border back to Auto: the picture, fitted to the aspect ratio set meanwhile (Integer scale)");
 	fe::border::Release();
 
 	// a border that is downloaded while the game runs is fitted to the aspect ratio of the moment
@@ -1047,7 +1085,7 @@ void TestAspect()
 	CHECK(WaitForCalls(2) && Shaped(ps5video::g_shown->window, 16, 9) && ps5video::g_shown->window.h == kWinD.h, "and so is the downloaded border (kWinD is 10:7)");
 	fe::border::Release();
 	fe::Config().border_download = true;
-	fe::Config().aspect = int(Aspect::Integer);
+	fe::Config().aspect = int(Aspect::Count);
 }
 
 } // namespace
@@ -1064,7 +1102,7 @@ int main()
 	setenv("SNES9X_PS5_ROOT", dir, 1);
 	MakePack(g_root);
 	OrbisLogSetEnabled(true);
-	fe::Config().aspect = int(ps5video::Aspect::Integer); // the art as drawn: the tests below compare windows (TestAspect fits them)
+	fe::Config().aspect = int(ps5video::Aspect::Count); // the art as drawn: the tests below compare windows (TestAspect fits them)
 
 	TestDecode();
 	TestWindow();

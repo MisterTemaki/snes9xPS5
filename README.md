@@ -517,7 +517,9 @@ shaders have only been tested on the Linux host, not on a PS5.
 the shape you picked, and the picture fills it: **4:3** as drawn; **8:7 (pixel perfect)** a narrower window, the side art
 stretched wider; **Stretch 16:9** a wider window, the side art squeezed to 40% at most and the top and bottom art stretched
 taller (the picture is about 1712x963 instead of 1920x1080, the frame stays). The corners of the window stay as drawn.
-**Integer scale** leaves the art as it is and centres a whole-multiple picture in the window, so black shows around it.
+**Integer scale** cuts the window to the whole-multiple picture itself, 4x = 1024x896, so there is no black around it; the
+art around it is stretched to fit (the top and bottom art about 4x taller, the sides 1.7x wider for a typical 1398x1038 window),
+and a 239-line (PAL) picture fills the height of that window with thin bars at the sides instead of dropping to 3x.
 A window that already has the shape (within 3%) is not touched. It changes at once when you change Aspect ratio in
 the pause menu.
 
