@@ -483,8 +483,7 @@ Use the server's IP address. Inside a user name, password or folder, write `& = 
   fetched ahead and can make the game wait for the network; unpack its tracks beside the ROM.
 - If a share cannot be reached, a notification says why (no answer, wrong password, share not found...) and the
   same sentence is in `/data/snes9x/logs/boot.log` (`[net]`).
-- The SMB and NFS libraries arrive in separate changes. Until a release has one, its shares report that the
-  protocol is not built in.
+- SMB uses libsmb2 and NFS uses libnfs; both are LGPL-2.1 and sit in `ps5/third_party/` with their licence notices.
 
 ## Picture and sound
 
