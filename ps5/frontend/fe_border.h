@@ -17,8 +17,9 @@
 //   5. the frame built into the ELF
 // Default frame uses 4 and 5 only; Off sets none.
 //
-// The window follows the Aspect ratio setting: the art is stretched so the window has the picture's shape (4:3, 8:7 for
-// Pixel perfect, 16:9 for Stretch), which is how a bezel drawn for a 4:3 game fits any of them. Integer scale cuts it to the
+// The window follows the Aspect ratio setting: the art is refitted so the window has the picture's shape (4:3, 8:7 for
+// Pixel perfect, 16:9 for Stretch), which is how a bezel drawn for a 4:3 game fits any of them, with the side art scaled evenly
+// and cropped, not squeezed. Integer scale cuts it to the
 // whole-multiple picture (1024x896 at 4x). See FitToAspect in fe_borderimg.h.
 //
 // SPDX-License-Identifier: MIT

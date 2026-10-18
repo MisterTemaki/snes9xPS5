@@ -499,22 +499,26 @@ void TestFit()
 	CHECK(FitToAspect(&img, &win, ps5video::Aspect::Count, &why) && SameRect(win, kWinA) && img.px == src.px, "no aspect ratio: nothing is touched");
 	CHECK(FitToAspect(&img, &win, ps5video::Aspect::Ratio4x3, &why) && SameRect(win, kWinA) && img.px == src.px, "4:3 on a 4:3 window: nothing is touched");
 
-	// 8:7: x changes (margins stretch), y does not
+	// 8:7: x changes (the side margins grow), y does not
 	win = kWinA;
 	CHECK(FitToAspect(&img, &win, ps5video::Aspect::PixelPerfect, &why) && SameRect(win, w87), "8:7: the window is the new opening");
 	Rect found = {};
 	CHECK(FindWindow(img, &found, &why) && SameRect(found, w87), "and it is the clear hole the window search finds in the stretched art");
 	const auto px = [&](int x, int y) { return img.px[size_t(y) * 1920 + x]; };
 	const auto src_px = [&](int x, int y) { return src.px[size_t(y) * 1920 + x]; };
-	CHECK(px(0, 300) == src_px(0, 300) && px(1919, 300) == src_px(1919, 300), "the outer edge pixels are the art's");
+	CHECK(px(0, 0) == src_px(0, 0) && px(1919, 1079) == src_px(1919, 1079), "the panels keep their anchor corners: the left one from the top, the right one from the bottom");
 	CHECK(px(w87.x - 1, 300) == src_px(kWinA.x - 1, 300), "the last column left of the window is the art's last column left of its window (no blend across the cut)");
 	CHECK(px(w87.x + w87.w, 300) == src_px(kWinA.x + kWinA.w, 300), "and the first column right of the window likewise");
-	CHECK(std::abs(int(px(200, 300) & 0xff) - int((200.5 * 261 / 367 - 0.5) / 8)) <= 1,
-		"a margin pixel shows the art at the stretched position (x = 200 shows x = 141.7 of the art)");
-	bool column_same = true;
+	// the left panel (237 px of art, 343 px in the result) is scaled up evenly: x = 200, y = 300 show the art at (138.0, 207.1)
+	// (red counts x / 8, green y / 5); a panel squeezed to the height would show y = 300
+	CHECK(std::abs(int(px(200, 300) & 0xff) - 17) <= 1 && std::abs(int((px(200, 300) >> 8) & 0xff) - 41) <= 1,
+		"the side panel is scaled up evenly and cropped to the height, not stretched sideways");
+	bool rim_same = true;
 	for (int y = 0; y < 1080; y++)
-		column_same = column_same && px(0, y) == src_px(0, y);
-	CHECK(column_same, "the height is kept, so the outer column is the art's top to bottom");
+		for (int i = 0; i < 24; i++)
+			rim_same = rim_same && px(w87.x - 24 + i, y) == src_px(kWinA.x - 24 + i, y) &&
+					   px(w87.x + w87.w + i, y) == src_px(kWinA.x + kWinA.w + i, y);
+	CHECK(rim_same, "the 24 px rim along the window is the art as drawn, top to bottom");
 	bool corner_same = true;
 	for (int y = 0; y < 64; y++)
 		for (int x = 0; x < 64; x++)
@@ -534,6 +538,11 @@ void TestFit()
 			corner_same = corner_same && px(w169.x + x, w169.y + y) == src_px(kWinA.x + x, kWinA.y + y);
 	CHECK(corner_same, "the corner is as drawn");
 	CHECK((px(0, 0) & 0x00ffffff) == (src_px(0, 0) & 0x00ffffff), "the outer corner of the frame is the art's");
+	bool outer_same = true; // the margins shrink (261 -> 104): the panel is its outer part, as drawn, not squeezed
+	for (int y = 0; y < 1080; y++)
+		for (int x = 0; x < 80; x++)
+			outer_same = outer_same && px(x, y) == src_px(x, y) && px(1919 - x, y) == src_px(1919 - x, y);
+	CHECK(outer_same, "a margin that shrinks shows the outer part of its panel as drawn");
 	CHECK(BuildBorder(img, win, &why) != nullptr, "the 16:9 art builds into a border");
 
 	// Integer scale: the window is 1024x896; both axes shrink, so the margins stretch (4.4x tall at the top and bottom)

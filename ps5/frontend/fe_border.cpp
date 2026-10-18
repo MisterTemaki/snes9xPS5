@@ -171,7 +171,7 @@ std::vector<PackFile> ListPack(const std::string& games_dir)
 
 // ---- one picture ----
 // From the bytes of a PNG to a border; null (one log line) when it cannot be used. label: what the log calls the file. The art
-// is stretched so its window has the shape of `aspect`, or the size of its whole-multiple picture for Integer scale (FitToAspect).
+// is refitted so its window has the shape of `aspect`, or the size of its whole-multiple picture for Integer scale (FitToAspect).
 std::shared_ptr<const ps5video::Border> Build(const std::string& label, const uint8_t* data, size_t size, const Ini& ini,
 	ps5video::Aspect aspect)
 {

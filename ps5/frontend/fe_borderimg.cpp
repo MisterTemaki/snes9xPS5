@@ -66,28 +66,34 @@ struct Tap
 	int i0, i1, f;
 };
 
-// One axis of RefitImage. 'src' and 'dst' are the cut points of the five pieces (margin, corner, middle, corner, margin);
-// piece k of the output shows piece k of the source, 1:1 or stretched, and never reads outside its piece.
-void AxisTaps(const int (&src)[6], const int (&dst)[6], int size, std::vector<Tap>* taps)
+// Output columns (or rows) d0..d1 show the source s0..s1, 1:1 or stretched.
+struct Piece
 {
-	taps->resize(size_t(size));
-	for (int k = 0; k < 5; k++)
+	int d0, d1, s0, s1;
+};
+
+// One axis of RefitImage: the pieces are in output order; each shows its part of the source, 1:1 or stretched, and never
+// reads outside it.
+void AxisTaps(const std::vector<Piece>& pieces, int size, std::vector<Tap>* taps)
+{
+	taps->assign(size_t(size), Tap{0, 0, 0});
+	for (const Piece& p : pieces)
 	{
-		const int64_t len_s = src[k + 1] - src[k], len_d = dst[k + 1] - dst[k];
-		const int last = src[k + 1] - 1;
-		for (int d = dst[k]; d < dst[k + 1]; d++)
+		const int64_t len_s = p.s1 - p.s0, len_d = p.d1 - p.d0;
+		const int last = p.s1 - 1;
+		for (int d = p.d0; d < p.d1; d++)
 		{
 			Tap& t = (*taps)[size_t(d)];
 			if (len_s <= 0) // nothing to show here (a window that touches the edge): the nearest pixel
 			{
-				const int i = std::min(std::max(src[k], 0), size - 1);
+				const int i = std::min(std::max(p.s0, 0), size - 1);
 				t = {i, i, 0};
 				continue;
 			}
 			// the output pixel's centre in the source, minus the half pixel taps are counted from, scaled by 2 * len_d
-			const int64_t pos = (2 * int64_t(d - dst[k]) + 1) * len_s - len_d;
+			const int64_t pos = (2 * int64_t(d - p.d0) + 1) * len_s - len_d;
 			const int64_t den = 2 * len_d;
-			const int i0 = pos <= 0 ? src[k] : src[k] + int(pos / den);
+			const int i0 = pos <= 0 ? p.s0 : p.s0 + int(pos / den);
 			if (pos <= 0 || i0 >= last)
 				t = {std::min(i0, last), std::min(i0, last), 0};
 			else
@@ -177,38 +183,21 @@ ps5video::Rect IntegerOpening(const ps5video::Rect& win)
 	return PlaceOpening(win, k * ps5video::kPictureW, k * ps5video::kPictureH);
 }
 
-bool RefitImage(Image* img, const ps5video::Rect& from, const ps5video::Rect& to, std::string* why)
+namespace
 {
-	if (img->w != kWidth || img->h != kHeight || img->px.size() != size_t(kWidth) * kHeight)
-	{
-		Fail(why, "the picture is not 1920 x 1080");
-		return false;
-	}
-	const int c = std::min({kOpeningCorner, from.w / 4, from.h / 4, to.w / 4, to.h / 4});
-	const int sx[6] = {0, from.x, from.x + c, from.x + from.w - c, from.x + from.w, kWidth};
-	const int dx[6] = {0, to.x, to.x + c, to.x + to.w - c, to.x + to.w, kWidth};
-	const int sy[6] = {0, from.y, from.y + c, from.y + from.h - c, from.y + from.h, kHeight};
-	const int dy[6] = {0, to.y, to.y + c, to.y + to.h - c, to.y + to.h, kHeight};
+// Fills the output rectangle the pieces cover (xp and yp are each in output order, without gaps) from 'in', bilinear.
+void Resample(const std::vector<uint32_t>& in, std::vector<uint32_t>* out, const std::vector<Piece>& xp, const std::vector<Piece>& yp)
+{
 	std::vector<Tap> tx, ty;
-	std::vector<uint32_t> out;
-	try
-	{
-		AxisTaps(sx, dx, kWidth, &tx);
-		AxisTaps(sy, dy, kHeight, &ty);
-		out.resize(img->px.size());
-	}
-	catch (const std::bad_alloc&)
-	{
-		Fail(why, "out of memory");
-		return false;
-	}
-	for (int y = 0; y < kHeight; y++)
+	AxisTaps(xp, kWidth, &tx);
+	AxisTaps(yp, kHeight, &ty);
+	for (int y = yp.front().d0; y < yp.back().d1; y++)
 	{
 		const Tap& v = ty[size_t(y)];
-		const uint32_t* r0 = &img->px[size_t(v.i0) * kWidth];
-		const uint32_t* r1 = &img->px[size_t(v.i1) * kWidth];
-		uint32_t* o = &out[size_t(y) * kWidth];
-		for (int x = 0; x < kWidth; x++)
+		const uint32_t* r0 = &in[size_t(v.i0) * kWidth];
+		const uint32_t* r1 = &in[size_t(v.i1) * kWidth];
+		uint32_t* o = &(*out)[size_t(y) * kWidth];
+		for (int x = xp.front().d0; x < xp.back().d1; x++)
 		{
 			const Tap& h = tx[size_t(x)];
 			if (h.f == 0 && v.f == 0)
@@ -219,6 +208,71 @@ bool RefitImage(Image* img, const ps5video::Rect& from, const ps5video::Rect& to
 			const uint32_t p[4] = {r0[h.i0], r0[h.i1], r1[h.i0], r1[h.i1]};
 			o[x] = Bilerp(p, h.f, v.f);
 		}
+	}
+}
+} // namespace
+
+bool RefitImage(Image* img, const ps5video::Rect& from, const ps5video::Rect& to, std::string* why)
+{
+	if (img->w != kWidth || img->h != kHeight || img->px.size() != size_t(kWidth) * kHeight)
+	{
+		Fail(why, "the picture is not 1920 x 1080");
+		return false;
+	}
+	const int c = std::min({kOpeningCorner, from.w / 4, from.h / 4, to.w / 4, to.h / 4});
+	// Each side margin is a panel of art, then a rim along the window that stays as drawn. The panel is never squeezed or
+	// stretched out of shape: a margin that grows scales its panel up evenly and crops it to the height (from the top on the
+	// left, from the bottom on the right: that is where covers keep their logos), one that shrinks shows the outer part of it
+	// as drawn. A margin no wider than the rim has no panel and is stretched as a whole.
+	const int from_r = kWidth - (from.x + from.w), to_r = kWidth - (to.x + to.w);
+	const bool panel_l = from.x > kOpeningRim && to.x > kOpeningRim;
+	const bool panel_r = from_r > kOpeningRim && to_r > kOpeningRim;
+	const int ps_l = from.x - kOpeningRim, pd_l = to.x - kOpeningRim; // panel widths in the art and in the result
+	const int ps_r = from_r - kOpeningRim, pd_r = to_r - kOpeningRim;
+	std::vector<Piece> xp, yp;
+	if (panel_l)
+		xp.push_back({pd_l, to.x, ps_l, from.x});
+	else
+		xp.push_back({0, to.x, 0, from.x});
+	xp.push_back({to.x, to.x + c, from.x, from.x + c});
+	xp.push_back({to.x + c, to.x + to.w - c, from.x + c, from.x + from.w - c});
+	xp.push_back({to.x + to.w - c, to.x + to.w, from.x + from.w - c, from.x + from.w});
+	if (panel_r)
+		xp.push_back({to.x + to.w, kWidth - pd_r, from.x + from.w, kWidth - ps_r});
+	else
+		xp.push_back({to.x + to.w, kWidth, from.x + from.w, kWidth});
+	if (panel_l)
+		xp.front().d0 = pd_l;
+	yp.push_back({0, to.y, 0, from.y});
+	yp.push_back({to.y, to.y + c, from.y, from.y + c});
+	yp.push_back({to.y + c, to.y + to.h - c, from.y + c, from.y + from.h - c});
+	yp.push_back({to.y + to.h - c, to.y + to.h, from.y + from.h - c, from.y + from.h});
+	yp.push_back({to.y + to.h, kHeight, from.y + from.h, kHeight});
+	std::vector<uint32_t> out;
+	try
+	{
+		out.resize(img->px.size());
+		Resample(img->px, &out, xp, yp);
+		auto rows_for = [](int panel_src, int panel_dst) { // the source rows a grown panel shows, to keep its shape
+			return std::min(kHeight, std::max(1, int((int64_t(kHeight) * panel_src + panel_dst / 2) / panel_dst)));
+		};
+		if (panel_l && pd_l > 0)
+		{
+			const bool grow = pd_l >= ps_l;
+			const int rows = grow ? rows_for(ps_l, pd_l) : kHeight;
+			Resample(img->px, &out, {{0, pd_l, 0, grow ? ps_l : pd_l}}, {{0, kHeight, 0, rows}});
+		}
+		if (panel_r && pd_r > 0)
+		{
+			const bool grow = pd_r >= ps_r;
+			const int rows = grow ? rows_for(ps_r, pd_r) : kHeight;
+			Resample(img->px, &out, {{kWidth - pd_r, kWidth, grow ? kWidth - ps_r : kWidth - pd_r, kWidth}}, {{0, kHeight, kHeight - rows, kHeight}});
+		}
+	}
+	catch (const std::bad_alloc&)
+	{
+		Fail(why, "out of memory");
+		return false;
 	}
 	img->px.swap(out);
 	return true;

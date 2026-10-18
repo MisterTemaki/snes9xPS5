@@ -513,15 +513,15 @@ It is saved as `border=0`, `1` or `2` in `snes9x-ps5.ini`. Changing it in the pa
 border is Off until you have seen it on your console: how it looks at 1080p and 720p and what it costs a frame with the
 shaders have only been tested on the Linux host, not on a PS5.
 
-**The window follows Aspect ratio.** Borders are drawn for a 4:3 picture, so the app stretches the art until its window has
-the shape you picked, and the picture fills it: **4:3** as drawn; **8:7 (pixel perfect)** a narrower window, the side art
-stretched wider; **Stretch 16:9** a wider window, the side art squeezed to 40% at most and the top and bottom art stretched
-taller (the picture is about 1712x963 instead of 1920x1080, the frame stays). The corners of the window stay as drawn.
-**Integer scale** cuts the window to the whole-multiple picture itself, 4x = 1024x896, so there is no black around it; the
-art around it is stretched to fit (the top and bottom art about 4x taller, the sides 1.7x wider for a typical 1398x1038 window),
-and a 239-line (PAL) picture fills the height of that window with thin bars at the sides instead of dropping to 3x.
-A window that already has the shape (within 3%) is not touched. It changes at once when you change Aspect ratio in
-the pause menu.
+**The window follows Aspect ratio.** Borders are drawn for a 4:3 picture, so the app refits the art until its window has the
+shape you picked, and the picture fills it: **4:3** as drawn; **8:7 (pixel perfect)** a narrower window; **Stretch 16:9** a
+wider window (the picture is about 1712x963 instead of 1920x1080, the frame stays); **Integer scale** a window exactly the
+whole-multiple picture, 4x = 1024x896, so there is no black around it. The art is not squeezed out of shape: the side art
+is scaled up evenly and cropped to the height when its margin grows (the left side from the top, the right side from the
+bottom, where covers keep their logos), and cut to its outer part when it shrinks; the 24 pixels along the window and the
+corners of the window stay as drawn, and only the thin top and bottom rims stretch. A 239-line (PAL) picture fills the height
+of an Integer window with thin bars at the sides instead of dropping to 3x. A window that already has the shape (within 3%)
+is not touched. It changes at once when you change Aspect ratio in the pause menu.
 
 **Your own borders.** Put PNG files in `/data/snes9x/borders` (over FTP, like the covers):
 
