@@ -73,6 +73,10 @@ smb2_encode_change_notify_request(struct smb2_context *smb2,
         }
 
         iov = smb2_add_iovector(smb2, &pdu->out, buf, len, free);
+        if (iov == NULL) {
+                smb2_set_error(smb2, "Failed to add iovector for change-notify request");
+                return -1;
+        }
 
         smb2_set_uint16(iov, 0, SMB2_CHANGE_NOTIFY_REQUEST_SIZE);
         smb2_set_uint16(iov, 2, req->flags);
@@ -125,6 +129,10 @@ smb2_encode_change_notify_reply(struct smb2_context *smb2,
         }
 
         iov = smb2_add_iovector(smb2, &pdu->out, buf, len, free);
+        if (iov == NULL) {
+                smb2_set_error(smb2, "Failed to add iovector for change-notify reply");
+                return -1;
+        }
 
         smb2_set_uint16(iov, 0, SMB2_CHANGE_NOTIFY_REPLY_SIZE);
         rep->output_buffer_offset = SMB2_HEADER_SIZE + SMB2_CHANGE_NOTIFY_REQUEST_SIZE;
@@ -147,6 +155,10 @@ smb2_encode_change_notify_reply(struct smb2_context *smb2,
                                         buf,
                                         len,
                                         free);
+        if (iov == NULL) {
+                smb2_set_error(smb2, "Failed to add iovector for change-notify output buffer");
+                return -1;
+        }
 
         if (smb2->passthrough) {
                 memcpy(buf, rep->output, rep->output_buffer_length);
@@ -215,6 +227,21 @@ smb2_process_change_notify_fixed(struct smb2_context *smb2,
 
         smb2_get_uint16(iov, 2, &rep->output_buffer_offset);
         smb2_get_uint32(iov, 4, &rep->output_buffer_length);
+
+        /* OutputBufferLength is returned to the receive loop as the size of
+         * the variable part, which mallocs that many bytes, so a hostile
+         * server could ask us for a ~2GB allocation from a 4 byte field.
+         * It has to describe data inside this PDU.
+         */
+        if (rep->output_buffer_length &&
+            ((uint64_t)rep->output_buffer_offset +
+             rep->output_buffer_length > (uint64_t)smb2->spl)) {
+                smb2_set_error(smb2, "Output buffer extends beyond end of "
+                               "PDU");
+                pdu->payload = NULL;
+                free(rep);
+                return -1;
+        }
 
         return rep->output_buffer_length;
 }

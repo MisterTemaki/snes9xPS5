@@ -84,8 +84,8 @@
 #include <sys/sysmacros.h>
 #endif
 
-#ifdef HAVE_GETPWNAM
-#include <pwd.h>
+#ifdef WIN32
+#include <win32/win32_compat.h>
 #endif
 
 #include <ctype.h>
@@ -105,6 +105,22 @@
 #include "libnfs-raw.h"
 #include "libnfs-raw-nfs4.h"
 #include "libnfs-private.h"
+
+/*
+ * Naming convention in this file:
+ *
+ *   nfs4_*   works for every NFSv4 minor version
+ *   nfs40_*  an NFSv4.0 only operation. SETCLIENTID, SETCLIENTID_CONFIRM and
+ *            OPEN_CONFIRM do not exist from minor version 1 onwards. Internal
+ *            callbacks are not marked, only the operations themselves.
+ *   nfs42_*  NFSv4.2 only, built only when HAVE_NFS4_2 is defined.
+ *
+ * Every op array in this file is deliberately declared one element larger
+ * than the operations put into it. From minor version 1 onwards a COMPOUND
+ * must lead with SEQUENCE, and nfs4_start_compound() places it there; the
+ * spare element is what it uses. It simply goes unused under NFSv4.0, which
+ * costs one stack slot and keeps the sizes uniform rather than conditional.
+ */
 
 #ifndef discard_const
 #define discard_const(ptr) ((void *)((intptr_t)(ptr)))
@@ -152,7 +168,25 @@ struct nfs4_cb_data {
  */
 #define LOOKUP_FLAG_NO_FOLLOW    0x0001
 #define LOOKUP_FLAG_IS_STATVFS64 0x0002
+/*
+ * Operate on the named attribute directory of the file the path names,
+ * rather than on the file itself. OPENATTR is placed after the path has been
+ * resolved, which leaves the attribute directory as the current filehandle,
+ * so every operation that follows applies to it. _CREATE asks the server to
+ * create the directory if the file does not have one yet.
+ */
+#define LOOKUP_FLAG_OPENATTR     0x0010
+#define LOOKUP_FLAG_OPENATTR_CREATE 0x0020
+/*
+ * Every flag above lives in the same word as this one, so none of them may
+ * reuse its bit. It used to share 0x0004 with LOOKUP_FLAG_OPENATTR, which
+ * made an open taken under the open semaphore look like a request for the
+ * named attribute directory, and made a named attribute call post a
+ * semaphore it never waited on.
+ */
 #define MUTEX_HELD               0x0004
+/* Return a struct nfs4_stat_64 to the callback instead of nfs_stat_64. */
+#define STAT64_FLAG_NFS4         0x0040
         int flags;
 
         /* Internal callback for open-with-continuation use */
@@ -181,11 +215,13 @@ struct nfs4_cb_data {
 static uint32_t standard_attributes[2] = {
         (1 << FATTR4_TYPE |
          1 << FATTR4_SIZE |
+         1 << FATTR4_FSID |
          1 << FATTR4_FILEID),
         (1 << (FATTR4_MODE - 32) |
          1 << (FATTR4_NUMLINKS - 32) |
          1 << (FATTR4_OWNER - 32) |
          1 << (FATTR4_OWNER_GROUP - 32) |
+         1 << (FATTR4_RAWDEV - 32) |
          1 << (FATTR4_SPACE_USED - 32) |
          1 << (FATTR4_TIME_ACCESS - 32) |
          1 << (FATTR4_TIME_METADATA - 32) |
@@ -204,6 +240,16 @@ static uint32_t statvfs_attributes[2] = {
 
 static uint32_t getacl_attributes[1] = {
         (1 << FATTR4_ACL )
+};
+
+static uint32_t rwmax_attributes[1] = {
+        (1u << FATTR4_MAXREAD |
+         1u << FATTR4_MAXWRITE )
+};
+static uint32_t rwmax_lease_attributes[1] = {
+        (1u << FATTR4_LEASE_TIME |
+         1u << FATTR4_MAXREAD |
+         1u << FATTR4_MAXWRITE)
 };
 
 static int
@@ -249,7 +295,7 @@ free_nfs4_cb_data(struct nfs4_cb_data *data)
 {
 #ifdef HAVE_MULTITHREADING
         if (data->flags & MUTEX_HELD) {
-                nfs_mt_mutex_unlock(&data->nfs->nfsi->nfs4_open_call_mutex);
+                nfs_mt_sem_post(&data->nfs->nfsi->nfs4_open_call_sem);
         }
 #endif        
         free(data->path);
@@ -355,7 +401,7 @@ check_nfs4_error(struct nfs_context *nfs, int status,
                               data->path,
                               nfsstat4_to_str(res->status),
                               nfsstat4_to_errno(res->status));
-                data->cb(nfsstat3_to_errno(res->status), nfs,
+                data->cb(nfsstat4_to_errno(res->status), nfs,
                          nfs_get_error(nfs), data->private_data);
                 free_nfs4_cb_data(data);
                 return 1;
@@ -426,34 +472,29 @@ nfs_pntoh64(const uint32_t *buf)
         return val;
 }
 
-static int
-nfs_get_ugid(struct nfs_context *nfs, const char *buf, int slen, int is_user)
+/* A numeric owner/group is the id itself, a name has no id and becomes -1. */
+static uint64_t
+nfs_get_ugid(const char *buf, int slen)
 {
-        int ugid = 0;
-        const char *name = buf;
+        uint64_t ugid = 0;
+        int i;
 
-        while (slen) {
-                if (isdigit(*buf)) {
-                        ugid *= 10;
-                        ugid += *buf - '0';
-                } else {
-#ifdef HAVE_GETPWNAM
-                        struct passwd *pwd = getpwnam(name);
-                        if (pwd) {
-                                if (is_user) {
-                                        return pwd->pw_uid;
-                                } else {
-                                        return pwd->pw_gid;
-                                }
-                        }
-#else
-			(void) name; // Let the compiler know that this variable is intentionally unused, build would fail with -Werror=unused-variable otherwise
-#endif
-                        return 65534;
-                }
-                buf++;
-                slen--;
+        if (slen <= 0) {
+                return (uint64_t)-1;
         }
+
+        for (i = 0; i < slen; i++) {
+                /* isdigit() takes an unsigned char value or EOF. */
+                if (!isdigit((unsigned char)buf[i])) {
+                        return (uint64_t)-1;
+                }
+                ugid = ugid * 10 + (uint64_t)(buf[i] - '0');
+                /* Out of range for a uid/gid, so it is not an id at all. */
+                if (ugid > UINT32_MAX) {
+                        return (uint64_t)-1;
+                }
+        }
+
         return ugid;
 }
 
@@ -463,32 +504,70 @@ nfs_get_ugid(struct nfs_context *nfs, const char *buf, int slen, int is_user)
         return -1;                                                      \
     }
 
+static uint64_t
+specdata4_to_rdev(uint32_t *specdata)
+{
+        uint64_t rdev = ntohl(specdata[0]);
+        return (rdev << 32) | ntohl(specdata[1]);
+}
+
+/*
+ * The server returns the attributes it chose to return, which need not be the
+ * ones we asked for, and it tells us which in the attrmask. Decoding the blob
+ * as if it always held the full standard set silently shifted every later
+ * field when a server returned fewer.
+ */
+static int
+nfs4_attr_is_set(const bitmap4 *mask, int bit)
+{
+        if ((uint32_t)(bit / 32) >= mask->bitmap4_len) {
+                return 0;
+        }
+        return !!(mask->bitmap4_val[bit / 32] & (1U << (bit % 32)));
+}
+
 static int
 nfs_parse_attributes(struct nfs_context *nfs, struct nfs4_cb_data *data,
-                     struct nfs_stat_64 *st, const char *buf, int len)
+                     struct nfs_stat_64 *st, char **user, char **group,
+                     const bitmap4 *mask, const char *buf, int len)
 {
-        int type, slen, pad;
+        int type = 0, slen, pad;
 
         /* Type */
-        CHECK_GETATTR_BUF_SPACE(len, 4);
-        type = ntohl(*(uint32_t *)(void *)buf);
-        buf += 4;
-        len -= 4;
+        if (nfs4_attr_is_set(mask, FATTR4_TYPE)) {
+                CHECK_GETATTR_BUF_SPACE(len, 4);
+                type = ntohl(*(uint32_t *)(void *)buf);
+                buf += 4;
+                len -= 4;
+        }
         /* Size */
-        CHECK_GETATTR_BUF_SPACE(len, 8);
-        st->nfs_size = nfs_pntoh64((uint32_t *)(void *)buf);
-        buf += 8;
-        len -= 8;
+        if (nfs4_attr_is_set(mask, FATTR4_SIZE)) {
+                CHECK_GETATTR_BUF_SPACE(len, 8);
+                st->nfs_size = nfs_pntoh64((uint32_t *)(void *)buf);
+                buf += 8;
+                len -= 8;
+        }
+        /* FSID */
+        if (nfs4_attr_is_set(mask, FATTR4_FSID)) {
+                CHECK_GETATTR_BUF_SPACE(len, 16);
+                st->nfs_dev = ((uint64_t *)(void *)buf)[0] ^ ((uint64_t *)(void *)buf)[1];
+                buf += 16;
+                len -= 16;
+        }
         /* Inode */
-        CHECK_GETATTR_BUF_SPACE(len, 8);
-        st->nfs_ino = nfs_pntoh64((uint32_t *)(void *)buf);
-        buf += 8;
-        len -= 8;
+        if (nfs4_attr_is_set(mask, FATTR4_FILEID)) {
+                CHECK_GETATTR_BUF_SPACE(len, 8);
+                st->nfs_ino = nfs_pntoh64((uint32_t *)(void *)buf);
+                buf += 8;
+                len -= 8;
+        }
         /* Mode */
-        CHECK_GETATTR_BUF_SPACE(len, 4);
-        st->nfs_mode = ntohl(*(uint32_t *)(void *)buf);
-        buf += 4;
-        len -= 4;
+        if (nfs4_attr_is_set(mask, FATTR4_MODE)) {
+                CHECK_GETATTR_BUF_SPACE(len, 4);
+                st->nfs_mode = ntohl(*(uint32_t *)(void *)buf);
+                buf += 4;
+                len -= 4;
+        }
         switch (type) {
         case NF4REG:
                 st->nfs_mode |= S_IFREG;
@@ -515,63 +594,106 @@ nfs_parse_attributes(struct nfs_context *nfs, struct nfs4_cb_data *data,
                 break;
         }
         /* Num Links */
-        CHECK_GETATTR_BUF_SPACE(len, 4);
-        st->nfs_nlink = ntohl(*(uint32_t *)(void *)buf);
-        buf += 4;
-        len -= 4;
+        if (nfs4_attr_is_set(mask, FATTR4_NUMLINKS)) {
+                CHECK_GETATTR_BUF_SPACE(len, 4);
+                st->nfs_nlink = ntohl(*(uint32_t *)(void *)buf);
+                buf += 4;
+                len -= 4;
+        }
         /* Owner */
-        CHECK_GETATTR_BUF_SPACE(len, 4);
-        slen = ntohl(*(uint32_t *)(void *)buf);
-        buf += 4;
-        len -= 4;
-        pad = (4 - (slen & 0x03)) & 0x03;
-        CHECK_GETATTR_BUF_SPACE(len, slen);
-        st->nfs_uid = nfs_get_ugid(nfs, buf, slen, 1);
-        buf += slen;
-        CHECK_GETATTR_BUF_SPACE(len, pad);
-        buf += pad;
-        len -= pad;
+        if (nfs4_attr_is_set(mask, FATTR4_OWNER)) {
+                CHECK_GETATTR_BUF_SPACE(len, 4);
+                slen = ntohl(*(uint32_t *)(void *)buf);
+                if (slen < 0) {
+                        return -1;
+                }
+                buf += 4;
+                len -= 4;
+                pad = (4 - (slen & 0x03)) & 0x03;
+                CHECK_GETATTR_BUF_SPACE(len, slen);
+                st->nfs_uid = nfs_get_ugid(buf, slen);
+                if (user) {
+                        *user = strndup(buf, slen);
+                        if (*user == NULL) {
+                                nfs_set_error(nfs, "Out of memory.");
+                                return -1;
+                        }
+                }
+                buf += slen;
+                len -= slen;
+                CHECK_GETATTR_BUF_SPACE(len, pad);
+                buf += pad;
+                len -= pad;
+        }
         /* Group */
-        CHECK_GETATTR_BUF_SPACE(len, 4);
-        slen = ntohl(*(uint32_t *)(void *)buf);
-        buf += 4;
-        len -= 4;
-        pad = (4 - (slen & 0x03)) & 0x03;
-        CHECK_GETATTR_BUF_SPACE(len, slen);
-        st->nfs_gid = nfs_get_ugid(nfs, buf, slen, 0);
-        buf += slen;
-        CHECK_GETATTR_BUF_SPACE(len, pad);
-        buf += pad;
-        len -= pad;
+        if (nfs4_attr_is_set(mask, FATTR4_OWNER_GROUP)) {
+                CHECK_GETATTR_BUF_SPACE(len, 4);
+                slen = ntohl(*(uint32_t *)(void *)buf);
+                if (slen < 0) {
+                        return -1;
+                }
+                buf += 4;
+                len -= 4;
+                pad = (4 - (slen & 0x03)) & 0x03;
+                CHECK_GETATTR_BUF_SPACE(len, slen);
+                st->nfs_gid = nfs_get_ugid(buf, slen);
+                if (group) {
+                        *group = strndup(buf, slen);
+                        if (*group == NULL) {
+                                nfs_set_error(nfs, "Out of memory.");
+                                return -1;
+                        }
+                }
+                buf += slen;
+                len -= slen;
+                CHECK_GETATTR_BUF_SPACE(len, pad);
+                buf += pad;
+                len -= pad;
+        }
+        /* raw device */
+        if (nfs4_attr_is_set(mask, FATTR4_RAWDEV)) {
+                CHECK_GETATTR_BUF_SPACE(len, 8);
+                st->nfs_rdev = specdata4_to_rdev((uint32_t *)(void *)buf);
+                buf += 8;
+                len -= 8;
+        }
         /* Space Used */
-        CHECK_GETATTR_BUF_SPACE(len, 8);
-        st->nfs_used = nfs_pntoh64((uint32_t *)(void *)buf);
-        buf += 8;
-        len -= 8;
+        if (nfs4_attr_is_set(mask, FATTR4_SPACE_USED)) {
+                CHECK_GETATTR_BUF_SPACE(len, 8);
+                st->nfs_used = nfs_pntoh64((uint32_t *)(void *)buf);
+                buf += 8;
+                len -= 8;
+        }
         /* ATime */
-        CHECK_GETATTR_BUF_SPACE(len, 12);
-        st->nfs_atime = nfs_pntoh64((uint32_t *)(void *)buf);
-        buf += 8;
-        len -= 8;
-        st->nfs_atime_nsec = ntohl(*(uint32_t *)(void *)buf);
-        buf += 4;
-        len -= 4;
+        if (nfs4_attr_is_set(mask, FATTR4_TIME_ACCESS)) {
+                CHECK_GETATTR_BUF_SPACE(len, 12);
+                st->nfs_atime = nfs_pntoh64((uint32_t *)(void *)buf);
+                buf += 8;
+                len -= 8;
+                st->nfs_atime_nsec = ntohl(*(uint32_t *)(void *)buf);
+                buf += 4;
+                len -= 4;
+        }
         /* CTime */
-        CHECK_GETATTR_BUF_SPACE(len, 12);
-        st->nfs_ctime = nfs_pntoh64((uint32_t *)(void *)buf);
-        buf += 8;
-        len -= 8;
-        st->nfs_ctime_nsec = ntohl(*(uint32_t *)(void *)buf);
-        buf += 4;
-        len -= 4;
+        if (nfs4_attr_is_set(mask, FATTR4_TIME_METADATA)) {
+                CHECK_GETATTR_BUF_SPACE(len, 12);
+                st->nfs_ctime = nfs_pntoh64((uint32_t *)(void *)buf);
+                buf += 8;
+                len -= 8;
+                st->nfs_ctime_nsec = ntohl(*(uint32_t *)(void *)buf);
+                buf += 4;
+                len -= 4;
+        }
         /* MTime */
-        CHECK_GETATTR_BUF_SPACE(len, 12);
-        st->nfs_mtime = nfs_pntoh64((uint32_t *)(void *)buf);
-        buf += 8;
-        len -= 8;
-        st->nfs_mtime_nsec = ntohl(*(uint32_t *)(void *)buf);
-        buf += 4;
-        len -= 4;
+        if (nfs4_attr_is_set(mask, FATTR4_TIME_MODIFY)) {
+                CHECK_GETATTR_BUF_SPACE(len, 12);
+                st->nfs_mtime = nfs_pntoh64((uint32_t *)(void *)buf);
+                buf += 8;
+                len -= 8;
+                st->nfs_mtime_nsec = ntohl(*(uint32_t *)(void *)buf);
+                buf += 4;
+                len -= 4;
+        }
 
         st->nfs_blksize = NFS_BLKSIZE;
         st->nfs_blocks  = (st->nfs_used + NFS_BLKSIZE -1) / NFS_BLKSIZE;
@@ -680,7 +802,7 @@ nfs4_op_access(struct nfs_context *nfs, nfs_argop4 *op, uint32_t access_mask)
 }
 
 static int
-nfs4_op_setclientid(struct nfs_context *nfs, nfs_argop4 *op, verifier4 verifier,
+nfs40_op_setclientid(struct nfs_context *nfs, nfs_argop4 *op, verifier4 verifier,
                     const char *client_name)
 {
         SETCLIENTID4args *scidargs;
@@ -708,7 +830,7 @@ nfs4_op_setclientid(struct nfs_context *nfs, nfs_argop4 *op, verifier4 verifier,
 }
 
 static int
-nfs4_op_open_confirm(struct nfs_context *nfs, nfs_argop4 *op, struct nfsfh *fh)
+nfs40_op_open_confirm(struct nfs_context *nfs, nfs_argop4 *op, struct nfsfh *fh)
 {
         OPEN_CONFIRM4args *ocargs;
 
@@ -892,6 +1014,15 @@ nfs4_op_write(struct nfs_context *nfs, nfs_argop4 *op, struct nfsfh *fh,
 }
 
 static int
+nfs4_op_openattr(struct nfs_context *nfs _U_, nfs_argop4 *op, int createdir)
+{
+        op[0].argop = OP_OPENATTR;
+        op[0].nfs_argop4_u.opopenattr.createdir = createdir;
+
+        return 1;
+}
+
+static int
 nfs4_op_getfh(struct nfs_context *nfs, nfs_argop4 *op)
 {
         op[0].argop = OP_GETFH;
@@ -1032,7 +1163,7 @@ nfs4_op_lookup(struct nfs_context *nfs, nfs_argop4 *op, const char *path)
 }
 
 static int
-nfs4_op_setclientid_confirm(struct nfs_context *nfs, struct nfs_argop4 *op,
+nfs40_op_setclientid_confirm(struct nfs_context *nfs, struct nfs_argop4 *op,
                             uint64_t clientid, verifier4 verifier)
 {
         SETCLIENTID_CONFIRM4args *scidcargs;
@@ -1100,6 +1231,230 @@ nfs4_op_getattr(struct nfs_context *nfs, nfs_argop4 *op,
  *  <idx> : On success. Idx represents the next free index in op.
  *          Caller must free op.
  */
+#ifdef HAVE_NFS4_2
+/*
+ * NFSv4.2 session establishment.
+ *
+ * From minor version 1 onwards a client does not SETCLIENTID. It presents a
+ * client owner to EXCHANGE_ID to get a clientid, turns that into a session
+ * with CREATE_SESSION, and tells the server it has no state to reclaim with
+ * RECLAIM_COMPLETE. Only then can it send ordinary COMPOUNDs, each of which
+ * must lead with SEQUENCE.
+ */
+static int
+nfs42_op_exchange_id(struct nfs_context *nfs, nfs_argop4 *op)
+{
+        EXCHANGE_ID4args *eiargs;
+
+        op[0].argop = OP_EXCHANGE_ID;
+        eiargs = &op[0].nfs_argop4_u.opexchangeid;
+
+        memcpy(eiargs->eia_clientowner.co_verifier, nfs->nfsi->verifier,
+               sizeof(verifier4));
+        eiargs->eia_clientowner.co_ownerid.co_ownerid_len =
+                strlen(nfs->nfsi->client_name);
+        eiargs->eia_clientowner.co_ownerid.co_ownerid_val =
+                nfs->nfsi->client_name;
+
+        /*
+         * We are not a pNFS client and we do not do state protection, so the
+         * flags are empty and spa_how is SP4_NONE.
+         */
+        eiargs->eia_flags = 0;
+        eiargs->eia_state_protect.spa_how = SP4_NONE;
+        eiargs->eia_client_impl_id.eia_client_impl_id_len = 0;
+        eiargs->eia_client_impl_id.eia_client_impl_id_val = NULL;
+
+        return 1;
+}
+
+static int
+nfs42_op_create_session(struct nfs_context *nfs, nfs_argop4 *op,
+                        clientid4 clientid, sequenceid4 seqid)
+{
+        CREATE_SESSION4args *csargs;
+
+        op[0].argop = OP_CREATE_SESSION;
+        csargs = &op[0].nfs_argop4_u.opcreatesession;
+
+        csargs->csa_clientid = clientid;
+        csargs->csa_sequence = seqid;
+        csargs->csa_flags = 0;
+
+        /*
+         * ca_maxrequests is the size of the slot table, which is how many
+         * COMPOUNDs may be in flight at once. Ask for the most we are willing
+         * to track; the server may grant fewer and we use what it grants.
+         */
+        csargs->csa_fore_chan_attrs.ca_headerpadsize = 0;
+        /*
+         * These bound a single RPC on the wire, so they are the record limits
+         * rather than NFS_MAX_XFER_SIZE, which is the ceiling on a WRITE
+         * payload assembled from the caller's own buffers.
+         */
+        csargs->csa_fore_chan_attrs.ca_maxrequestsize = MAX_FRAGMENT_SIZE;
+        csargs->csa_fore_chan_attrs.ca_maxresponsesize = NFS_MAX_RECV_XFER_SIZE;
+        csargs->csa_fore_chan_attrs.ca_maxresponsesize_cached = 0;
+        csargs->csa_fore_chan_attrs.ca_maxoperations = 64;
+        csargs->csa_fore_chan_attrs.ca_maxrequests = NFS4_MAX_SLOTS;
+        csargs->csa_fore_chan_attrs.ca_rdma_ird.ca_rdma_ird_len = 0;
+        csargs->csa_fore_chan_attrs.ca_rdma_ird.ca_rdma_ird_val = NULL;
+
+        /*
+         * We run no back channel, but the server still validates the sizes we
+         * offer for it, so they have to be plausible rather than zero.
+         */
+        csargs->csa_back_chan_attrs = csargs->csa_fore_chan_attrs;
+
+        csargs->csa_cb_program = 0;
+        csargs->csa_sec_parms.csa_sec_parms_len = 0;
+        csargs->csa_sec_parms.csa_sec_parms_val = NULL;
+
+        return 1;
+}
+
+static int
+nfs42_op_reclaim_complete(struct nfs_context *nfs _U_, nfs_argop4 *op)
+{
+        op[0].argop = OP_RECLAIM_COMPLETE;
+        /* Nothing to reclaim, and this is about the whole client, not one fs */
+        op[0].nfs_argop4_u.opreclaimcomplete.rca_one_fs = 0;
+
+        return 1;
+}
+
+static int
+nfs42_op_allocate(struct nfs_context *nfs _U_, nfs_argop4 *op,
+                  struct nfsfh *fh, uint64_t offset, uint64_t length)
+{
+        ALLOCATE4args *aaargs;
+
+        op[0].argop = OP_ALLOCATE;
+        aaargs = &op[0].nfs_argop4_u.opallocate;
+
+        aaargs->aa_stateid.seqid = fh->stateid.seqid;
+        memcpy(aaargs->aa_stateid.other, fh->stateid.other, 12);
+        aaargs->aa_offset = offset;
+        aaargs->aa_length = length;
+
+        return 1;
+}
+
+static int
+nfs42_op_deallocate(struct nfs_context *nfs _U_, nfs_argop4 *op,
+                    struct nfsfh *fh, uint64_t offset, uint64_t length)
+{
+        DEALLOCATE4args *daargs;
+
+        op[0].argop = OP_DEALLOCATE;
+        daargs = &op[0].nfs_argop4_u.opdeallocate;
+
+        daargs->da_stateid.seqid = fh->stateid.seqid;
+        memcpy(daargs->da_stateid.other, fh->stateid.other, 12);
+        daargs->da_offset = offset;
+        daargs->da_length = length;
+
+        return 1;
+}
+
+static int
+nfs42_op_read_plus(struct nfs_context *nfs _U_, nfs_argop4 *op,
+                   struct nfsfh *fh, uint64_t offset, uint32_t count)
+{
+        READ_PLUS4args *rpargs;
+
+        op[0].argop = OP_READ_PLUS;
+        rpargs = &op[0].nfs_argop4_u.opreadplus;
+
+        rpargs->rpa_stateid.seqid = fh->stateid.seqid;
+        memcpy(rpargs->rpa_stateid.other, fh->stateid.other, 12);
+        rpargs->rpa_offset = offset;
+        rpargs->rpa_count = count;
+
+        return 1;
+}
+
+static int
+nfs42_op_write_same(struct nfs_context *nfs _U_, nfs_argop4 *op,
+                    struct nfsfh *fh, app_data_block4 *adb, int stable)
+{
+        WRITE_SAME4args *wsargs;
+
+        op[0].argop = OP_WRITE_SAME;
+        wsargs = &op[0].nfs_argop4_u.opwritesame;
+
+        wsargs->wsa_stateid.seqid = fh->stateid.seqid;
+        memcpy(wsargs->wsa_stateid.other, fh->stateid.other, 12);
+        wsargs->wsa_stable = stable ? FILE_SYNC4 : UNSTABLE4;
+        wsargs->wsa_adb = *adb;
+
+        return 1;
+}
+
+static int
+nfs42_op_seek(struct nfs_context *nfs _U_, nfs_argop4 *op, struct nfsfh *fh,
+              uint64_t offset, data_content4 what)
+{
+        SEEK4args *sargs;
+
+        op[0].argop = OP_SEEK;
+        sargs = &op[0].nfs_argop4_u.opseek;
+
+        sargs->sa_stateid.seqid = fh->stateid.seqid;
+        memcpy(sargs->sa_stateid.other, fh->stateid.other, 12);
+        sargs->sa_offset = offset;
+        sargs->sa_what = what;
+
+        return 1;
+}
+
+/*
+ * Reserve the leading SEQUENCE. Which slot it uses and what sequence id goes
+ * in it are decided later, by nfs4_pdu_take_slot() in nfs4/nfs4.c, as the
+ * COMPOUND is written to the socket. A slot is held for as long as its
+ * request is outstanding, so binding one here would cap how many requests an
+ * application may have queued at the number of slots the session has.
+ */
+static int
+nfs42_op_sequence(struct nfs_context *nfs _U_, nfs_argop4 *op)
+{
+        op[0].argop = OP_SEQUENCE;
+        memset(&op[0].nfs_argop4_u.opsequence, 0, sizeof(SEQUENCE4args));
+
+        return 1;
+}
+#endif /* HAVE_NFS4_2 */
+
+/*
+ * Open a COMPOUND.
+ *
+ * From minor version 1 onwards every COMPOUND must lead with SEQUENCE, and
+ * NFSv4.0 has no such operation. Callers begin their op array with this and
+ * use the returned count as their starting index, so the difference lives
+ * here instead of at each of the two dozen places that build a COMPOUND.
+ *
+ * The bootstrap COMPOUNDs are the exception and deliberately do not call
+ * this: SETCLIENTID and SETCLIENTID_CONFIRM in 4.0, and EXCHANGE_ID and
+ * CREATE_SESSION in 4.2, all run before there is a session to sequence
+ * against.
+ */
+static int
+nfs4_start_compound(struct nfs_context *nfs, nfs_argop4 *op)
+{
+#ifdef HAVE_NFS4_2
+        /*
+         * Only once the session exists. The COMPOUNDs that build it run
+         * before there is anything to sequence against.
+         */
+        if (nfs->nfsi->version == NFS_V4_2 && nfs->rpc->nfs4_session_valid) {
+                return nfs42_op_sequence(nfs, op);
+        }
+#endif /* HAVE_NFS4_2 */
+        (void)nfs;
+        (void)op;
+        return 0;
+}
+
 static int
 nfs4_allocate_op(struct nfs_context *nfs, nfs_argop4 **op,
                  char *path, int num_extra)
@@ -1111,13 +1466,21 @@ nfs4_allocate_op(struct nfs_context *nfs, nfs_argop4 **op,
 
         count = nfs4_num_path_components(nfs, path);
 
-        *op = malloc(sizeof(**op) * (2 + 2 * count + num_extra));
+        /*
+         * The array holds a leading SEQUENCE for NFSv4.2, the PUTFH or
+         * PUTROOTFH, one LOOKUP per path component, the trailing GETATTR, and
+         * whatever the caller said it would add on top. That is exact rather
+         * than generous: NFSv4.0 leaves one entry spare where 4.2 puts its
+         * SEQUENCE, so a caller that adds more than num_extra operations
+         * overruns this.
+         */
+        *op = malloc(sizeof(**op) * (3 + count + num_extra));
         if (*op == NULL) {
                 nfs_set_error(nfs, "Failed to allocate op array");
                 return -1;
         }
 
-        i = 0;
+        i = nfs4_start_compound(nfs, *op);
         if (nfs->nfsi->rootfh.len) {
                 struct nfsfh fh;
 
@@ -1181,6 +1544,18 @@ nfs4_lookup_path_2_cb(struct rpc_context *rpc, int status, void *command_data,
         tmp = &path[0];
         while (data->link.idx-- > 1) {
                 tmp = strchr(tmp + 1, '/');
+                /*
+                 * link.idx is counted from the server's result array, so it
+                 * can name more components than the path actually has.
+                 */
+                if (tmp == NULL) {
+                        nfs_set_error(nfs, "Symlink index does not match path.");
+                        data->cb(-EFAULT, nfs, nfs_get_error(nfs),
+                                 data->private_data);
+                        free_nfs4_cb_data(data);
+                        free(path);
+                        return;
+                }
         }
         *tmp++ = 0;
         end = strchr(tmp, '/');
@@ -1208,7 +1583,7 @@ nfs4_lookup_path_2_cb(struct rpc_context *rpc, int status, void *command_data,
         }
 
         sprintf(tmp, "%s/%.*s/%s",
-                path, rlres->READLINK4res_u.resok4.link.utf8string_len,
+                path, (int)rlres->READLINK4res_u.resok4.link.utf8string_len,
                 rlres->READLINK4res_u.resok4.link.utf8string_val, end);
         free(path);
         free(data->path);
@@ -1264,7 +1639,7 @@ nfs4_lookup_path_1_cb(struct rpc_context *rpc, int status, void *command_data,
                               data->path,
                               nfsstat4_to_str(res->status),
                               nfsstat4_to_errno(res->status));
-                data->cb(nfsstat3_to_errno(res->status), nfs,
+                data->cb(nfsstat4_to_errno(res->status), nfs,
                          nfs_get_error(nfs), data->private_data);
                 free_nfs4_cb_data(data);
                 return;
@@ -1278,7 +1653,8 @@ nfs4_lookup_path_1_cb(struct rpc_context *rpc, int status, void *command_data,
                         garesok = &res->resarray.resarray_val[i].nfs_resop4_u.opgetattr.GETATTR4res_u.resok4;
 
                         memset(&st, 0, sizeof(st));
-                        if (nfs_parse_attributes(nfs, data, &st,
+                        if (nfs_parse_attributes(nfs, data, &st, NULL, NULL,
+                                 &garesok->obj_attributes.attrmask,
                                  garesok->obj_attributes.attr_vals.attrlist4_val,
                                  garesok->obj_attributes.attr_vals.attrlist4_len) < 0) {
                                 data->cb(-EINVAL, nfs, nfs_get_error(nfs), data->private_data);
@@ -1360,6 +1736,19 @@ nfs4_lookup_path_1_cb(struct rpc_context *rpc, int status, void *command_data,
                 tmp = path;
                 for (i = 0; i < (int)data->link.idx; i++) {
                         tmp = strchr(tmp + 1, '/');
+                        /*
+                         * link.idx is counted from the server's result array,
+                         * so it can name more components than the path has.
+                         */
+                        if (tmp == NULL) {
+                                nfs_set_error(nfs, "Symlink index does not "
+                                              "match path.");
+                                data->cb(-EFAULT, nfs, nfs_get_error(nfs),
+                                         data->private_data);
+                                free_nfs4_cb_data(data);
+                                free(path);
+                                return;
+                        }
                 }
                 *tmp = 0;
         }
@@ -1386,9 +1775,11 @@ nfs4_lookup_path_1_cb(struct rpc_context *rpc, int status, void *command_data,
                 data->cb(-ENOMEM, nfs, nfs_get_error(nfs), data->private_data);
                 free_nfs4_cb_data(data);
                 free(path);
+                free(op);
                 return;
         }
         free(path);
+        free(op);
 }
 
 static int
@@ -1413,12 +1804,31 @@ nfs4_lookup_path_async(struct nfs_context *nfs,
                 return -1;
         }
 
-        if ((i = nfs4_allocate_op(nfs, &op, path, data->filler.max_op)) < 0) {
+        if ((i = nfs4_allocate_op(nfs, &op, path,
+                                  data->filler.max_op +
+                                  ((data->flags & LOOKUP_FLAG_OPENATTR) ?
+                                   1 : 0))) < 0) {
                 free(path);
                 return -1;
         }
 
+        /*
+         * Switch to the named attribute directory of whatever the path
+         * resolved to, so the operations the filler adds land there.
+         */
+        if (data->flags & LOOKUP_FLAG_OPENATTR) {
+                i += nfs4_op_openattr(nfs, &op[i],
+                                      !!(data->flags &
+                                         LOOKUP_FLAG_OPENATTR_CREATE));
+        }
+
         num_op = data->filler.func(data, &op[i]);
+        /*
+         * nfs4_allocate_op() sized the array from max_op, so a filler that
+         * returns more than it promised has already written past the end of
+         * it. Catch that here rather than letting it corrupt the heap.
+         */
+        assert(num_op <= data->filler.max_op);
         data->continue_cb = cb;
 
         memset(&args, 0, sizeof(args));
@@ -1428,7 +1838,7 @@ nfs4_lookup_path_async(struct nfs_context *nfs,
         if (rpc_nfs4_compound_task(nfs->rpc, nfs4_lookup_path_1_cb, &args,
                                    data) == NULL) {
                 nfs_set_error(nfs, "Failed to queue LOOKUP command. %s",
-                              nfs_get_error(nfs));
+                              rpc_get_error(nfs->rpc));
                 free(path);
                 free(op);
                 return -1;
@@ -1461,6 +1871,115 @@ nfs4_populate_access(struct nfs4_cb_data *data, nfs_argop4 *op)
         return nfs4_op_access(data->nfs, op, mode);
 }
 
+
+int
+nfs4_parse_mount_rwmax(struct nfs_context *nfs, GETATTR4resok *attrs,
+                        uint32_t *lease_seconds)
+{
+        const char *buf = attrs->obj_attributes.attr_vals.attrlist4_val;
+        int len = attrs->obj_attributes.attr_vals.attrlist4_len;
+        uint32_t lease;
+
+        if (buf == NULL) {
+                nfs_set_error(nfs, "NFSv4 mount: missing transfer attributes");
+                return -1;
+        }
+
+        if (nfs->nfsi->version == NFS_V4) {
+                bitmap4 *mask = &attrs->obj_attributes.attrmask;
+                uint32_t wire_lease;
+                uint32_t w;
+
+                if (mask->bitmap4_len < 1 || mask->bitmap4_val == NULL) {
+                        nfs_set_error(nfs, "NFSv4.0 mount: invalid lease_time attributes");
+                        return -1;
+                }
+                /* Trailing zero words are legal padding. */
+                for (w = 1; w < mask->bitmap4_len; w++) {
+                        if (mask->bitmap4_val[w]) {
+                                break;
+                        }
+                }
+                if (w < mask->bitmap4_len ||
+                    mask->bitmap4_val[0] != rwmax_lease_attributes[0] ||
+                    len != 20) {
+                        nfs_set_error(nfs, "NFSv4.0 mount: invalid lease_time attributes");
+                        return -1;
+                }
+                memcpy(&wire_lease, buf, sizeof(wire_lease));
+                lease = ntohl(wire_lease);
+                if (lease == 0) {
+                        nfs_set_error(nfs, "NFSv4.0 mount: zero lease_time");
+                        return -1;
+                }
+                *lease_seconds = lease;
+                buf += 4;
+                len -= 4;
+        }
+        /* READ MAX */
+        CHECK_GETATTR_BUF_SPACE(len, 8);
+        nfs_set_readmax(nfs, nfs_pntoh64((uint32_t *)(void *)buf));
+        buf += 8;
+        len -= 8;
+        /* WRITE MAX */
+        CHECK_GETATTR_BUF_SPACE(len, 8);
+        nfs_set_writemax(nfs, nfs_pntoh64((uint32_t *)(void *)buf));
+        buf += 8;
+        len -= 8;
+
+        return 0;
+}
+
+static void
+nfs4_mount_5_cb(struct rpc_context *rpc, int status, void *command_data,
+                void *private_data)
+{
+        struct nfs4_cb_data *data = private_data;
+        struct nfs_context *nfs = data->nfs;
+        COMPOUND4res *res = command_data;
+        GETATTR4resok *garesok;
+        uint32_t lease_seconds = 0;
+        int i;
+
+        if (check_nfs4_error(nfs, status, data, res, "RWMAX")) {
+                return;
+        }
+
+        if ((i = nfs4_find_op(nfs, data, res, OP_GETATTR, "GETATTR")) < 0) {
+                return;
+        }
+        garesok = &res->resarray.resarray_val[i].nfs_resop4_u.opgetattr.GETATTR4res_u.resok4;
+        if (nfs4_parse_mount_rwmax(nfs, garesok, &lease_seconds) < 0) {
+                data->cb(-EINVAL, nfs, nfs_get_error(nfs), data->private_data);
+                free_nfs4_cb_data(data);
+                return;
+        }
+        
+	/*
+	 * Now the entire mount process (including the NFS FSINFO and GETATTR)
+	 * has completed. Any RPC failure till now would have caused the mount
+	 * process to fail. Note that it's desirable for the mount process to
+	 * fail upfront if it encounters any errors (TCP or RPC), rather than
+	 * keep trying indefinitely causing the mount process to "hang", but
+	 * from now on the RPC transport will be used to carry NFS RPCs issued
+	 * by the application which may not be equipped to handle TCP connection
+	 * failure and RPC timeouts, so we set the resiliency parameters of the
+	 * rpc_context as selected by the user using the mount options. The
+	 * default resiliency parameters emulate the common "hard" mount and
+	 * we are resilient to any TCP or RPC connectivity issues.
+         */
+	rpc_set_resiliency(rpc,
+			   nfs->nfsi->auto_reconnect,
+			   nfs->nfsi->timeout,
+			   nfs->nfsi->retrans);
+        if (nfs->nfsi->version == NFS_V4) {
+                rpc_nfs40_start_renew(rpc, nfs->nfsi->clientid, lease_seconds);
+        }
+        
+        data->cb(0, nfs, NULL, data->private_data);
+        free_nfs4_cb_data(data);
+}
+
 static void
 nfs4_mount_4_cb(struct rpc_context *rpc, int status, void *command_data,
                 void *private_data)
@@ -1469,6 +1988,9 @@ nfs4_mount_4_cb(struct rpc_context *rpc, int status, void *command_data,
         struct nfs_context *nfs = data->nfs;
         COMPOUND4res *res = command_data;
         GETFH4resok *gfhresok;
+        COMPOUND4args args;
+        nfs_argop4 op[2 + 1];
+        struct nfsfh nfsfh;
         int i;
 
         assert(rpc->magic == RPC_CONTEXT_MAGIC);
@@ -1494,26 +2016,53 @@ nfs4_mount_4_cb(struct rpc_context *rpc, int status, void *command_data,
                gfhresok->object.nfs_fh4_val,
                nfs->nfsi->rootfh.len);
 
-	/*
-	 * Now the entire mount process (including the NFS FSINFO and GETATTR)
-	 * has completed. Any RPC failure till now would have caused the mount
-	 * process to fail. Note that it's desirable for the mount process to
-	 * fail upfront if it encounters any errors (TCP or RPC), rather than
-	 * keep trying indefinitely causing the mount process to "hang", but
-	 * from now on the RPC transport will be used to carry NFS RPCs issued
-	 * by the application which may not be equipped to handle TCP connection
-	 * failure and RPC timeouts, so we set the resiliency parameters of the
-	 * rpc_context as selected by the user using the mount options. The
-	 * default resiliency parameters emulate the common "hard" mount and
-	 * we are resilient to any TCP or RPC connectivity issues.
-         */
-	rpc_set_resiliency(rpc,
-			   nfs->nfsi->auto_reconnect,
-			   nfs->nfsi->timeout,
-			   nfs->nfsi->retrans);
+        memset(op, 0, sizeof(op));
+        nfsfh.fh = nfs->nfsi->rootfh;
+        i = nfs4_start_compound(nfs, op);
+        i += nfs4_op_putfh(nfs, &op[i], &nfsfh);
+        i += nfs4_op_getattr(nfs, &op[i],
+                            nfs->nfsi->version == NFS_V4 ?
+                            rwmax_lease_attributes : rwmax_attributes, 1);
+               
+        memset(&args, 0, sizeof(args));
+        args.argarray.argarray_len = i;
+        args.argarray.argarray_val = op;
 
-        data->cb(0, nfs, NULL, data->private_data);
-        free_nfs4_cb_data(data);
+        if (rpc_nfs4_compound_task(rpc, nfs4_mount_5_cb, &args,
+                                   private_data) == NULL) {
+                nfs_set_error(nfs, "Failed to queue GETATTR rwmax. %s",
+                              rpc_get_error(rpc));
+                data->cb(-ENOMEM, nfs, nfs_get_error(nfs), data->private_data);
+                free_nfs4_cb_data(data);
+                return;
+        }
+}
+
+/*
+ * The bootstrap is done and the client is usable. Everything from here is the
+ * same whatever established the state, so both the 4.0 SETCLIENTID chain and
+ * the 4.2 session chain converge here to fetch the root filehandle.
+ */
+static void
+nfs4_mount_start_getfh(struct nfs_context *nfs, struct nfs4_cb_data *data,
+                       void *res)
+{
+        data->filler.func = nfs4_populate_getfh;
+        data->filler.max_op = 1;
+        data->filler.data = calloc(2, sizeof(uint32_t));
+        if (data->filler.data == NULL) {
+                nfs_set_error(nfs, "Out of memory. Failed to allocate "
+                              "data structure.");
+                data->cb(-ENOMEM, nfs, res, data->private_data);
+                free_nfs4_cb_data(data);
+                return;
+        }
+
+        if (nfs4_lookup_path_async(nfs, data, nfs4_mount_4_cb) < 0) {
+                data->cb(-ENOMEM, nfs, res, data->private_data);
+                free_nfs4_cb_data(data);
+                return;
+        }
 }
 
 static void
@@ -1530,23 +2079,7 @@ nfs4_mount_3_cb(struct rpc_context *rpc, int status, void *command_data,
                 return;
         }
 
-        data->filler.func = nfs4_populate_getfh;
-        data->filler.max_op = 1;
-        data->filler.data = calloc(2, sizeof(uint32_t));
-        if (data->filler.data == NULL) {
-                nfs_set_error(nfs, "Out of memory. Failed to allocate "
-                              "data structure.");
-                data->cb(-ENOMEM, nfs, res, data->private_data);
-                free_nfs4_cb_data(data);
-                return;
-        }
-
-
-        if (nfs4_lookup_path_async(nfs, data, nfs4_mount_4_cb) < 0) {
-                data->cb(-ENOMEM, nfs, res, data->private_data);
-                free_nfs4_cb_data(data);
-                return;
-        }
+        nfs4_mount_start_getfh(nfs, data, res);
 }
 
 static void
@@ -1557,7 +2090,7 @@ nfs4_mount_2_cb(struct rpc_context *rpc, int status, void *command_data,
         struct nfs_context *nfs = data->nfs;
         COMPOUND4res *res = command_data;
         COMPOUND4args args;
-        nfs_argop4 op[1];
+        nfs_argop4 op[1 + 1];
         SETCLIENTID4resok *scidresok;
         int i;
 
@@ -1567,7 +2100,18 @@ nfs4_mount_2_cb(struct rpc_context *rpc, int status, void *command_data,
                 return;
         }
 
-        scidresok = &res->resarray.resarray_val[0].nfs_resop4_u.opsetclientid.SETCLIENTID4res_u.resok4;
+        /*
+         * A reply can carry NFS4_OK with an empty resarray, and
+         * check_nfs4_error() only looks at the status, so indexing element 0
+         * blind would read off the end of the decoded array. Locate the op
+         * the same way every other result in this file is located.
+         */
+        if ((i = nfs4_find_op(nfs, data, res, OP_SETCLIENTID,
+                              "SETCLIENTID")) < 0) {
+                return;
+        }
+
+        scidresok = &res->resarray.resarray_val[i].nfs_resop4_u.opsetclientid.SETCLIENTID4res_u.resok4;
         nfs->nfsi->clientid = scidresok->clientid;
         memcpy(nfs->nfsi->setclientid_confirm,
                scidresok->setclientid_confirm,
@@ -1575,7 +2119,7 @@ nfs4_mount_2_cb(struct rpc_context *rpc, int status, void *command_data,
 
         memset(op, 0, sizeof(op));
 
-        i = nfs4_op_setclientid_confirm(nfs, &op[0], nfs->nfsi->clientid,
+        i = nfs40_op_setclientid_confirm(nfs, &op[0], nfs->nfsi->clientid,
                                         nfs->nfsi->setclientid_confirm);
                
         memset(&args, 0, sizeof(args));
@@ -1585,7 +2129,7 @@ nfs4_mount_2_cb(struct rpc_context *rpc, int status, void *command_data,
         if (rpc_nfs4_compound_task(rpc, nfs4_mount_3_cb, &args,
                                    private_data) == NULL) {
                 nfs_set_error(nfs, "Failed to queue SETCLIENTID_CONFIRM. %s",
-                              nfs_get_error(nfs));
+                              rpc_get_error(rpc));
                 data->cb(-ENOMEM, nfs, nfs_get_error(nfs), data->private_data);
                 free_nfs4_cb_data(data);
                 return;
@@ -1599,7 +2143,187 @@ nfs4_mount_1_cb(struct rpc_context *rpc, int status, void *command_data,
         struct nfs4_cb_data *data = private_data;
         struct nfs_context *nfs = data->nfs;
         COMPOUND4args args;
-        nfs_argop4 op[1];
+        nfs_argop4 op[1 + 1];
+        int i, ret;
+
+        assert(rpc->magic == RPC_CONTEXT_MAGIC);
+
+        if (check_nfs4_error(nfs, status, data, NULL, "CONNECT")) {
+                return;
+        }
+
+        ret = rpc_nfs40_save_renew_auth(rpc);
+        if (ret < 0) {
+                nfs_set_error(nfs, "Failed to save NFSv4.0 renewal "
+                              "credentials. %s", rpc_get_error(rpc));
+                data->cb(ret, nfs, nfs_get_error(nfs), data->private_data);
+                free_nfs4_cb_data(data);
+                return;
+        }
+
+        memset(op, 0, sizeof(op));
+
+        i = nfs40_op_setclientid(nfs, &op[0], nfs->nfsi->verifier, nfs->nfsi->client_name);
+        
+        memset(&args, 0, sizeof(args));
+        args.argarray.argarray_len = i;
+        args.argarray.argarray_val = op;
+
+        if (rpc_nfs4_compound_task(rpc, nfs4_mount_2_cb, &args, data) == NULL) {
+                nfs_set_error(nfs, "Failed to queue SETCLIENTID. %s",
+                              rpc_get_error(rpc));
+                data->cb(-ENOMEM, nfs, nfs_get_error(nfs), data->private_data);
+                free_nfs4_cb_data(data);
+                return;
+        }
+}
+
+#ifdef HAVE_NFS4_2
+/*
+ * Third step: RECLAIM_COMPLETE has been acknowledged, so the session is fully
+ * usable and ordinary COMPOUNDs can start flowing.
+ */
+static void
+nfs42_mount_3_cb(struct rpc_context *rpc, int status, void *command_data,
+                 void *private_data)
+{
+        struct nfs4_cb_data *data = private_data;
+        struct nfs_context *nfs = data->nfs;
+        COMPOUND4res *res = command_data;
+
+        assert(rpc->magic == RPC_CONTEXT_MAGIC);
+
+        if (check_nfs4_error(nfs, status, data, res, "RECLAIM_COMPLETE")) {
+                return;
+        }
+
+        nfs4_mount_start_getfh(nfs, data, res);
+}
+
+/*
+ * Second step: CREATE_SESSION has returned a session id. Record it, mark the
+ * session usable so that nfs4_start_compound() starts emitting SEQUENCE, and
+ * declare that we have no state to reclaim.
+ */
+static void
+nfs42_mount_2_cb(struct rpc_context *rpc, int status, void *command_data,
+                 void *private_data)
+{
+        struct nfs4_cb_data *data = private_data;
+        struct nfs_context *nfs = data->nfs;
+        COMPOUND4res *res = command_data;
+        COMPOUND4args args;
+        nfs_argop4 op[1 + 1];
+        CREATE_SESSION4resok *csresok;
+        int i;
+
+        assert(rpc->magic == RPC_CONTEXT_MAGIC);
+
+        if (check_nfs4_error(nfs, status, data, res, "CREATE_SESSION")) {
+                return;
+        }
+
+        if ((i = nfs4_find_op(nfs, data, res, OP_CREATE_SESSION,
+                              "CREATE_SESSION")) < 0) {
+                return;
+        }
+        csresok = &res->resarray.resarray_val[i].nfs_resop4_u.opcreatesession.CREATE_SESSION4res_u.csr_resok4;
+
+        /*
+         * A server may hand back a smaller fore channel than we asked for, so
+         * the slot table is sized by what it granted rather than what we
+         * wanted. One slot is the minimum a session can have; none at all is
+         * a server we cannot talk to.
+         */
+        if (nfs4_session_init(rpc, csresok->csr_sessionid,
+                              csresok->csr_fore_chan_attrs.ca_maxrequests)) {
+                nfs_set_error(nfs, "Server granted a session with no usable "
+                              "slots (%d requested, %d granted)",
+                              NFS4_MAX_SLOTS,
+                              csresok->csr_fore_chan_attrs.ca_maxrequests);
+                data->cb(-EIO, nfs, nfs_get_error(nfs), data->private_data);
+                free_nfs4_cb_data(data);
+                return;
+        }
+
+        memset(op, 0, sizeof(op));
+        i = nfs4_start_compound(nfs, op);
+        i += nfs42_op_reclaim_complete(nfs, &op[i]);
+
+        memset(&args, 0, sizeof(args));
+        args.argarray.argarray_len = i;
+        args.argarray.argarray_val = op;
+
+        if (rpc_nfs4_compound_task(rpc, nfs42_mount_3_cb, &args, data) == NULL) {
+                nfs_set_error(nfs, "Failed to queue RECLAIM_COMPLETE. %s",
+                              rpc_get_error(rpc));
+                data->cb(-ENOMEM, nfs, nfs_get_error(nfs), data->private_data);
+                free_nfs4_cb_data(data);
+                return;
+        }
+}
+
+/*
+ * First step: EXCHANGE_ID has returned a clientid. Turn it into a session.
+ */
+static void
+nfs42_mount_1_cb(struct rpc_context *rpc, int status, void *command_data,
+                 void *private_data)
+{
+        struct nfs4_cb_data *data = private_data;
+        struct nfs_context *nfs = data->nfs;
+        COMPOUND4res *res = command_data;
+        COMPOUND4args args;
+        nfs_argop4 op[1 + 1];
+        EXCHANGE_ID4resok *eiresok;
+        int i;
+
+        assert(rpc->magic == RPC_CONTEXT_MAGIC);
+
+        if (check_nfs4_error(nfs, status, data, res, "EXCHANGE_ID")) {
+                return;
+        }
+
+        if ((i = nfs4_find_op(nfs, data, res, OP_EXCHANGE_ID,
+                              "EXCHANGE_ID")) < 0) {
+                return;
+        }
+        eiresok = &res->resarray.resarray_val[i].nfs_resop4_u.opexchangeid.EXCHANGE_ID4res_u.eir_resok4;
+
+        nfs->nfsi->clientid = eiresok->eir_clientid;
+
+        memset(op, 0, sizeof(op));
+        /*
+         * CREATE_SESSION is part of the bootstrap and carries no SEQUENCE, so
+         * it does not go through nfs4_start_compound().
+         */
+        i = nfs42_op_create_session(nfs, &op[0], eiresok->eir_clientid,
+                                    eiresok->eir_sequenceid);
+
+        memset(&args, 0, sizeof(args));
+        args.argarray.argarray_len = i;
+        args.argarray.argarray_val = op;
+
+        if (rpc_nfs4_compound_task(rpc, nfs42_mount_2_cb, &args, data) == NULL) {
+                nfs_set_error(nfs, "Failed to queue CREATE_SESSION. %s",
+                              rpc_get_error(rpc));
+                data->cb(-ENOMEM, nfs, nfs_get_error(nfs), data->private_data);
+                free_nfs4_cb_data(data);
+                return;
+        }
+}
+
+/*
+ * Entry point for the 4.2 bootstrap, reached once the socket is connected.
+ */
+static void
+nfs42_mount_start(struct rpc_context *rpc, int status, void *command_data _U_,
+                  void *private_data)
+{
+        struct nfs4_cb_data *data = private_data;
+        struct nfs_context *nfs = data->nfs;
+        COMPOUND4args args;
+        nfs_argop4 op[1 + 1];
         int i;
 
         assert(rpc->magic == RPC_CONTEXT_MAGIC);
@@ -1608,22 +2332,95 @@ nfs4_mount_1_cb(struct rpc_context *rpc, int status, void *command_data,
                 return;
         }
 
-        memset(op, 0, sizeof(op));
+        /*
+         * Any session from an earlier connection is gone with that
+         * connection, so start from none. The COMPOUNDs below run before
+         * there is a new one, and therefore carry no SEQUENCE.
+         */
+        nfs4_session_destroy(rpc);
 
-        i = nfs4_op_setclientid(nfs, &op[0], nfs->nfsi->verifier, nfs->nfsi->client_name);
-        
+        memset(op, 0, sizeof(op));
+        /* EXCHANGE_ID is what creates the state, so it carries no SEQUENCE. */
+        i = nfs42_op_exchange_id(nfs, &op[0]);
+
         memset(&args, 0, sizeof(args));
         args.argarray.argarray_len = i;
         args.argarray.argarray_val = op;
 
-        if (rpc_nfs4_compound_task(rpc, nfs4_mount_2_cb, &args, data) == NULL) {
-                nfs_set_error(nfs, "Failed to queue SETCLIENTID. %s",
-                              nfs_get_error(nfs));
+        if (rpc_nfs4_compound_task(rpc, nfs42_mount_1_cb, &args, data) == NULL) {
+                nfs_set_error(nfs, "Failed to queue EXCHANGE_ID. %s",
+                              rpc_get_error(rpc));
                 data->cb(-ENOMEM, nfs, nfs_get_error(nfs), data->private_data);
                 free_nfs4_cb_data(data);
                 return;
         }
 }
+
+/*
+ * Release the session on umount.
+ *
+ * DESTROY_SESSION carries no SEQUENCE and so needs no slot, which matters
+ * here because it is the last thing sent and anything still outstanding is
+ * holding one. The reply is only worth waiting for so that we do not tear the
+ * connection down underneath it; a failure changes nothing we can act on, the
+ * session is being abandoned either way.
+ */
+static void
+nfs42_umount_cb(struct rpc_context *rpc, int status, void *command_data,
+                void *private_data)
+{
+        struct nfs4_cb_data *data = private_data;
+        struct nfs_context *nfs = data->nfs;
+        COMPOUND4res *res = command_data;
+
+        assert(rpc->magic == RPC_CONTEXT_MAGIC);
+
+        if (status != RPC_STATUS_SUCCESS || res == NULL ||
+            res->status != NFS4_OK) {
+                RPC_LOG(rpc, 2, "DESTROY_SESSION failed, abandoning the "
+                        "session anyway");
+        } else {
+                RPC_LOG(rpc, 2, "NFSv4 session destroyed");
+        }
+
+        nfs4_session_destroy(rpc);
+        data->cb(0, nfs, NULL, data->private_data);
+        free_nfs4_cb_data(data);
+}
+
+int
+nfs42_umount_async(struct nfs_context *nfs, nfs_cb cb, void *private_data)
+{
+        struct nfs4_cb_data *data;
+
+        if (!rpc_nfs4_session_is_valid(nfs->rpc)) {
+                cb(0, nfs, NULL, private_data);
+                return 0;
+        }
+
+        data = calloc(1, sizeof(*data));
+        if (data == NULL) {
+                /* Nothing to clean up but our own idea of the session. */
+                nfs4_session_destroy(nfs->rpc);
+                cb(0, nfs, NULL, private_data);
+                return 0;
+        }
+        data->nfs          = nfs;
+        data->cb           = cb;
+        data->private_data = private_data;
+
+        if (rpc_nfs4_destroy_session_task(nfs->rpc, nfs42_umount_cb,
+                                          data) == NULL) {
+                nfs4_session_destroy(nfs->rpc);
+                free_nfs4_cb_data(data);
+                cb(0, nfs, NULL, private_data);
+                return 0;
+        }
+
+        return 0;
+}
+
+#endif /* HAVE_NFS4_2 */
 
 int
 nfs4_mount_async(struct nfs_context *nfs, const char *server,
@@ -1632,6 +2429,9 @@ nfs4_mount_async(struct nfs_context *nfs, const char *server,
         struct nfs4_cb_data *data;
         char *new_server, *new_export;
         int port;
+        rpc_cb connect_cb = nfs4_mount_1_cb;
+
+        rpc_nfs40_stop_renew(nfs->rpc);
 
         new_server = strdup(server);
 	if (new_server == NULL) {
@@ -1674,11 +2474,16 @@ nfs4_mount_async(struct nfs_context *nfs, const char *server,
         data->path         = strdup(new_export);
 
         port = nfs->nfsi->nfsport ? nfs->nfsi->nfsport : 2049;
+#ifdef HAVE_NFS4_2
+        if (nfs->nfsi->version == NFS_V4_2) {
+                connect_cb = nfs42_mount_start;
+        }
+#endif
         if (rpc_connect_port_async(nfs->rpc, server, port,
                                    NFS4_PROGRAM, NFS_V4,
-                                   nfs4_mount_1_cb, data) != 0) {
+                                   connect_cb, data) != 0) {
                 nfs_set_error(nfs, "Failed to start connection. %s",
-                              nfs_get_error(nfs));
+                              rpc_get_error(nfs->rpc));
                 free_nfs4_cb_data(data);
                 return -1;
         }
@@ -1758,7 +2563,8 @@ nfs4_xstat64_cb(struct rpc_context *rpc, int status, void *command_data,
         struct nfs_context *nfs = data->nfs;
         COMPOUND4res *res = command_data;
         GETATTR4resok *garesok;
-        struct nfs_stat_64 st;
+        struct nfs4_stat_64 stx;
+        int nfs4_stat = data->flags & STAT64_FLAG_NFS4;
         int i;
 
         assert(rpc->magic == RPC_CONTEXT_MAGIC);
@@ -1772,21 +2578,28 @@ nfs4_xstat64_cb(struct rpc_context *rpc, int status, void *command_data,
         }
         garesok = &res->resarray.resarray_val[i].nfs_resop4_u.opgetattr.GETATTR4res_u.resok4;
 
-        memset(&st, 0, sizeof(st));
-        if (nfs_parse_attributes(nfs, data, &st,
+        memset(&stx, 0, sizeof(stx));
+        if (nfs_parse_attributes(nfs, data, &stx.st,
+                                 nfs4_stat ? &stx.nfs_user : NULL,
+                                 nfs4_stat ? &stx.nfs_group : NULL,
+                                 &garesok->obj_attributes.attrmask,
                                  garesok->obj_attributes.attr_vals.attrlist4_val,
                                  garesok->obj_attributes.attr_vals.attrlist4_len) < 0) {
+                nfs4_free_stat64(&stx);
                 data->cb(-EINVAL, nfs, nfs_get_error(nfs), data->private_data);
                 free_nfs4_cb_data(data);
+                return;
         }
 
-        data->cb(0, nfs, &st, data->private_data);
+        data->cb(0, nfs, nfs4_stat ? (void *)&stx : (void *)&stx.st,
+                 data->private_data);
+        nfs4_free_stat64(&stx);
         free_nfs4_cb_data(data);
 }
 
 int
-nfs4_stat64_async(struct nfs_context *nfs, const char *path,
-                  int no_follow, nfs_cb cb, void *private_data)
+nfs4_xstat64_async(struct nfs_context *nfs, const char *path, int no_follow,
+                   int nfs4_stat, nfs_cb cb, void *private_data)
 {
         struct nfs4_cb_data *data;
 
@@ -1797,6 +2610,9 @@ nfs4_stat64_async(struct nfs_context *nfs, const char *path,
 
         if (no_follow) {
                 data->flags |= LOOKUP_FLAG_NO_FOLLOW;
+        }
+        if (nfs4_stat) {
+                data->flags |= STAT64_FLAG_NFS4;
         }
         data->cb            = cb;
         data->private_data  = private_data;
@@ -2008,14 +2824,15 @@ nfs4_open_truncate_cb(struct rpc_context *rpc, int status, void *command_data,
         struct nfsfh *fh = data->filler.blob0.val;
         COMPOUND4res *res = command_data;
         COMPOUND4args args;
-        nfs_argop4 op[2];
+        nfs_argop4 op[2 + 1];
         int i;
 
         if (check_nfs4_error(nfs, status, data, res, "OPEN")) {
                 return;
         }
 
-        i = nfs4_op_putfh(nfs, op, fh);
+        i = nfs4_start_compound(nfs, op);
+        i += nfs4_op_putfh(nfs, &op[i], fh);
         i += nfs4_op_truncate(nfs, &op[i], fh, data->filler.blob3.val);
 
         memset(&args, 0, sizeof(args));
@@ -2039,14 +2856,15 @@ nfs4_open_chmod_cb(struct rpc_context *rpc, int status, void *command_data,
         struct nfsfh *fh = data->filler.blob0.val;
         COMPOUND4res *res = command_data;
         COMPOUND4args args;
-        nfs_argop4 op[2];
+        nfs_argop4 op[2 + 1];
         int i;
 
         if (check_nfs4_error(nfs, status, data, res, "OPEN")) {
                 return;
         }
 
-        i = nfs4_op_putfh(nfs, op, fh);
+        i = nfs4_start_compound(nfs, op);
+        i += nfs4_op_putfh(nfs, &op[i], fh);
         i += nfs4_op_chmod(nfs, &op[i], fh, data->filler.blob3.val);
 
         memset(&args, 0, sizeof(args));
@@ -2128,7 +2946,7 @@ nfs4_open_cb(struct rpc_context *rpc, int status, void *command_data,
         aresok = &res->resarray.resarray_val[i].nfs_resop4_u.opaccess.ACCESS4res_u.resok4;
         if (aresok->supported != aresok->access) {
                 nfs_set_error(nfs, "Insufficient ACCESS. Wanted %08x but "
-                              "got %08x.", aresok->access, aresok->supported);
+                              "got %08x.", (int)aresok->access, (int)aresok->supported);
                 data->cb(-EINVAL, nfs, nfs_get_error(nfs), data->private_data);
                 free_nfs4_cb_data(data);
                 return;
@@ -2173,6 +2991,10 @@ nfs4_open_cb(struct rpc_context *rpc, int status, void *command_data,
                 fh->is_append = 1;
         }
 
+	if (!(data->filler.flags & (O_WRONLY|O_RDWR))) {
+                fh->is_readonly = 1;
+        }
+
         /* Parse Open */
         if ((i = nfs4_find_op(nfs, data, res, OP_OPEN, "OPEN")) < 0) {
                 return;
@@ -2184,11 +3006,12 @@ nfs4_open_cb(struct rpc_context *rpc, int status, void *command_data,
 
         if (oresok->rflags & OPEN4_RESULT_CONFIRM) {
                 COMPOUND4args args;
-                nfs_argop4 op[2];
+                nfs_argop4 op[2 + 1];
 
                 memset(op, 0, sizeof(op));
-                i = nfs4_op_putfh(nfs, &op[0], fh);
-                i += nfs4_op_open_confirm(nfs, &op[i], fh);
+                i = nfs4_start_compound(nfs, op);
+                i += nfs4_op_putfh(nfs, &op[i], fh);
+                i += nfs40_op_open_confirm(nfs, &op[i], fh);
 
                 memset(&args, 0, sizeof(args));
                 args.argarray.argarray_len = i;
@@ -2281,7 +3104,7 @@ nfs4_populate_open(struct nfs4_cb_data *data, nfs_argop4 *op)
                 fa = &ch->createhow4_u.createattrs;
 
                 oargs->openhow.opentype = OPEN4_CREATE;
-                if (data->filler.flags|O_EXCL) {
+                if (data->filler.flags & O_EXCL) {
                         ch->mode = EXCLUSIVE4;
 
                         nfs4_init_random_verifier(&verifier[0]);
@@ -2344,7 +3167,7 @@ nfs4_open_readlink_cb(struct rpc_context *rpc, int status, void *command_data,
                 return;
         }
         sprintf(path, "%s/%.*s", data->path,
-                rlresok->link.utf8string_len, rlresok->link.utf8string_val);
+                (int)rlresok->link.utf8string_len, rlresok->link.utf8string_val);
 
 
         free(data->path);
@@ -2424,6 +3247,7 @@ nfs4_open_readlink(struct rpc_context *rpc, COMPOUND4res *res,
                                       "open(O_NOFOLLOW)");
                         data->cb(-ELOOP, nfs, nfs_get_error(nfs),
                                  data->private_data);
+                        free_nfs4_cb_data(data);
                         return -1;
                 }
 
@@ -2569,7 +3393,7 @@ nfs4_open_async(struct nfs_context *nfs, const char *path, int flags,
 
 #ifdef HAVE_MULTITHREADING
         if (nfs->rpc->multithreading_enabled) {
-                nfs_mt_mutex_lock(&nfs->nfsi->nfs4_open_call_mutex);
+                nfs_mt_sem_wait(&nfs->nfsi->nfs4_open_call_sem);
                 data->flags |= MUTEX_HELD;
         }
 #endif        
@@ -2578,11 +3402,11 @@ nfs4_open_async(struct nfs_context *nfs, const char *path, int flags,
 }
 
 int
-nfs4_fstat64_async(struct nfs_context *nfs, struct nfsfh *nfsfh, nfs_cb cb,
-                   void *private_data)
+nfs4_xfstat64_async(struct nfs_context *nfs, struct nfsfh *nfsfh,
+                    int nfs4_stat, nfs_cb cb, void *private_data)
 {
         COMPOUND4args args;
-        nfs_argop4 op[2];
+        nfs_argop4 op[2 + 1];
         struct nfs4_cb_data *data;
         int i;
 
@@ -2596,8 +3420,12 @@ nfs4_fstat64_async(struct nfs_context *nfs, struct nfsfh *nfsfh, nfs_cb cb,
         data->nfs          = nfs;
         data->cb           = cb;
         data->private_data = private_data;
+        if (nfs4_stat) {
+                data->flags |= STAT64_FLAG_NFS4;
+        }
 
-        i = nfs4_op_putfh(nfs, &op[0], nfsfh);
+        i = nfs4_start_compound(nfs, op);
+        i += nfs4_op_putfh(nfs, &op[i], nfsfh);
         i += nfs4_op_getattr(nfs, &op[i], standard_attributes, 2);
 
         memset(&args, 0, sizeof(args));
@@ -2628,14 +3456,10 @@ nfs4_getacl_cb(struct rpc_context *rpc, int status, void *command_data,
         assert(rpc->magic == RPC_CONTEXT_MAGIC);
 
         if (check_nfs4_error(nfs, status, data, res, "GETACL")) {
-                data->cb(-EIO, nfs, "GETACL failed", data->private_data);
-                free_nfs4_cb_data(data);
                 return;
         }
 
         if ((i = nfs4_find_op(nfs, data, res, OP_GETATTR, "GETATTR")) < 0) {
-                data->cb(-EIO, nfs, "GETACL failed", data->private_data);
-                free_nfs4_cb_data(data);
                 return;
         }
         garesok = &res->resarray.resarray_val[i].nfs_resop4_u.opgetattr.GETATTR4res_u.resok4;
@@ -2660,7 +3484,7 @@ nfs4_getacl_async(struct nfs_context *nfs, struct nfsfh *nfsfh, nfs_cb cb,
                    void *private_data)
 {
         COMPOUND4args args;
-        nfs_argop4 op[2];
+        nfs_argop4 op[2 + 1];
         struct nfs4_cb_data *data;
         int i;
 
@@ -2675,7 +3499,8 @@ nfs4_getacl_async(struct nfs_context *nfs, struct nfsfh *nfsfh, nfs_cb cb,
         data->cb           = cb;
         data->private_data = private_data;
 
-        i = nfs4_op_putfh(nfs, &op[0], nfsfh);
+        i = nfs4_start_compound(nfs, op);
+        i += nfs4_op_putfh(nfs, &op[i], nfsfh);
         i += nfs4_op_getattr(nfs, &op[i], getacl_attributes, 1);
 
         memset(&args, 0, sizeof(args));
@@ -2720,7 +3545,7 @@ nfs4_close_async(struct nfs_context *nfs, struct nfsfh *nfsfh, nfs_cb cb,
                  void *private_data)
 {
         COMPOUND4args args;
-        nfs_argop4 op[3];
+        nfs_argop4 op[3 + 1];
         struct nfs4_cb_data *data;
         int i;
 
@@ -2733,7 +3558,7 @@ nfs4_close_async(struct nfs_context *nfs, struct nfsfh *nfsfh, nfs_cb cb,
 
 #ifdef HAVE_MULTITHREADING
         if (nfs->rpc->multithreading_enabled) {
-                nfs_mt_mutex_lock(&nfs->nfsi->nfs4_open_call_mutex);
+                nfs_mt_sem_wait(&nfs->nfsi->nfs4_open_call_sem);
                 data->flags |= MUTEX_HELD;
         }
 #endif        
@@ -2743,7 +3568,8 @@ nfs4_close_async(struct nfs_context *nfs, struct nfsfh *nfsfh, nfs_cb cb,
 
         memset(op, 0, sizeof(op));
 
-        i = nfs4_op_putfh(nfs, &op[0], nfsfh);
+        i = nfs4_start_compound(nfs, op);
+        i += nfs4_op_putfh(nfs, &op[i], nfsfh);
         i += nfs4_op_close(nfs, &op[i], nfsfh);
 
         data->filler.blob0.val  = nfsfh;
@@ -2755,6 +3581,8 @@ nfs4_close_async(struct nfs_context *nfs, struct nfsfh *nfsfh, nfs_cb cb,
 
         if (rpc_nfs4_compound_task(nfs->rpc, nfs4_close_cb, &args,
                                    data) == NULL) {
+                nfs_set_error(nfs, "Failed to queue CLOSE. %s",
+                              rpc_get_error(nfs->rpc));
                 data->filler.blob0.val = NULL;
                 free_nfs4_cb_data(data);
                 return -1;
@@ -2807,7 +3635,7 @@ nfs4_pread_async_internal(struct nfs_context *nfs, struct nfsfh *nfsfh,
                           nfs_cb cb, void *private_data, int update_pos)
 {
         COMPOUND4args args;
-        nfs_argop4 op[2];
+        nfs_argop4 op[2 + 1];
         struct nfs4_cb_data *data;
         int i;
         struct rpc_pdu *pdu;
@@ -2830,7 +3658,8 @@ nfs4_pread_async_internal(struct nfs_context *nfs, struct nfsfh *nfsfh,
         
         memset(op, 0, sizeof(op));
 
-        i = nfs4_op_putfh(nfs, &op[0], nfsfh);
+        i = nfs4_start_compound(nfs, op);
+        i += nfs4_op_putfh(nfs, &op[i], nfsfh);
         i += nfs4_op_read(nfs, &op[i], nfsfh, offset, count);
 
         memset(&args, 0, sizeof(args));
@@ -2840,6 +3669,62 @@ nfs4_pread_async_internal(struct nfs_context *nfs, struct nfsfh *nfsfh,
         pdu = rpc_nfs4_read_task(nfs->rpc, nfs4_pread_cb, buf, count, &args,
                                  data);
         if (pdu == NULL) {
+                nfs_set_error(nfs, "Failed to queue READ. %s",
+                              rpc_get_error(nfs->rpc));
+                free_nfs4_cb_data(data);
+                return -1;
+        }
+
+        return 0;
+}
+
+int
+nfs4_preadv_async_internal(struct nfs_context *nfs, struct nfsfh *nfsfh,
+                           const struct iovec *iov, int iovcnt, uint64_t offset,
+                           nfs_cb cb, void *private_data, int update_pos)
+{
+        COMPOUND4args args;
+        nfs_argop4 op[2 + 1];
+        struct nfs4_cb_data *data;
+        int i;
+        struct rpc_pdu *pdu;
+        size_t count = 0;
+        
+        for (i = 0; i < iovcnt; i++) {
+                count += iov[i].iov_len;
+        }
+        
+        data = calloc(1, sizeof(*data));
+        if (data == NULL) {
+                nfs_set_error(nfs, "Out of memory. Failed to allocate "
+                              "cb data");
+                return -1;
+        }
+
+        data->nfs          = nfs;
+        data->cb           = cb;
+        data->private_data = private_data;
+
+        data->filler.blob0.val  = nfsfh;
+        data->filler.blob0.free = NULL;
+        data->rw_data.offset = offset;
+        data->rw_data.update_pos = update_pos;
+        
+        memset(op, 0, sizeof(op));
+
+        i = nfs4_start_compound(nfs, op);
+        i += nfs4_op_putfh(nfs, &op[i], nfsfh);
+        i += nfs4_op_read(nfs, &op[i], nfsfh, offset, count);
+
+        memset(&args, 0, sizeof(args));
+        args.argarray.argarray_len = i;
+        args.argarray.argarray_val = op;
+
+        pdu = rpc_nfs4_readv_task(nfs->rpc, nfs4_pread_cb, iov, iovcnt, &args,
+                                 data);
+        if (pdu == NULL) {
+                nfs_set_error(nfs, "Failed to queue READ. %s",
+                              rpc_get_error(nfs->rpc));
                 free_nfs4_cb_data(data);
                 return -1;
         }
@@ -3013,11 +3898,11 @@ nfs4_pwrite_cb(struct rpc_context *rpc, int status, void *command_data,
 
 int
 nfs4_pwrite_async_internal(struct nfs_context *nfs, struct nfsfh *nfsfh,
-                           uint64_t offset, size_t count, const char *buf,
+                           const void *buf, size_t count, uint64_t offset,
                            nfs_cb cb, void *private_data, int update_pos)
 {
         COMPOUND4args args;
-        nfs_argop4 op[2];
+        nfs_argop4 op[2 + 1];
         struct nfs4_cb_data *data;
         int i;
 
@@ -3039,7 +3924,8 @@ nfs4_pwrite_async_internal(struct nfs_context *nfs, struct nfsfh *nfsfh,
 
         memset(op, 0, sizeof(op));
 
-        i = nfs4_op_putfh(nfs, &op[0], nfsfh);
+        i = nfs4_start_compound(nfs, op);
+        i += nfs4_op_putfh(nfs, &op[i], nfsfh);
         i += nfs4_op_write(nfs, &op[i], nfsfh, offset, count, buf);
 
         memset(&args, 0, sizeof(args));
@@ -3096,13 +3982,14 @@ nfs4_write_append_cb(struct rpc_context *rpc, int status, void *command_data,
         }
 
         memset(&st, 0, sizeof(st));
-        nfs_parse_attributes(nfs, data, &st,
+        nfs_parse_attributes(nfs, data, &st, NULL, NULL,
+                             &garesok->obj_attributes.attrmask,
                              garesok->obj_attributes.attr_vals.attrlist4_val,
                              garesok->obj_attributes.attr_vals.attrlist4_len);
         offset = st.nfs_size;
 
-        if (nfs4_pwrite_async_internal(nfs, nfsfh, offset,
-                                       (size_t)count, buf,
+        if (nfs4_pwrite_async_internal(nfs, nfsfh,
+                                       buf, (size_t)count, offset,
                                        data->cb, data->private_data, 1) < 0) {
                 free_nfs4_cb_data(data);
                 data->cb(-ENOMEM, nfs, nfs_get_error(nfs), data->private_data);
@@ -3118,7 +4005,7 @@ nfs4_write_async(struct nfs_context *nfs, struct nfsfh *nfsfh, uint64_t count,
 {
         if (nfsfh->is_append) {
                 COMPOUND4args args;
-                nfs_argop4 op[2];
+                nfs_argop4 op[2 + 1];
                 struct nfs4_cb_data *data;
                 int i;
 
@@ -3138,7 +4025,8 @@ nfs4_write_async(struct nfs_context *nfs, struct nfsfh *nfsfh, uint64_t count,
 
                 memset(op, 0, sizeof(op));
 
-                i = nfs4_op_putfh(nfs, &op[0], nfsfh);
+                i = nfs4_start_compound(nfs, op);
+                i += nfs4_op_putfh(nfs, &op[i], nfsfh);
                 i += nfs4_op_getattr(nfs, &op[i], standard_attributes, 2);
 
                 memset(&args, 0, sizeof(args));
@@ -3163,8 +4051,8 @@ nfs4_write_async(struct nfs_context *nfs, struct nfsfh *nfsfh, uint64_t count,
                 return 0;
         }
 
-        return nfs4_pwrite_async_internal(nfs, nfsfh, nfsfh->offset,
-                                          (size_t)count, buf,
+        return nfs4_pwrite_async_internal(nfs, nfsfh,
+                                          buf, (size_t)count, nfsfh->offset,
                                           cb, private_data, 1);
 }
 
@@ -3599,7 +4487,7 @@ static void
 nfs4_opendir_continue(struct nfs_context *nfs, struct nfs4_cb_data *data)
 {
         COMPOUND4args args;
-        nfs_argop4 op[2];
+        nfs_argop4 op[2 + 1];
         struct nfsfh *fh = data->filler.blob0.val;
         uint64_t cookie;
         int i;
@@ -3608,7 +4496,8 @@ nfs4_opendir_continue(struct nfs_context *nfs, struct nfs4_cb_data *data)
 
         memset(op, 0, sizeof(op));
 
-        i = nfs4_op_putfh(nfs, &op[0], fh);
+        i = nfs4_start_compound(nfs, op);
+        i += nfs4_op_putfh(nfs, &op[i], fh);
         i += nfs4_op_readdir(nfs, &op[i], cookie);
 
         memset(&args, 0, sizeof(args));
@@ -3618,7 +4507,7 @@ nfs4_opendir_continue(struct nfs_context *nfs, struct nfs4_cb_data *data)
         if (rpc_nfs4_compound_task(nfs->rpc, nfs4_opendir_2_cb, &args,
                                    data) == NULL) {
                 nfs_set_error(nfs, "Failed to queue READDIR command. %s",
-                              nfs_get_error(nfs));
+                              rpc_get_error(nfs->rpc));
                 data->cb(-ENOMEM, nfs, nfs_get_error(nfs), data->private_data);
                 free_nfs4_cb_data(data);
                 return;
@@ -3631,6 +4520,10 @@ nfs4_parse_readdir(struct nfs_context *nfs, struct nfs4_cb_data *data,
 {
 	struct nfsdir *nfsdir = data->filler.blob1.val;
         struct entry4 *e;
+        uint64_t cookie;
+
+        /* The cookie this reply is answering. */
+        memcpy(&cookie, data->filler.blob2.val, sizeof(uint64_t));
 
         e = res->reply.entries;
         while (e) {
@@ -3647,7 +4540,15 @@ nfs4_parse_readdir(struct nfs_context *nfs, struct nfs4_cb_data *data,
                         free_nfs4_cb_data(data);
                         return;
                 }
-		nfsdirent->name = strdup(e->name.utf8string_val);
+		/*
+		 * component4 is decoded with zdr_bytes, so the value points
+		 * into the receive buffer with a separate length and no
+		 * terminator. strdup() would run on into whatever follows the
+		 * name in the reply. Every other user of a utf8string in this
+		 * tree already respects the length; this one did not.
+		 */
+		nfsdirent->name = strndup(e->name.utf8string_val,
+		                          e->name.utf8string_len);
 		if (nfsdirent->name == NULL) {
                         nfs_set_error(nfs, "Out of memory.");
                         data->cb(-ENOMEM, nfs, nfs_get_error(nfs),
@@ -3658,7 +4559,8 @@ nfs4_parse_readdir(struct nfs_context *nfs, struct nfs4_cb_data *data,
                 }
 
                 memset(&st, 0, sizeof(st));
-                if (nfs_parse_attributes(nfs, data, &st,
+                if (nfs_parse_attributes(nfs, data, &st, NULL, NULL,
+                                         &e->attrs.attrmask,
                                          e->attrs.attr_vals.attrlist4_val,
                                          e->attrs.attr_vals.attrlist4_len) < 0) {
                         data->cb(-EINVAL, nfs, nfs_get_error(nfs),
@@ -3719,6 +4621,25 @@ nfs4_parse_readdir(struct nfs_context *nfs, struct nfs4_cb_data *data,
         }
 
         if (res->reply.eof == 0) {
+                uint64_t next;
+
+                /*
+                 * The server says there is more to come, so the next request
+                 * must ask for something different from the last one. A reply
+                 * that leaves the cookie where it was, either by returning no
+                 * entries at all or by repeating the one we sent, would have
+                 * us reissue an identical READDIR forever.
+                 */
+                memcpy(&next, data->filler.blob2.val, sizeof(uint64_t));
+                if (next == cookie) {
+                        nfs_set_error(nfs, "NFS: server did not advance the "
+                                      "readdir cookie for %s, giving up to "
+                                      "avoid looping", data->path);
+                        data->cb(-EIO, nfs, nfs_get_error(nfs),
+                                 data->private_data);
+                        free_nfs4_cb_data(data);
+                        return;
+                }
                 nfs4_opendir_continue(nfs, data);
                 return;
         }
@@ -3803,6 +4724,176 @@ nfs4_populate_readdir(struct nfs4_cb_data *data, nfs_argop4 *op)
  * blob1 is nfsdir
  * blob2 is the cookie
  */
+/*
+ * NFSv4 named attributes.
+ *
+ * Every file and directory can carry a hidden directory of named attributes,
+ * which are themselves ordinary files. Windows clients use these to hold
+ * alternate data streams. The three calls below reach that directory by
+ * setting LOOKUP_FLAG_OPENATTR, which puts an OPENATTR after the path lookup
+ * so that the ordinary readdir, open and remove machinery operates on the
+ * attribute directory instead of on the file.
+ *
+ * This is NFSv4, not NFSv4.2, so it works for every minor version. A server
+ * that does not implement named attributes answers NFS4ERR_NOTSUPP.
+ */
+int
+nfs4_opendir_namedattr_async(struct nfs_context *nfs, const char *path,
+                             nfs_cb cb, void *private_data)
+{
+        struct nfs4_cb_data *data;
+	struct nfsdir *nfsdir;
+
+        data = init_cb_data_full_path(nfs, path);
+        if (data == NULL) {
+                return -1;
+        }
+
+        data->cb           = cb;
+        data->private_data = private_data;
+        data->filler.func  = nfs4_populate_readdir;
+        data->filler.max_op = 2;
+        data->flags       |= LOOKUP_FLAG_OPENATTR;
+
+	nfsdir = calloc(1, sizeof(struct nfsdir));
+	if (nfsdir == NULL) {
+                free_nfs4_cb_data(data);
+		nfs_set_error(nfs, "failed to allocate buffer for nfsdir");
+		return -1;
+	}
+        data->filler.blob1.val  = nfsdir;
+        data->filler.blob1.free = (blob_free)nfs_free_nfsdir;
+
+	data->filler.blob2.val = calloc(1, sizeof(uint64_t));
+	if (data->filler.blob2.val == NULL) {
+                free_nfs4_cb_data(data);
+		nfs_set_error(nfs, "failed to allocate buffer for cookie");
+		return -1;
+	}
+        data->filler.blob2.free = (blob_free)free;
+
+        if (nfs4_lookup_path_async(nfs, data, nfs4_opendir_cb) < 0) {
+                free_nfs4_cb_data(data);
+                return -1;
+        }
+
+        return 0;
+}
+
+int
+nfs4_open_namedattr_async(struct nfs_context *nfs, const char *path,
+                          const char *attrname, int flags, nfs_cb cb,
+                          void *private_data)
+{
+        struct nfs4_cb_data *data;
+
+        if (attrname == NULL || *attrname == 0) {
+                nfs_set_error(nfs, "No named attribute given");
+                return -1;
+        }
+        if (strchr(attrname, '/')) {
+                nfs_set_error(nfs, "A named attribute cannot contain '/'");
+                return -1;
+        }
+
+        /*
+         * The whole path names the file that owns the attributes, and the
+         * attribute itself is the name looked up inside the attribute
+         * directory, which is where data->filler.data goes.
+         */
+        data = init_cb_data_full_path(nfs, path);
+        if (data == NULL) {
+                return -1;
+        }
+
+        data->cb           = cb;
+        data->private_data = private_data;
+        data->filler.data  = strdup(attrname);
+        if (data->filler.data == NULL) {
+                nfs_set_error(nfs, "Out of memory");
+                free_nfs4_cb_data(data);
+                return -1;
+        }
+        data->flags |= LOOKUP_FLAG_OPENATTR;
+        /*
+         * A file that has never had an attribute written has no attribute
+         * directory, so creating one is part of creating the first
+         * attribute.
+         */
+        if (flags & O_CREAT) {
+                data->flags |= LOOKUP_FLAG_OPENATTR_CREATE;
+        }
+
+        /* O_TRUNC is only valid for O_RDWR or O_WRONLY */
+        if (flags & O_TRUNC && !(flags & (O_RDWR|O_WRONLY))) {
+                flags &= ~O_TRUNC;
+        }
+        if (flags & O_EXCL) {
+                flags &= ~O_TRUNC;
+        }
+        if (flags & O_TRUNC) {
+                data->open_cb = nfs4_open_truncate_cb;
+
+                data->filler.blob3.val = malloc(12);
+                if (data->filler.blob3.val == NULL) {
+                        nfs_set_error(nfs, "Out of memory");
+                        free_nfs4_cb_data(data);
+                        return -1;
+                }
+                data->filler.blob3.free = free;
+                memset(data->filler.blob3.val, 0, 12);
+        }
+
+#ifdef HAVE_MULTITHREADING
+        if (nfs->rpc->multithreading_enabled) {
+                nfs_mt_sem_wait(&nfs->nfsi->nfs4_open_call_sem);
+                data->flags |= MUTEX_HELD;
+        }
+#endif
+        return nfs4_open_async_internal(nfs, data, flags, 0666);
+}
+
+int
+nfs4_remove_namedattr_async(struct nfs_context *nfs, const char *path,
+                            const char *attrname, nfs_cb cb,
+                            void *private_data)
+{
+        struct nfs4_cb_data *data;
+
+        if (attrname == NULL || *attrname == 0) {
+                nfs_set_error(nfs, "No named attribute given");
+                return -1;
+        }
+        if (strchr(attrname, '/')) {
+                nfs_set_error(nfs, "A named attribute cannot contain '/'");
+                return -1;
+        }
+
+        data = init_cb_data_full_path(nfs, path);
+        if (data == NULL) {
+                return -1;
+        }
+
+        data->cb           = cb;
+        data->private_data = private_data;
+        data->filler.func  = nfs4_populate_remove;
+        data->filler.max_op = 1;
+        data->filler.data  = strdup(attrname);
+        if (data->filler.data == NULL) {
+                nfs_set_error(nfs, "Out of memory");
+                free_nfs4_cb_data(data);
+                return -1;
+        }
+        data->flags |= LOOKUP_FLAG_OPENATTR;
+
+        if (nfs4_lookup_path_async(nfs, data, nfs4_remove_cb) < 0) {
+                free_nfs4_cb_data(data);
+                return -1;
+        }
+
+        return 0;
+}
+
 int
 nfs4_opendir_async(struct nfs_context *nfs, const char *path, nfs_cb cb,
                    void *private_data)
@@ -3878,14 +4969,15 @@ nfs4_truncate_open_cb(struct rpc_context *rpc, int status, void *command_data,
         struct nfsfh *fh = data->filler.blob0.val;
         COMPOUND4res *res = command_data;
         COMPOUND4args args;
-        nfs_argop4 op[4];
+        nfs_argop4 op[4 + 1];
         int i;
 
         if (check_nfs4_error(nfs, status, data, res, "OPEN")) {
                 return;
         }
 
-        i = nfs4_op_putfh(nfs, &op[0], fh);
+        i = nfs4_start_compound(nfs, op);
+        i += nfs4_op_putfh(nfs, &op[i], fh);
         i += nfs4_op_truncate(nfs, &op[i], fh, data->filler.blob3.val);
         i += nfs4_op_close(nfs, &op[i], fh);
 
@@ -3934,7 +5026,7 @@ nfs4_truncate_async(struct nfs_context *nfs, const char *path, uint64_t length,
 
 #ifdef HAVE_MULTITHREADING
         if (nfs->rpc->multithreading_enabled) {
-                nfs_mt_mutex_lock(&nfs->nfsi->nfs4_open_call_mutex);
+                nfs_mt_sem_wait(&nfs->nfsi->nfs4_open_call_sem);
                 data->flags |= MUTEX_HELD;
         }
 #endif        
@@ -3968,7 +5060,7 @@ nfs4_fsync_async(struct nfs_context *nfs, struct nfsfh *fh, nfs_cb cb,
                  void *private_data)
 {
         COMPOUND4args args;
-        nfs_argop4 op[2];
+        nfs_argop4 op[2 + 1];
         struct nfs4_cb_data *data;
         int i;
 
@@ -3984,7 +5076,8 @@ nfs4_fsync_async(struct nfs_context *nfs, struct nfsfh *fh, nfs_cb cb,
 
         memset(op, 0, sizeof(op));
 
-        i = nfs4_op_putfh(nfs, &op[0], fh);
+        i = nfs4_start_compound(nfs, op);
+        i += nfs4_op_putfh(nfs, &op[i], fh);
         i += nfs4_op_commit(nfs, &op[i]);
 
         memset(&args, 0, sizeof(args));
@@ -4006,7 +5099,7 @@ nfs4_ftruncate_async(struct nfs_context *nfs, struct nfsfh *fh,
                      uint64_t length, nfs_cb cb, void *private_data)
 {
         COMPOUND4args args;
-        nfs_argop4 op[2];
+        nfs_argop4 op[2 + 1];
         struct nfs4_cb_data *data;
         int i;
 
@@ -4033,7 +5126,8 @@ nfs4_ftruncate_async(struct nfs_context *nfs, struct nfsfh *fh,
         
         memset(op, 0, sizeof(op));
 
-        i = nfs4_op_putfh(nfs, &op[0], fh);
+        i = nfs4_start_compound(nfs, op);
+        i += nfs4_op_putfh(nfs, &op[i], fh);
         i += nfs4_op_truncate(nfs, &op[i], fh, data->filler.blob3.val);
 
         memset(&args, 0, sizeof(args));
@@ -4077,7 +5171,8 @@ nfs4_lseek_cb(struct rpc_context *rpc, int status, void *command_data,
         garesok = &res->resarray.resarray_val[i].nfs_resop4_u.opgetattr.GETATTR4res_u.resok4;
 
         memset(&st, 0, sizeof(st));
-        nfs_parse_attributes(nfs, data, &st,
+        nfs_parse_attributes(nfs, data, &st, NULL, NULL,
+                             &garesok->obj_attributes.attrmask,
                              garesok->obj_attributes.attr_vals.attrlist4_val,
                              garesok->obj_attributes.attr_vals.attrlist4_len);
 
@@ -4095,6 +5190,349 @@ nfs4_lseek_cb(struct rpc_context *rpc, int status, void *command_data,
         free_nfs4_cb_data(data);
 }
 
+#ifdef HAVE_NFS4_2
+/* What the COMPOUND for this fallocate mode is made of, for error messages */
+static char *
+nfs42_fallocate_opname(int mode)
+{
+        if (mode & FALLOC_FL_ZERO_RANGE) {
+                return "DEALLOCATE+ALLOCATE";
+        }
+        if (mode & FALLOC_FL_PUNCH_HOLE) {
+                return "DEALLOCATE";
+        }
+        return "ALLOCATE";
+}
+
+static void
+nfs42_fallocate_cb(struct rpc_context *rpc, int status, void *command_data,
+                   void *private_data)
+{
+        struct nfs4_cb_data *data = private_data;
+        struct nfs_context *nfs = data->nfs;
+        COMPOUND4res *res = command_data;
+
+        assert(rpc->magic == RPC_CONTEXT_MAGIC);
+
+        /* blob1.len carries the mode, so the error names the right op */
+        if (check_nfs4_error(nfs, status, data, res,
+                             nfs42_fallocate_opname(data->filler.blob1.len))) {
+                return;
+        }
+
+        data->cb(0, nfs, NULL, data->private_data);
+        free_nfs4_cb_data(data);
+}
+
+int
+nfs42_fallocate_async(struct nfs_context *nfs, struct nfsfh *fh, int mode,
+                      uint64_t offset, uint64_t length, nfs_cb cb,
+                      void *private_data)
+{
+        COMPOUND4args args;
+        /* PUTFH plus at most DEALLOCATE and ALLOCATE for ZERO_RANGE */
+        nfs_argop4 op[3 + 1];
+        struct nfs4_cb_data *data;
+        int i;
+
+        if (fh->is_readonly) {
+                nfs_set_error(nfs, "Trying to fallocate a read-only file");
+                return -1;
+        }
+
+        /*
+         * Three modes are implemented.
+         *
+         * 0 reserves space, which is ALLOCATE. NFS grows the file when the
+         * range runs past the end, exactly as fallocate(2) does without
+         * FALLOC_FL_KEEP_SIZE. There is no way to ask NFS to reserve without
+         * growing, so KEEP_SIZE on its own is refused rather than quietly
+         * ignored.
+         *
+         * FALLOC_FL_PUNCH_HOLE deallocates, which is DEALLOCATE, and must be
+         * paired with FALLOC_FL_KEEP_SIZE as Linux requires. A hole never
+         * changes the file size and neither does DEALLOCATE.
+         *
+         * FALLOC_FL_ZERO_RANGE has no single operation of its own. It is a
+         * DEALLOCATE, which makes the range read as zeroes, followed by an
+         * ALLOCATE that puts the space back, both in one COMPOUND so that
+         * the range is never left merely sparse. KEEP_SIZE cannot be honoured
+         * with it for the same reason as above, so it is refused too.
+         */
+        if (mode != 0 &&
+            mode != (FALLOC_FL_PUNCH_HOLE | FALLOC_FL_KEEP_SIZE) &&
+            mode != FALLOC_FL_ZERO_RANGE) {
+                nfs_set_error(nfs, "nfs_fallocate only supports mode 0, "
+                              "FALLOC_FL_PUNCH_HOLE|FALLOC_FL_KEEP_SIZE and "
+                              "FALLOC_FL_ZERO_RANGE");
+                return -EINVAL;
+        }
+        if (length == 0) {
+                nfs_set_error(nfs, "nfs_fallocate: length must be non-zero");
+                return -EINVAL;
+        }
+
+        data = calloc(1, sizeof(*data));
+        if (data == NULL) {
+                nfs_set_error(nfs, "Out of memory.");
+                return -1;
+        }
+        data->nfs          = nfs;
+        data->cb           = cb;
+        data->private_data = private_data;
+        data->filler.blob1.len = mode;
+
+        memset(op, 0, sizeof(op));
+        i = nfs4_start_compound(nfs, op);
+        i += nfs4_op_putfh(nfs, &op[i], fh);
+        if (mode & (FALLOC_FL_PUNCH_HOLE | FALLOC_FL_ZERO_RANGE)) {
+                i += nfs42_op_deallocate(nfs, &op[i], fh, offset, length);
+        }
+        if (!(mode & FALLOC_FL_PUNCH_HOLE)) {
+                i += nfs42_op_allocate(nfs, &op[i], fh, offset, length);
+        }
+
+        memset(&args, 0, sizeof(args));
+        args.argarray.argarray_len = i;
+        args.argarray.argarray_val = op;
+
+        if (rpc_nfs4_compound_task(nfs->rpc, nfs42_fallocate_cb, &args,
+                                   data) == NULL) {
+                nfs_set_error(nfs, "Failed to queue %s. %s",
+                              nfs42_fallocate_opname(mode),
+                              rpc_get_error(nfs->rpc));
+                free_nfs4_cb_data(data);
+                return -1;
+        }
+
+        return 0;
+}
+
+static void
+nfs42_read_plus_cb(struct rpc_context *rpc, int status, void *command_data,
+                   void *private_data)
+{
+        struct nfs4_cb_data *data = private_data;
+        struct nfs_context *nfs = data->nfs;
+        COMPOUND4res *res = command_data;
+        READ_PLUS4resok *rpresok;
+        int i;
+
+        assert(rpc->magic == RPC_CONTEXT_MAGIC);
+
+        if (check_nfs4_error(nfs, status, data, res, "READ_PLUS")) {
+                return;
+        }
+
+        if ((i = nfs4_find_op(nfs, data, res, OP_READ_PLUS, "READ_PLUS")) < 0) {
+                return;
+        }
+        rpresok = &res->resarray.resarray_val[i].nfs_resop4_u.opreadplus.READ_PLUS4res_u.rp_resok4;
+
+        /*
+         * The contents point into the reply, which is released once we
+         * return, so a caller that wants to keep them must copy them.
+         */
+        data->cb(0, nfs, rpresok, data->private_data);
+        free_nfs4_cb_data(data);
+}
+
+int
+nfs42_read_plus_async(struct nfs_context *nfs, struct nfsfh *fh,
+                      uint64_t offset, uint32_t count, nfs_cb cb,
+                      void *private_data)
+{
+        COMPOUND4args args;
+        nfs_argop4 op[2 + 1];
+        struct nfs4_cb_data *data;
+        int i;
+
+        if (nfs->nfsi->version != NFS_V4_2) {
+                nfs_set_error(nfs, "%s requires NFSv4.2", __FUNCTION__);
+                return -ENOTSUP;
+        }
+
+        data = calloc(1, sizeof(*data));
+        if (data == NULL) {
+                nfs_set_error(nfs, "Out of memory.");
+                return -1;
+        }
+        data->nfs          = nfs;
+        data->cb           = cb;
+        data->private_data = private_data;
+
+        memset(op, 0, sizeof(op));
+        i = nfs4_start_compound(nfs, op);
+        i += nfs4_op_putfh(nfs, &op[i], fh);
+        i += nfs42_op_read_plus(nfs, &op[i], fh, offset, count);
+
+        memset(&args, 0, sizeof(args));
+        args.argarray.argarray_len = i;
+        args.argarray.argarray_val = op;
+
+        if (rpc_nfs4_compound_task(nfs->rpc, nfs42_read_plus_cb, &args,
+                                   data) == NULL) {
+                nfs_set_error(nfs, "Failed to queue READ_PLUS. %s",
+                              rpc_get_error(nfs->rpc));
+                free_nfs4_cb_data(data);
+                return -1;
+        }
+
+        return 0;
+}
+
+static void
+nfs42_write_same_cb(struct rpc_context *rpc, int status, void *command_data,
+                    void *private_data)
+{
+        struct nfs4_cb_data *data = private_data;
+        struct nfs_context *nfs = data->nfs;
+        COMPOUND4res *res = command_data;
+        write_response4 *wsresok;
+        int i;
+
+        assert(rpc->magic == RPC_CONTEXT_MAGIC);
+
+        if (check_nfs4_error(nfs, status, data, res, "WRITE_SAME")) {
+                return;
+        }
+
+        if ((i = nfs4_find_op(nfs, data, res, OP_WRITE_SAME,
+                              "WRITE_SAME")) < 0) {
+                return;
+        }
+        wsresok = &res->resarray.resarray_val[i].nfs_resop4_u.opwritesame.WRITE_SAME4res_u.wsr_resok4;
+
+        data->cb(0, nfs, wsresok, data->private_data);
+        free_nfs4_cb_data(data);
+}
+
+int
+nfs42_write_same_async(struct nfs_context *nfs, struct nfsfh *fh,
+                       app_data_block4 *adb, int stable, nfs_cb cb,
+                       void *private_data)
+{
+        COMPOUND4args args;
+        nfs_argop4 op[2 + 1];
+        struct nfs4_cb_data *data;
+        int i;
+
+        if (nfs->nfsi->version != NFS_V4_2) {
+                nfs_set_error(nfs, "%s requires NFSv4.2", __FUNCTION__);
+                return -ENOTSUP;
+        }
+        if (fh->is_readonly) {
+                nfs_set_error(nfs, "Trying to write to a read-only file");
+                return -1;
+        }
+
+        data = calloc(1, sizeof(*data));
+        if (data == NULL) {
+                nfs_set_error(nfs, "Out of memory.");
+                return -1;
+        }
+        data->nfs          = nfs;
+        data->cb           = cb;
+        data->private_data = private_data;
+
+        memset(op, 0, sizeof(op));
+        i = nfs4_start_compound(nfs, op);
+        i += nfs4_op_putfh(nfs, &op[i], fh);
+        i += nfs42_op_write_same(nfs, &op[i], fh, adb, stable);
+
+        memset(&args, 0, sizeof(args));
+        args.argarray.argarray_len = i;
+        args.argarray.argarray_val = op;
+
+        if (rpc_nfs4_compound_task(nfs->rpc, nfs42_write_same_cb, &args,
+                                   data) == NULL) {
+                nfs_set_error(nfs, "Failed to queue WRITE_SAME. %s",
+                              rpc_get_error(nfs->rpc));
+                free_nfs4_cb_data(data);
+                return -1;
+        }
+
+        return 0;
+}
+
+/*
+ * SEEK_HOLE / SEEK_DATA. blob0.val is the nfsfh.
+ */
+static void
+nfs42_seek_cb(struct rpc_context *rpc, int status, void *command_data,
+              void *private_data)
+{
+        struct nfs4_cb_data *data = private_data;
+        struct nfs_context *nfs = data->nfs;
+        COMPOUND4res *res = command_data;
+        struct nfsfh *fh = data->filler.blob0.val;
+        SEEK4resok *sresok;
+        int i;
+
+        assert(rpc->magic == RPC_CONTEXT_MAGIC);
+
+        if (check_nfs4_error(nfs, status, data, res, "SEEK")) {
+                return;
+        }
+
+        if ((i = nfs4_find_op(nfs, data, res, OP_SEEK, "SEEK")) < 0) {
+                return;
+        }
+        sresok = &res->resarray.resarray_val[i].nfs_resop4_u.opseek.SEEK4res_u.resok4;
+
+        fh->offset = sresok->sr_offset;
+        data->cb(0, nfs, &fh->offset, data->private_data);
+        free_nfs4_cb_data(data);
+}
+
+static int
+nfs42_lseek_content_async(struct nfs_context *nfs, struct nfsfh *fh,
+                          int64_t offset, data_content4 what, nfs_cb cb,
+                          void *private_data)
+{
+        COMPOUND4args args;
+        nfs_argop4 op[2 + 1];
+        struct nfs4_cb_data *data;
+        int i;
+
+        if (offset < 0) {
+                nfs_set_error(nfs, "Negative offset for lseek(SEEK_%s)",
+                              what == NFS4_CONTENT_HOLE ? "HOLE" : "DATA");
+                return -EINVAL;
+        }
+
+        data = calloc(1, sizeof(*data));
+        if (data == NULL) {
+                nfs_set_error(nfs, "Out of memory.");
+                return -1;
+        }
+        data->nfs          = nfs;
+        data->cb           = cb;
+        data->private_data = private_data;
+        data->filler.blob0.val  = fh;
+        data->filler.blob0.free = NULL;
+
+        memset(op, 0, sizeof(op));
+        i = nfs4_start_compound(nfs, op);
+        i += nfs4_op_putfh(nfs, &op[i], fh);
+        i += nfs42_op_seek(nfs, &op[i], fh, (uint64_t)offset, what);
+
+        memset(&args, 0, sizeof(args));
+        args.argarray.argarray_len = i;
+        args.argarray.argarray_val = op;
+
+        if (rpc_nfs4_compound_task(nfs->rpc, nfs42_seek_cb, &args,
+                                   data) == NULL) {
+                nfs_set_error(nfs, "Failed to queue SEEK. %s",
+                              rpc_get_error(nfs->rpc));
+                free_nfs4_cb_data(data);
+                return -1;
+        }
+
+        return 0;
+}
+#endif /* HAVE_NFS4_2 */
+
 /* blob0.val is nfsfh
  * blob1.val is offset
  */
@@ -4103,7 +5541,7 @@ nfs4_lseek_async(struct nfs_context *nfs, struct nfsfh *fh, int64_t offset,
                  int whence, nfs_cb cb, void *private_data)
 {
         COMPOUND4args args;
-        nfs_argop4 op[2];
+        nfs_argop4 op[2 + 1];
         struct nfs4_cb_data *data;
         int i;
 
@@ -4118,6 +5556,24 @@ nfs4_lseek_async(struct nfs_context *nfs, struct nfsfh *fh, int64_t offset,
 		}
 		return 0;
 	}
+#ifdef HAVE_NFS4_2
+        /*
+         * Finding the next hole or the next data is a server side question,
+         * and only NFSv4.2 can ask it.
+         */
+        if (whence == SEEK_HOLE || whence == SEEK_DATA) {
+                if (nfs->nfsi->version != NFS_V4_2) {
+                        nfs_set_error(nfs, "lseek(SEEK_%s) requires NFSv4.2",
+                                      whence == SEEK_HOLE ? "HOLE" : "DATA");
+                        return -ENOTSUP;
+                }
+                return nfs42_lseek_content_async(nfs, fh, offset,
+                                                 whence == SEEK_HOLE ?
+                                                 NFS4_CONTENT_HOLE :
+                                                 NFS4_CONTENT_DATA,
+                                                 cb, private_data);
+        }
+#endif /* HAVE_NFS4_2 */
 	if (whence == SEEK_CUR) {
 		if (offset < 0 &&
 		    fh->offset < (uint64_t)(-offset)) {
@@ -4129,6 +5585,15 @@ nfs4_lseek_async(struct nfs_context *nfs, struct nfsfh *fh, int64_t offset,
 			cb(0, nfs, &fh->offset, private_data);
 		}
 		return 0;
+	}
+
+	/*
+	 * Anything left has to be SEEK_END. Falling through with an
+	 * unrecognised whence silently treated it as SEEK_END.
+	 */
+	if (whence != SEEK_END) {
+		nfs_set_error(nfs, "Invalid whence %d for lseek()", whence);
+		return -EINVAL;
 	}
 
         data = calloc(1, sizeof(*data));
@@ -4150,9 +5615,16 @@ nfs4_lseek_async(struct nfs_context *nfs, struct nfsfh *fh, int64_t offset,
                 free_nfs4_cb_data(data);
                 return -1;
         }
+        /*
+         * free_nfs4_cb_data() only releases a blob that carries a free
+         * function, so without this the offset buffer leaks on every
+         * NFSv4 lseek that has to ask the server.
+         */
+        data->filler.blob1.free = free;
         memcpy(data->filler.blob1.val, &offset, sizeof(uint64_t));
 
-        i = nfs4_op_putfh(nfs, &op[0], fh);
+        i = nfs4_start_compound(nfs, op);
+        i += nfs4_op_putfh(nfs, &op[i], fh);
         i += nfs4_op_getattr(nfs, &op[i], standard_attributes, 2);
 
         memset(&args, 0, sizeof(args));
@@ -4228,7 +5700,7 @@ nfs4_lockf_async(struct nfs_context *nfs, struct nfsfh *fh,
                      nfs_cb cb, void *private_data)
 {
         COMPOUND4args args;
-        nfs_argop4 op[2];
+        nfs_argop4 op[2 + 1];
         struct nfs4_cb_data *data;
         int i;
 
@@ -4247,7 +5719,8 @@ nfs4_lockf_async(struct nfs_context *nfs, struct nfsfh *fh,
 
         data->filler.blob1.len = cmd;
 
-        i = nfs4_op_putfh(nfs, &op[0], fh);
+        i = nfs4_start_compound(nfs, op);
+        i += nfs4_op_putfh(nfs, &op[i], fh);
         switch (cmd) {
         case NFS4_F_LOCK:
                 i += nfs4_op_lock(nfs, &op[i], fh, OP_LOCK, WRITEW_LT,
@@ -4340,14 +5813,15 @@ nfs4_fcntl_async_internal(struct nfs_context *nfs, struct nfsfh *fh,
                           struct nfs4_cb_data *data)
 {
         COMPOUND4args args;
-        nfs_argop4 op[2];
+        nfs_argop4 op[2 + 1];
         struct nfs4_flock *fl;
         enum nfs4_fcntl_op cmd;
         int i, lock_type;
 
         cmd = data->filler.blob1.len;
 
-        i = nfs4_op_putfh(nfs, &op[0], fh);
+        i = nfs4_start_compound(nfs, op);
+        i += nfs4_op_putfh(nfs, &op[i], fh);
         switch (cmd) {
         case NFS4_F_SETLK:
         case NFS4_F_SETLKW:
@@ -4408,7 +5882,8 @@ nfs4_fcntl_stat_cb(struct rpc_context *rpc, int status, void *command_data,
         }
         garesok = &res->resarray.resarray_val[i].nfs_resop4_u.opgetattr.GETATTR4res_u.resok4;
         memset(&st, 0, sizeof(st));
-        if (nfs_parse_attributes(nfs, data, &st,
+        if (nfs_parse_attributes(nfs, data, &st, NULL, NULL,
+                                 &garesok->obj_attributes.attrmask,
                                  garesok->obj_attributes.attr_vals.attrlist4_val,
                                  garesok->obj_attributes.attr_vals.attrlist4_len) < 0) {
                 data->cb(-EINVAL, nfs, nfs_get_error(nfs), data->private_data);
@@ -4442,7 +5917,7 @@ nfs4_fcntl_async(struct nfs_context *nfs, struct nfsfh *fh,
         struct nfs4_cb_data *data;
         struct nfs4_flock *fl;
         COMPOUND4args args;
-        nfs_argop4 op[2];
+        nfs_argop4 op[2 + 1];
         int i;
 
         data = calloc(1, sizeof(*data));
@@ -4474,7 +5949,8 @@ nfs4_fcntl_async(struct nfs_context *nfs, struct nfsfh *fh,
                         fl->l_start = fh->offset + fl->l_start;
                         return nfs4_fcntl_async_internal(nfs, fh, data);
                 case SEEK_END:
-                        i = nfs4_op_putfh(nfs, &op[0], fh);
+                        i = nfs4_start_compound(nfs, op);
+                        i += nfs4_op_putfh(nfs, &op[i], fh);
                         i += nfs4_op_getattr(nfs, &op[i], standard_attributes,
                                              2);
 
@@ -4722,7 +6198,7 @@ nfs4_statvfs_async_internal(struct nfs_context *nfs, const char *path,
         struct nfs4_cb_data *data;
         COMPOUND4args args;
         struct nfsfh fh;
-        nfs_argop4 op[2];
+        nfs_argop4 op[2 + 1];
         int i;
 
         data = calloc(1, sizeof(*data));
@@ -4741,7 +6217,8 @@ nfs4_statvfs_async_internal(struct nfs_context *nfs, const char *path,
         fh.fh.len = nfs->nfsi->rootfh.len;
         fh.fh.val = nfs->nfsi->rootfh.val;
 
-        i = nfs4_op_putfh(nfs, &op[0], &fh);
+        i = nfs4_start_compound(nfs, op);
+        i += nfs4_op_putfh(nfs, &op[i], &fh);
         i += nfs4_op_getattr(nfs, &op[i], statvfs_attributes, 2);
 
         memset(&args, 0, sizeof(args));
@@ -4840,7 +6317,7 @@ nfs4_fchmod_async(struct nfs_context *nfs, struct nfsfh *fh, int mode,
                   nfs_cb cb, void *private_data)
 {
         COMPOUND4args args;
-        nfs_argop4 op[2];
+        nfs_argop4 op[2 + 1];
         struct nfs4_cb_data *data;
         uint32_t m;
         int i;
@@ -4868,7 +6345,8 @@ nfs4_fchmod_async(struct nfs_context *nfs, struct nfsfh *fh, int mode,
         
         memset(op, 0, sizeof(op));
 
-        i = nfs4_op_putfh(nfs, &op[0], fh);
+        i = nfs4_start_compound(nfs, op);
+        i += nfs4_op_putfh(nfs, &op[i], fh);
         i += nfs4_op_chmod(nfs, &op[i], fh, data->filler.blob3.val);
 
         memset(&args, 0, sizeof(args));
@@ -4964,7 +6442,14 @@ nfs4_chown_async_internal(struct nfs_context *nfs, const char *path,
 {
         struct nfs4_cb_data *data;
 
-        data = init_cb_data_split_path(nfs, path);
+        /*
+         * SETATTR applies to the filehandle the compound is left on, so the
+         * path has to name the file itself. Splitting the last component off
+         * left the compound sitting on the parent directory and chowned that
+         * instead, silently and successfully. chmod and utimes, which build
+         * the same shape of compound, already use the full path.
+         */
+        data = init_cb_data_full_path(nfs, path);
         if (data == NULL) {
                 return -1;
         }
@@ -4995,7 +6480,7 @@ nfs4_fchown_async(struct nfs_context *nfs, struct nfsfh *fh, int uid, int gid,
                   nfs_cb cb, void *private_data)
 {
         COMPOUND4args args;
-        nfs_argop4 op[2];
+        nfs_argop4 op[2 + 1];
         struct nfs4_cb_data *data;
         int i;
 
@@ -5016,7 +6501,8 @@ nfs4_fchown_async(struct nfs_context *nfs, struct nfsfh *fh, int uid, int gid,
         
         memset(op, 0, sizeof(op));
 
-        i = nfs4_op_putfh(nfs, &op[0], fh);
+        i = nfs4_start_compound(nfs, op);
+        i += nfs4_op_putfh(nfs, &op[i], fh);
         i += nfs4_op_chown(nfs, &op[i], fh, data->filler.blob3.val,
                            data->filler.blob3.len);
 

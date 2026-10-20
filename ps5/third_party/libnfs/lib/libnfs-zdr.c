@@ -70,12 +70,19 @@
 #endif
 
 struct zdr_mem {
-       struct zdr_mem *next;
-       uint32_t size;
-       char buf[1];
+        /* Payload follows this header and must retain malloc's alignment. */
+        union {
+                struct zdr_mem *next;
+                uint64_t u64;
+                long double ld;
+                void *ptr;
+#if defined(__STDC_VERSION__) && __STDC_VERSION__ >= 201112L
+                max_align_t max_align;
+#endif
+        } header;
 };
 
-struct opaque_verf _null_auth;
+struct opaque_verf libnfs_null_auth;
 
 bool_t libnfs_zdr_setpos(ZDR *zdrs, uint32_t pos)
 {
@@ -99,6 +106,23 @@ char *libnfs_zdr_getptr(ZDR *zdrs)
         return zdrs->buf;
 }
 
+/*
+ * Step over the padding that aligns a variable length field to four bytes.
+ *
+ * A truncated or malformed message can leave the field ending flush with the
+ * end of the buffer, in which case rounding up moves pos past size. Callers
+ * work out how much data is left as size - pos, and both are unsigned, so
+ * letting that happen turns an empty buffer into a ~4GB one. Clamp instead.
+ * Reads stay correct either way: they check pos + n > size and fail.
+ */
+static void libnfs_zdr_pad4(ZDR *zdrs)
+{
+        zdrs->pos = (zdrs->pos + 3) & ~3;
+        if (zdrs->pos > zdrs->size) {
+                zdrs->pos = zdrs->size;
+        }
+}
+
 void libnfs_zdrmem_create(ZDR *zdrs, const caddr_t addr, uint32_t size, enum zdr_op xop)
 {
 	zdrs->x_op = xop;
@@ -111,23 +135,30 @@ void libnfs_zdrmem_create(ZDR *zdrs, const caddr_t addr, uint32_t size, enum zdr
 void *zdr_malloc(ZDR *zdrs, uint32_t size)
 {
 	struct zdr_mem *mem;
-	int mem_size;
+	size_t mem_size;
 
-	mem_size = offsetof(struct zdr_mem, buf) + size;
+        /* Clamp max size we handle to 1GB */
+        if (size > 1024 * 1024 * 1024) {
+		return NULL;
+        }
+
+	mem_size = sizeof(*mem) + size;
 	mem = malloc(mem_size);
+        if (mem == NULL) {
+                return NULL;
+        }
 
-	mem->next = zdrs->mem;
-	mem->size = size;
+	mem->header.next = zdrs->mem;
 
 	zdrs->mem = mem;
 
-	return &mem->buf[0];
+	return mem + 1;
 }
 	
 void libnfs_zdr_destroy(ZDR *zdrs)
 {
 	while (zdrs->mem != NULL) {
-		struct zdr_mem *mem = zdrs->mem->next;
+		struct zdr_mem *mem = zdrs->mem->header.next;
 		free(zdrs->mem);
 		zdrs->mem = mem;
 	}
@@ -135,6 +166,13 @@ void libnfs_zdr_destroy(ZDR *zdrs)
 
 bool_t libnfs_zdr_u_int(ZDR *zdrs, uint32_t *u)
 {
+        /* zdrs->buf is guaranteed to be at least uint32_t aligned
+         * and zdrs->pos should always increment in multiples of 4
+         * as the ZDR atoms are uint32_t unless zdrs/zdrs->pos has become
+         * corrupted.
+         */
+        assert((zdrs->pos & 0x03) == 0);
+
 	if (zdrs->pos + 4 > zdrs->size) {
 		return FALSE;
 	}
@@ -188,14 +226,41 @@ bool_t libnfs_zdr_int64_t(ZDR *zdrs, int64_t *i)
 	return libnfs_zdr_uint64_t(zdrs, (uint64_t *)i);
 }
 
+/*
+ * Positive maxsize values are hard limits. ~0 is what rpcgen emits when
+ * the protocol states no limit. Zero is unlimited too: the AUTH
+ * credential and verifier paths pass the live length, and a zeroed
+ * object still has length zero.
+ */
+static bool_t libnfs_zdr_size_ok(uint32_t size, uint32_t maxsize)
+{
+        if (maxsize == 0 || maxsize == ~(uint32_t)0) {
+                return TRUE;
+        }
+        return size <= maxsize;
+}
+
 bool_t libnfs_zdr_bytes(ZDR *zdrs, char **bufp, uint32_t *size, uint32_t maxsize)
 {
         uint32_t zero = 0;
         int pad;
 
+        if (zdrs->x_op == ZDR_ENCODE && !libnfs_zdr_size_ok(*size, maxsize)) {
+                return FALSE;
+        }
+
 	if (!libnfs_zdr_u_int(zdrs, size)) {
 		return FALSE;
 	}
+
+        if (zdrs->x_op == ZDR_DECODE && !libnfs_zdr_size_ok(*size, maxsize)) {
+                return FALSE;
+        }
+
+        /* Clamp max size we handle to 1GB */
+        if (*size > 1024 * 1024 * 1024) {
+		return FALSE;
+        }
 
 	if (zdrs->pos + (int)*size > zdrs->size) {
 		return FALSE;
@@ -203,7 +268,18 @@ bool_t libnfs_zdr_bytes(ZDR *zdrs, char **bufp, uint32_t *size, uint32_t maxsize
 
 	switch (zdrs->x_op) {
 	case ZDR_ENCODE:
-		memcpy(&zdrs->buf[zdrs->pos], *bufp, *size);
+                /*
+                 * The padding below is part of the write, so it has to fit
+                 * too. The check above only covers the payload, which leaves
+                 * a field ending flush with the buffer padded past the end.
+                 */
+                if (zdrs->pos + ((*size + 3) & ~3) > zdrs->size) {
+                        return FALSE;
+                }
+		/* Empty opaque_auth values can have a NULL payload. */
+		if (*size != 0) {
+			memcpy(&zdrs->buf[zdrs->pos], *bufp, *size);
+		}
 		zdrs->pos += *size;
 
                 pad = (4 - (zdrs->pos & 0x03)) & 0x03;
@@ -215,12 +291,20 @@ bool_t libnfs_zdr_bytes(ZDR *zdrs, char **bufp, uint32_t *size, uint32_t maxsize
 		return TRUE;
 	case ZDR_DECODE:
 		if (*bufp != NULL) {
+                        /*
+                         * Caller-supplied storage is maxsize bytes long.
+                         * A zero maxsize leaves that storage empty, so
+                         * only an empty field may be copied into it.
+                         */
+                        if (*size > maxsize) {
+                                return FALSE;
+                        }
 			memcpy(*bufp, &zdrs->buf[zdrs->pos], *size);
 		} else {
 			*bufp = &zdrs->buf[zdrs->pos];
 		}
 		zdrs->pos += *size;
-		zdrs->pos = (zdrs->pos + 3) & ~3;
+		libnfs_zdr_pad4(zdrs);
 		return TRUE;
 	}
 
@@ -277,6 +361,17 @@ bool_t libnfs_zdr_opaque(ZDR *zdrs, char *objp, uint32_t size)
 {
 	switch (zdrs->x_op) {
 	case ZDR_ENCODE:
+                /*
+                 * Every other encoder bounds its write; this one did not, so
+                 * a fixed size opaque landing near the end of the encode
+                 * buffer, e.g. a stateid at the tail of a compound with many
+                 * LOOKUPs, ran straight off it. The padding below is part of
+                 * the write, so it has to fit too.
+                 */
+                if (zdrs->pos + size > zdrs->size ||
+                    zdrs->pos + ((size + 3) & ~3) > zdrs->size) {
+                        return FALSE;
+                }
 		memcpy(&zdrs->buf[zdrs->pos], objp, size);
 		zdrs->pos += size;
 		if (zdrs->pos & 3) {
@@ -285,9 +380,12 @@ bool_t libnfs_zdr_opaque(ZDR *zdrs, char *objp, uint32_t size)
 		zdrs->pos = (zdrs->pos + 3) & ~3;
 		return TRUE;
 	case ZDR_DECODE:
+                if (zdrs->pos + size > zdrs->size) {
+                        return FALSE;
+                }
 		memcpy(objp, &zdrs->buf[zdrs->pos], size);
 		zdrs->pos += size;
-		zdrs->pos = (zdrs->pos + 3) & ~3;
+		libnfs_zdr_pad4(zdrs);
 		return TRUE;
 	}
 
@@ -300,12 +398,20 @@ bool_t libnfs_zdr_string(ZDR *zdrs, char **strp, uint32_t maxsize)
 
 	if (zdrs->x_op == ZDR_ENCODE) {
 		size = strlen(*strp);
+                if (!libnfs_zdr_size_ok(size, maxsize)) {
+                        return FALSE;
+                }
 	}
 
 	if (!libnfs_zdr_u_int(zdrs, &size)) {
 		return FALSE;
 	}
-
+        if (zdrs->x_op == ZDR_DECODE && !libnfs_zdr_size_ok(size, maxsize)) {
+                return FALSE;
+        }
+	if (size > zdrs->size) {
+		return FALSE;
+	}
 	if (zdrs->pos + (int)size > zdrs->size) {
 		return FALSE;
 	}
@@ -321,7 +427,7 @@ bool_t libnfs_zdr_string(ZDR *zdrs, char **strp, uint32_t maxsize)
 			*strp = &zdrs->buf[zdrs->pos];
 			(*strp)[size] = 0;
 			zdrs->pos += size;
-			zdrs->pos = (zdrs->pos + 3) & ~3;
+			libnfs_zdr_pad4(zdrs);
 			return TRUE;
 		}
 
@@ -344,13 +450,33 @@ bool_t libnfs_zdr_array(ZDR *zdrs, char **arrp, uint32_t *size, uint32_t maxsize
 	int  i;
         uint32_t s;
 
+        if (zdrs->x_op == ZDR_ENCODE && !libnfs_zdr_size_ok(*size, maxsize)) {
+                return FALSE;
+        }
+
 	if (!libnfs_zdr_u_int(zdrs, size)) {
 		return FALSE;
 	}
 
+        if (zdrs->x_op == ZDR_DECODE && !libnfs_zdr_size_ok(*size, maxsize)) {
+                return FALSE;
+        }
+
         if (*size > UINT32_MAX/elsize) {
                 return FALSE;
         }
+
+        /*
+         * Nothing encodes in fewer than four bytes, so a count larger than
+         * the bytes still in the buffer cannot be honest. Reject it before
+         * allocating: otherwise a four byte count in a short reply has us
+         * malloc and zero as much as zdr_malloc will hand out, which is 1GB.
+         */
+        if (zdrs->x_op == ZDR_DECODE &&
+            *size > (zdrs->size - zdrs->pos) / 4) {
+                return FALSE;
+        }
+
         s = *size * elsize;
 
 	if (zdrs->x_op == ZDR_DECODE) {
@@ -363,6 +489,18 @@ bool_t libnfs_zdr_array(ZDR *zdrs, char **arrp, uint32_t *size, uint32_t maxsize
 
 	for (i = 0; i < (int)*size; i++) {
 		if (!proc(zdrs, *arrp + i * elsize)) {
+			return FALSE;
+		}
+	}
+	return TRUE;
+}
+
+bool_t libnfs_zdr_vector(ZDR *zdrs, char *arrp, uint32_t size, uint32_t elsize, zdrproc_t proc)
+{
+	int  i;
+
+	for (i = 0; i < size; i++) {
+		if (!proc(zdrs, arrp + i * elsize)) {
 			return FALSE;
 		}
 	}
@@ -498,6 +636,10 @@ static bool_t libnfs_accepted_reply(ZDR *zdrs, struct accepted_reply *ar)
                                 return FALSE;
                         }
                                 
+                        /* len is the server's, keep it inside the buffer */
+                        if (len > zdrs->size - zdrs->pos) {
+                                return FALSE;
+                        }
                         message_buffer.length = len;
                         message_buffer.value = zdr_getptr(zdrs) + zdr_getpos(zdrs);
                         output_buffer = ar->reply_data.results.output_buffer;
@@ -507,6 +649,10 @@ static bool_t libnfs_accepted_reply(ZDR *zdrs, struct accepted_reply *ar)
                                           NULL,
                                           NULL);
                         if (maj) {
+                                return FALSE;
+                        }
+                        /* The 4 byte header below must actually be there */
+                        if (output_buffer->length < 4) {
                                 return FALSE;
                         }
                         zdrs->buf = (char *)output_buffer->value + 4;
@@ -662,6 +808,10 @@ struct AUTH *authnone_create(void)
 
 struct AUTH *libnfs_authunix_create(const char *host, uint32_t uid, uint32_t gid, uint32_t len, uint32_t *groups)
 {
+	if (len > 16) { // The maximum number of auxiliary groups is 16, refer to RFC 5531 section 14
+		return NULL;
+	}
+
 	struct AUTH *auth;
 	int size;
 	uint32_t *buf;
@@ -669,6 +819,10 @@ struct AUTH *libnfs_authunix_create(const char *host, uint32_t uid, uint32_t gid
 
 	size = 4 + 4 + ((strlen(host) + 3) & ~3) + 4 + 4 + 4 + len * 4;
 	auth = calloc(1, sizeof(struct AUTH));
+	if (auth == NULL) {
+		return NULL;
+	}
+
 	auth->ah_cred.oa_flavor = AUTH_UNIX;
 	auth->ah_cred.oa_length = size;
 	auth->ah_cred.oa_base = calloc(1, size);
@@ -756,4 +910,3 @@ void libnfs_auth_destroy(struct AUTH *auth)
 	}
 	free(auth);
 }
-

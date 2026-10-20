@@ -27,6 +27,7 @@
 #include "ps2_compat.h"
 #endif
 
+#include <stddef.h>
 #include <stdint.h>
 #if !defined(_WIN32)
 #include <sys/time.h>
@@ -43,6 +44,22 @@ extern "C" {
 #define LIBNFS_FEATURE_UMOUNT
 #define LIBNFS_FEATURE_MULTITHREADING
 
+/*
+ * NFSv4.2, i.e. the NFS_V4_2 dialect and the calls that only it can answer:
+ * nfs_fallocate(), lseek() with SEEK_HOLE or SEEK_DATA, and the READ_PLUS and
+ * WRITE_SAME operations in libnfs-raw-nfs4.h.
+ *
+ * Like the feature macros above this says the API is there, not that the
+ * library was built with it. The small embedded and console targets never
+ * have it, so it is left undefined for them, but any other build can still
+ * have dropped the dialect with --disable-nfs4-2 or -DENABLE_NFS4_2=OFF, and
+ * that is only visible at run time: nfs_set_version(nfs, NFS_V4_2) fails, and
+ * so does every NFSv4.2 only call.
+ */
+#if !defined(PS2_EE) && !defined(PS3_PPU) && !defined(AROS)
+#define LIBNFS_FEATURE_NFS4_2
+#endif
+
 #define NFS_BLKSIZE 4096
 
 struct nfs_context;
@@ -50,6 +67,7 @@ struct rpc_context;
 
 struct nfs_url {
 	char *server;
+	int  port;
 	char *path;
 	char *file;
 };
@@ -96,6 +114,9 @@ struct utimbuf {
  * Used for interfacing the async version of the api into an external
  * eventsystem.
  *
+ * nfs_get_tid() returns the Linux tid of the libnfs thread processing
+ * requests for this nfs_context.
+ *
  * nfs_get_fd() returns the file descriptor for the context we need to
  * listen for events from.
  *
@@ -120,7 +141,14 @@ struct utimbuf {
  * You only need this for the async interface. The sync interface already
  * do this in their built-in event loops.
  */
+EXTERN int nfs_get_tid(struct nfs_context *nfs);
 EXTERN int nfs_get_fd(struct nfs_context *nfs);
+/*
+ * Returns a file descriptor that becomes readable when libnfs has queued work
+ * for its service thread, or -1 on builds where no such descriptor exists.
+ * Callers must treat -1 as "no wakeup available" and not as an error.
+ */
+EXTERN int nfs_get_evfd(struct nfs_context *nfs);
 EXTERN int nfs_which_events(struct nfs_context *nfs);
 EXTERN int nfs_service(struct nfs_context *nfs, int revents);
 
@@ -130,6 +158,13 @@ EXTERN int nfs_service(struct nfs_context *nfs, int revents);
  * or if the connection is completely idle.
  */
 EXTERN int nfs_queue_length(struct nfs_context *nfs);
+
+/*
+ * Enable or disable resolving the server name afresh before every reconnect.
+ * The default is disabled, i.e. reconnect to the address that was resolved on
+ * the initial connect.
+ */
+EXTERN void nfs_set_resolve_on_reconnect(struct nfs_context *nfs, int enabled);
 
 /*
  * Used if you need different credentials than the default for the current user.
@@ -147,8 +182,12 @@ enum rpc_sec {
         RPC_SEC_KRB5P,
 };
 EXTERN void nfs_set_security(struct nfs_context *nfs, enum rpc_sec sec);
+
+/*
+ * Set readonly parameter of the mount.
+ */
+EXTERN void nfs_set_readonly(struct nfs_context *nfs, int readonly);
         
-#ifdef HAVE_TLS
 /*
  * Various transport level security values that map to the mount option
  * xprtsec=[none,tls,mtls].
@@ -161,7 +200,6 @@ enum rpc_xprtsec {
 };
 
 EXTERN void nfs_set_xprtsecurity(struct nfs_context *nfs, enum rpc_xprtsec xprtsec);
-#endif /* HAVE_TLS */
 
 /*
  * Used if you need to bind to a specific interface.
@@ -249,6 +287,7 @@ EXTERN int nfs_set_hash_size(struct nfs_context *nfs, int hashes);
  * auto-traverse-mounts=<0|1>
  *                   : Should libnfs try to traverse across nested mounts
  *                     automatically or not. Default is 1 == enabled.
+ * readonly	     : Set the mount to readonly.
  * dircache=<0|1>    : Disable/enable directory caching. Enabled by default.
  * autoreconnect=<-1|0|>=1>
  *                   : Control the auto-reconnect behaviour to the NFS session.
@@ -345,10 +384,42 @@ EXTERN void nfs_set_mountport(struct nfs_context *nfs, int port);
 EXTERN size_t nfs_get_readdir_maxcount(struct nfs_context *nfs);
 EXTERN void nfs_set_readdir_max_buffer_size(struct nfs_context *nfs, uint32_t dircount, uint32_t maxcount);
 
+#ifdef LIBNFS_FEATURE_NFS4_2
+/*
+ * NFSv4.2, i.e. NFSv4 minor version 2.
+ *
+ * This is a libnfs dialect selector, not an ONC RPC program version: NFSv4 of
+ * every minor version is RPC program version 4, and the minor version travels
+ * in the COMPOUND itself. The value is therefore deliberately outside the
+ * range of real RPC version numbers.
+ *
+ * A note on concurrency, which matters if you drive libnfs hard.
+ *
+ * From minor version 1 onwards every request travels in a session slot, and
+ * a slot carries one request at a time because the server's reply cache is
+ * keyed on it. The session therefore has a fixed ceiling, set by the server,
+ * on how many requests can be in flight at once, typically some tens.
+ *
+ * This does not limit how many requests you may submit. libnfs takes a slot
+ * as a request goes out on the wire rather than when you hand it over, so
+ * queueing tens of thousands of async calls works exactly as it does on
+ * NFSv3 and NFSv4.0; they are simply released onto the connection as slots
+ * free up. What it does mean is that NFSv4.2 cannot have more than the
+ * granted number of requests outstanding at the server at once, where
+ * NFSv4.0 has no such bound. Workloads whose throughput comes from very deep
+ * request pipelining should measure both before choosing.
+ *
+ * NFSv3 and NFSv4.0 have no sessions and are not affected by any of this.
+ */
+#define NFS_V4_2 42
+#endif /* LIBNFS_FEATURE_NFS4_2 */
+
 /*
  * Set NFS version. Supported versions are
  * NFS_V3 (default)
- * NFS_V4
+ * NFS_V4     NFSv4.0
+ * NFS_V4_2   NFSv4.2, where LIBNFS_FEATURE_NFS4_2 is defined and the library
+ *            was built with NFSv4.2 support
  */
 EXTERN int nfs_set_version(struct nfs_context *nfs, int version);
 /*
@@ -612,6 +683,80 @@ EXTERN int nfs_fstat64_async(struct nfs_context *nfs, struct nfsfh *nfsfh,
 EXTERN int nfs_fstat64(struct nfs_context *nfs, struct nfsfh *nfsfh,
                        struct nfs_stat_64 *st);
 
+/* nfs4_stat_64
+ * An nfs_stat_64 plus the raw utf8 owner and group strings as sent by the
+ * server. NFSv4 servers may return a name rather than a numeric id, in which
+ * case nfs_uid/nfs_gid in st are set to -1 and the name is only available
+ * here. nfs_user/nfs_group are NULL if the server did not send a name.
+ * These functions are only available for NFSv4.
+ */
+struct nfs4_stat_64 {
+	struct nfs_stat_64 st;
+	char *nfs_user;
+	char *nfs_group;
+};
+
+/*
+ * Free the strings in a struct nfs4_stat_64 filled in by one of the
+ * sync nfs4_[l|f]stat64() functions. The structure itself is owned by
+ * the caller.
+ */
+EXTERN void nfs4_free_stat64(struct nfs4_stat_64 *st);
+
+/*
+ * Async nfs4_stat64(<filename>)
+ * Function returns
+ *  0 : The command was queued successfully. The callback will be invoked once
+ *      the command completes.
+ * <0 : An error occured when trying to queue the command.
+ *      The callback will not be invoked.
+ *
+ * When the callback is invoked, status indicates the result:
+ *      0 : Success.
+ *          data is struct nfs4_stat_64 *
+ *          The structure and its strings are only valid for the duration
+ *          of the callback. Do not call nfs4_free_stat64() on it.
+ * -errno : An error occured.
+ *          data is the error string.
+ */
+EXTERN int nfs4_stat64_async(struct nfs_context *nfs, const char *path,
+                             nfs_cb cb, void *private_data);
+/*
+ * Sync nfs4_stat64(<filename>)
+ * Function returns
+ *      0 : The operation was successful. Call nfs4_free_stat64(st)
+ *          once done with the structure.
+ * -errno : The command failed.
+ */
+EXTERN int nfs4_stat64(struct nfs_context *nfs, const char *path,
+                       struct nfs4_stat_64 *st);
+
+/*
+ * Async nfs4_lstat64(<filename>)
+ * Same as nfs4_stat64_async() but does not follow a final symlink.
+ */
+EXTERN int nfs4_lstat64_async(struct nfs_context *nfs, const char *path,
+                              nfs_cb cb, void *private_data);
+/*
+ * Sync nfs4_lstat64(<filename>)
+ * Same as nfs4_stat64() but does not follow a final symlink.
+ */
+EXTERN int nfs4_lstat64(struct nfs_context *nfs, const char *path,
+                        struct nfs4_stat_64 *st);
+
+/*
+ * Async nfs4_fstat64(<nfsfh>)
+ * Same as nfs4_stat64_async() but operates on an open filehandle.
+ */
+EXTERN int nfs4_fstat64_async(struct nfs_context *nfs, struct nfsfh *nfsfh,
+                              nfs_cb cb, void *private_data);
+/*
+ * Sync nfs4_fstat64(<nfsfh>)
+ * Same as nfs4_stat64() but operates on an open filehandle.
+ */
+EXTERN int nfs4_fstat64(struct nfs_context *nfs, struct nfsfh *nfsfh,
+                        struct nfs4_stat_64 *st);
+
 /*
  * UMASK() never blocks, so no special aync/async versions are available
  */
@@ -701,6 +846,7 @@ EXTERN int nfs_close_async(struct nfs_context *nfs, struct nfsfh *nfsfh,
 EXTERN int nfs_close(struct nfs_context *nfs, struct nfsfh *nfsfh);
 
 
+struct iovec;
 /*
  * PREAD()
  */
@@ -731,6 +877,36 @@ EXTERN int nfs_pread_async(struct nfs_context *nfs, struct nfsfh *nfsfh,
 EXTERN int nfs_pread(struct nfs_context *nfs, struct nfsfh *nfsfh,
                      void *buf, size_t count, uint64_t offset);
 
+/*
+ * PREADV()
+ */
+/*
+ * Async preadv()
+ *
+ * Function returns
+ *  0 : The command was queued successfully. The callback will be invoked once
+ *      the command completes.
+ * <0 : An error occured when trying to queue the command.
+ *      The callback will not be invoked.
+ *
+ * When the callback is invoked, status indicates the result:
+ *    >=0 : Success.
+ *          status is numer of bytes read.
+ * -errno : An error occured.
+ *          data is the error string.
+ */
+EXTERN int nfs_preadv_async(struct nfs_context *nfs, struct nfsfh *nfsfh,
+                           const struct iovec *iov, int iovcnt, uint64_t offset,
+                           nfs_cb cb, void *private_data);
+/*
+ * Sync preadv()
+ * Function returns
+ *    >=0 : numer of bytes read.
+ * -errno : An error occured.
+ */
+EXTERN int nfs_preadv(struct nfs_context *nfs, struct nfsfh *nfsfh,
+                      const struct iovec *iov, int iovcnt, uint64_t offset);
+        
 
 
 /*
@@ -762,6 +938,36 @@ EXTERN int nfs_read_async(struct nfs_context *nfs, struct nfsfh *nfsfh,
  */
 EXTERN int nfs_read(struct nfs_context *nfs, struct nfsfh *nfsfh,
                     void *buf, size_t count);
+
+/*
+ * READV()
+ */
+/*
+ * Async readv()
+ *
+ * Function returns
+ *  0 : The command was queued successfully. The callback will be invoked once
+ *      the command completes.
+ * <0 : An error occured when trying to queue the command.
+ *      The callback will not be invoked.
+ *
+ * When the callback is invoked, status indicates the result:
+ *    >=0 : Success.
+ *          status is numer of bytes read.
+ * -errno : An error occured.
+ *          data is the error string.
+ */
+EXTERN int nfs_readv_async(struct nfs_context *nfs, struct nfsfh *nfsfh,
+                           const struct iovec *iov, int iovcnt,
+                           nfs_cb cb, void *private_data);
+/*
+ * Sync readv()
+ * Function returns
+ *    >=0 : numer of bytes read.
+ * -errno : An error occured.
+ */
+EXTERN int nfs_readv(struct nfs_context *nfs, struct nfsfh *nfsfh,
+                     const struct iovec *iov, int iovcnt);
 
 /*
  * PWRITE()
@@ -829,7 +1035,87 @@ EXTERN int nfs_write(struct nfs_context *nfs, struct nfsfh *nfsfh,
  * LSEEK()
  */
 /*
+ * Sparse file support, NFSv4.2 only.
+ *
+ * SEEK_HOLE and SEEK_DATA are Linux and Solaris extensions to lseek(), and
+ * FALLOC_FL_PUNCH_HOLE is a Linux extension to fallocate(). Platforms that
+ * lack them still need the constants to call these functions, so define them
+ * here when the system headers did not. The values are the ones Linux uses,
+ * so an application that already has them keeps working unchanged.
+ */
+#ifndef SEEK_DATA
+#define SEEK_DATA 3
+#endif
+#ifndef SEEK_HOLE
+#define SEEK_HOLE 4
+#endif
+#ifndef FALLOC_FL_KEEP_SIZE
+#define FALLOC_FL_KEEP_SIZE 0x01
+#endif
+#ifndef FALLOC_FL_PUNCH_HOLE
+#define FALLOC_FL_PUNCH_HOLE 0x02
+#endif
+#ifndef FALLOC_FL_ZERO_RANGE
+#define FALLOC_FL_ZERO_RANGE 0x10
+#endif
+
+/*
+ * Async fallocate()
+ *
+ * Two modes are implemented:
+ *
+ *   0                                        reserve space for the range,
+ *                                            growing the file if the range
+ *                                            runs past the end, as
+ *                                            fallocate(2) does. The
+ *                                            reservation is advisory: a
+ *                                            server may or may not act on it.
+ *
+ *   FALLOC_FL_PUNCH_HOLE|FALLOC_FL_KEEP_SIZE deallocate the range. It reads
+ *                                            back as zeroes and the file size
+ *                                            does not change.
+ *
+ *   FALLOC_FL_ZERO_RANGE                     zero the range, keeping the
+ *                                            space allocated. The file grows
+ *                                            if the range runs past the end.
+ *
+ * PUNCH_HOLE must be paired with KEEP_SIZE exactly as Linux requires.
+ * KEEP_SIZE on its own is refused: NFS has no way to reserve space without
+ * also growing the file, so it would not mean what it says.
+ *
+ * These are NFSv4.2 operations and fail with -ENOTSUP on any other version.
+ *
+ * Function returns
+ *  0 : The command was queued successfully. The callback will be invoked once
+ *      the command completes.
+ * <0 : An error occured when trying to queue the command.
+ *      The callback will not be invoked.
+ *
+ * When the callback is invoked, status indicates the result:
+ *      0 : Success.
+ * -errno : An error occured.
+ *          data is the error string.
+ */
+EXTERN int nfs_fallocate_async(struct nfs_context *nfs, struct nfsfh *nfsfh,
+                               int mode, uint64_t offset, uint64_t length,
+                               nfs_cb cb, void *private_data);
+
+/*
+ * Sync fallocate()
+ *
+ * Function returns
+ *      0 : Success
+ * -errno : An error occured.
+ */
+EXTERN int nfs_fallocate(struct nfs_context *nfs, struct nfsfh *nfsfh,
+                         int mode, uint64_t offset, uint64_t length);
+
+/*
  * Async lseek()
+ *
+ * whence may also be SEEK_HOLE or SEEK_DATA, which find the next hole or the
+ * next data after offset. Those two are NFSv4.2 only and fail with -ENOTSUP
+ * on any other version.
  *
  * Function returns
  *  0 : The command was queued successfully. The callback will be invoked once
@@ -1938,6 +2224,15 @@ EXTERN int mount_getexports_async(struct rpc_context *rpc, const char *server,
 EXTERN struct exportnode *mount_getexports(const char *server);
 
 /*
+ * Sync getexports_mountport(<server>, <mountport>)
+ * Function returns
+ *            NULL : something failed
+ *  exports export : a linked list of exported directories
+ *
+ * returned data must be freed by calling mount_free_export_list(exportnode);
+ */
+EXTERN struct exportnode *mount_getexports_mountport(const char *server, int mountport);
+/*
  * Sync getexports_timeout(<server>, <timeout>)
  * Function returns
  *            NULL : something failed
@@ -2035,16 +2330,46 @@ EXTERN void nfs4_set_verifier(struct nfs_context *nfs, const char *verifier);
  * This function starts a separate service thread for multithreading support.
  * When multithreading is enabled the eventdriven async API is no longer
  * supported and you can only use the synchronous API.
+ *
+ * nfs_mt_service_thread_start_ss() is same as nfs_mt_service_thread_start()
+ * but allows caller to set the stack size of the libnfs service thread.
+ * Default 8MB stack size is not sufficient for very large readdir/readdirplus
+ * responses as the zdr decoder is recursive.
  */
 EXTERN int nfs_mt_service_thread_start(struct nfs_context *nfs);
+EXTERN int nfs_mt_service_thread_start_ss(struct nfs_context *nfs, size_t stack_bytes);
+
 /*
  * Shutdown multithreading support.
  */
 EXTERN void nfs_mt_service_thread_stop(struct nfs_context *nfs);
-        
+
+struct sockaddr;
+
+/*
+ * UDP contexts for UDP servers
+ */
+EXTERN int rpc_bind_udp(struct rpc_context *rpc, char *addr, int port);
+EXTERN int rpc_set_udp_destination(struct rpc_context *rpc, char *addr, int port, int is_broadcast);
+EXTERN struct rpc_context *rpc_init_udp_context(void);
+EXTERN int rpc_is_udp_socket(struct rpc_context *rpc);
+
+/* UDP server sockets */
+/* The ip address of the udp client */
+EXTERN struct sockaddr *rpc_get_udp_src_sockaddr(struct rpc_context *rpc);
+#ifdef __linux__
+/* The ip address where we received the udp packet from the client */
+EXTERN struct sockaddr *rpc_get_udp_dst_sockaddr(struct rpc_context *rpc);
+#endif
+
+EXTERN void rpc_set_resiliency(struct rpc_context *rpc,
+			int num_tcp_reconnect,
+			int timeout,
+			int retrans);
+
+
 #ifdef __cplusplus
 }
 #endif
-
 
 #endif /* !_LIBNFS_H_ */

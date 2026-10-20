@@ -70,8 +70,10 @@ smb2_pad_to_64bit(struct smb2_context *smb2, struct smb2_io_vectors *v)
         if ((len & 0x07) == 0) {
                 return 0;
         }
-        if (smb2_add_iovector(smb2, v, &zero_bytes[0], 8 - (len & 0x07), NULL)
-            == NULL) {
+        if (smb2_add_iovector(smb2, v, 
+                        &zero_bytes[0], 
+                        8 - (len & 0x07), NULL)
+                        == NULL) {
                 return -1;
         }
 
@@ -115,6 +117,12 @@ smb2_allocate_pdu(struct smb2_context *smb2, enum smb2_command command,
                  * looking at traces.
                  */
                 hdr->credit_charge = 0;
+        } else if (hdr->command == SMB2_CANCEL) {
+                /* CANCEL reuses the MessageId (or AsyncId) of the request
+                 * it cancels instead of consuming a new one, so it must
+                 * not charge any credits of its own.
+                 */
+                hdr->credit_charge = 0;
         } else {
                 /* Assume the credits for this PDU will be 1.
                  * READ/WRITE/IOCTL/QUERYDIR that consumes more than
@@ -130,7 +138,7 @@ smb2_allocate_pdu(struct smb2_context *smb2, enum smb2_command command,
         case SMB2_SESSION_SETUP:
         case SMB2_LOGOFF:
         case SMB2_ECHO:
-        /* case SMB2_CANCEL: */
+        case SMB2_CANCEL:
                 hdr->sync.tree_id = 0;
                 break;
         case SMB2_TREE_CONNECT:
@@ -153,7 +161,11 @@ smb2_allocate_pdu(struct smb2_context *smb2, enum smb2_command command,
         pdu->cb_data = cb_data;
         pdu->out.niov = 0;
 
-        smb2_add_iovector(smb2, &pdu->out, pdu->hdr, SMB2_HEADER_SIZE, NULL);
+        if (smb2_add_iovector(smb2, &pdu->out, pdu->hdr, SMB2_HEADER_SIZE, NULL) == NULL) {
+                free(pdu);
+                smb2_set_error(smb2, "Too many I/O vectors when adding SMB2 header");
+                return NULL;
+        }
 
         switch (command) {
         case SMB2_NEGOTIATE:
@@ -205,7 +217,7 @@ smb2_get_tree_id_for_pdu(struct smb2_context *smb2, struct smb2_pdu *pdu, uint32
                 case SMB2_SESSION_SETUP:
                 case SMB2_LOGOFF:
                 case SMB2_ECHO:
-                /* case SMB2_CANCEL: */
+                case SMB2_CANCEL:
                 case SMB2_TREE_CONNECT:
                         *tree_id  = 0;
                         return 0;
@@ -237,7 +249,7 @@ smb2_set_tree_id_for_pdu(struct smb2_context *smb2, struct smb2_pdu *pdu, uint32
                 case SMB2_SESSION_SETUP:
                 case SMB2_LOGOFF:
                 case SMB2_ECHO:
-                /* case SMB2_CANCEL: */
+                case SMB2_CANCEL:
                         break;
                 case SMB2_TREE_CONNECT:
                         break;
@@ -247,6 +259,13 @@ smb2_set_tree_id_for_pdu(struct smb2_context *smb2, struct smb2_pdu *pdu, uint32
                 return 0;
         }
         return -1;
+}
+
+int smb2_get_session_id(struct smb2_context* smb2, uint64_t *session_id)
+{
+        *session_id = smb2->session_id;
+
+        return 0;
 }
 
 int
@@ -302,12 +321,12 @@ smb2_pdu_is_compound(struct smb2_context *smb2)
                 (smb2->hdr.next_command != 0) : 0;
 }
 
-void
-smb2_add_compound_pdu(struct smb2_context *smb2,
-                      struct smb2_pdu *pdu, struct smb2_pdu *next_pdu)
+static void
+_smb2_add_compound_pdu(struct smb2_context *smb2,
+                       struct smb2_pdu *pdu, struct smb2_pdu *next_pdu,
+                       int is_related)
 {
         int i, offset;
-
 
         /* find the last pdu in the chain */
         while (pdu->next_compound) {
@@ -323,14 +342,55 @@ smb2_add_compound_pdu(struct smb2_context *smb2,
         pdu->header.next_command = offset;
         smb2_set_uint32(&pdu->out.iov[0], 20, pdu->header.next_command);
 
-        /* Fixup flags */
-        next_pdu->header.flags |= SMB2_FLAGS_RELATED_OPERATIONS;
+        if (is_related) {
+                /* Fixup flags */
+                next_pdu->header.flags |= SMB2_FLAGS_RELATED_OPERATIONS;
+        } else {
+                /*
+                 * This is an UNRELATED compound.
+                 * Do NOT set SMB2_FLAGS_RELATED_OPERATIONS.
+                 *
+                 * Only touch next_pdu here, never pdu (the last pdu of
+                 * whatever chain we are appending to): pdu may already
+                 * be legitimately related to its own predecessor from
+                 * an earlier smb2_add_compound_pdu() call, and clearing
+                 * that would corrupt the FileId that relatedness was
+                 * supposed to resolve, turning a compound_file_id
+                 * placeholder into a bogus literal FileId.
+                 */
+                next_pdu->header.flags &= ~SMB2_FLAGS_RELATED_OPERATIONS;
+
+                /*
+                 * Mark the new pdu so the receive path knows not to
+                 * enforce compound ordering against whatever came
+                 * before it.
+                 */
+                next_pdu->unrelated_compound = 1;
+        }
         smb2_set_uint32(&next_pdu->out.iov[0], 16, next_pdu->header.flags);
+}
+
+void
+smb2_add_compound_pdu(struct smb2_context *smb2,
+                      struct smb2_pdu *pdu, struct smb2_pdu *next_pdu)
+{
+        _smb2_add_compound_pdu(smb2, pdu, next_pdu, 1);
+}
+
+void
+smb2_add_unrelated_compound_pdu(struct smb2_context *smb2,
+                                struct smb2_pdu *pdu,
+                                struct smb2_pdu *next_pdu)
+{
+        _smb2_add_compound_pdu(smb2, pdu, next_pdu, 0);
 }
 
 void
 smb2_free_pdu(struct smb2_context *smb2, struct smb2_pdu *pdu)
 {
+        SMB2_LIST_REMOVE(&smb2->outqueue, pdu);
+        SMB2_LIST_REMOVE(&smb2->waitqueue, pdu);
+
         if (pdu->next_compound) {
                 smb2_free_pdu(smb2, pdu->next_compound);
         }
@@ -338,10 +398,14 @@ smb2_free_pdu(struct smb2_context *smb2, struct smb2_pdu *pdu)
         smb2_free_iovector(smb2, &pdu->out);
         smb2_free_iovector(smb2, &pdu->in);
 
+        if (pdu->free_cb != NULL) {
+            pdu->free_cb(pdu->cb_data);
+        }
+        
         if (pdu->free_payload != NULL) {
             pdu->free_payload(smb2, pdu->payload);
         }
-    
+
         free(pdu->payload);
         free(pdu->crypt);
         free(pdu);
@@ -363,7 +427,7 @@ smb2_set_uint16(struct smb2_iovec *iov, int offset, uint16_t value)
         if (offset + sizeof(uint16_t) > iov->len) {
                 return -1;
         }
-        *(uint16_t *)(iov->buf + offset) = htole16(value);
+        *(uint16_t *)(void *)(iov->buf + offset) = htole16(value);
         return 0;
 }
 
@@ -373,7 +437,7 @@ smb2_set_uint32(struct smb2_iovec *iov, int offset, uint32_t value)
         if (offset + sizeof(uint32_t) > iov->len) {
                 return -1;
         }
-        *(uint32_t *)(iov->buf + offset) = htole32(value);
+        *(uint32_t *)(void *)(iov->buf + offset) = htole32(value);
         return 0;
 }
 
@@ -441,7 +505,7 @@ static void
 smb2_encode_header(struct smb2_context *smb2, struct smb2_iovec *iov,
                    struct smb2_header *hdr)
 {
-        if (!smb2_is_server(smb2)) {
+        if (!smb2_is_server(smb2) && hdr->command != SMB2_CANCEL) {
                 hdr->message_id = smb2->message_id++;
                 if (hdr->credit_charge > 1) {
                         smb2->message_id += (hdr->credit_charge - 1);
@@ -529,7 +593,7 @@ smb2_decode_header(struct smb2_context *smb2, struct smb2_iovec *iov,
                         case SMB2_SESSION_SETUP:
                         case SMB2_LOGOFF:
                         case SMB2_ECHO:
-                        /* case SMB2_CANCEL: */
+                        case SMB2_CANCEL:
                                 break;
                         case SMB2_TREE_CONNECT:
                                 break;
@@ -538,12 +602,12 @@ smb2_decode_header(struct smb2_context *smb2, struct smb2_iovec *iov,
                                 smb2_select_tree_id(smb2, hdr->sync.tree_id);
                                 break;
                         }
-
-                        if (smb2_is_server(smb2)) {
-                                /* remember message id to format reply */
-                                smb2->message_id = hdr->message_id;
-                        }
                 }
+        }
+        if (smb2_is_server(smb2)) {
+                /* remember message id to format a reply for this
+                 * request (or ack this notification) */
+                smb2->message_id = hdr->message_id;
         }
         smb2_get_uint64(iov, 40, &hdr->session_id);
         memcpy(&hdr->signature, iov->buf + 48, 16);
@@ -555,20 +619,13 @@ static void
 smb2_add_to_outqueue(struct smb2_context *smb2, struct smb2_pdu *pdu)
 {
         SMB2_LIST_ADD_END(&smb2->outqueue, pdu);
-        smb2_change_events(smb2, smb2->fd, smb2_which_events(smb2));
-}
 
-struct smb2_pdu *
-smb2_find_pdu_by_command(struct smb2_context *smb2,
-              uint32_t command) {
-        struct smb2_pdu *pdu;
-
-        for (pdu = smb2->waitqueue; pdu; pdu = pdu->next) {
-                if (pdu->header.command == command) {
-                        break;
-                }
+        /* opportunistically try to write it to the socket right away */
+        if (smb2->outqueue == pdu) {
+                smb2_write_to_socket(smb2);
         }
-        return pdu;
+
+        smb2_change_events(smb2, smb2->fd, smb2_which_events(smb2));
 }
 
 static int
@@ -577,15 +634,12 @@ smb2_correlate_reply(struct smb2_context *smb2, struct smb2_pdu *pdu)
         struct smb2_pdu *req_pdu;
         int ret = 0;
 
-        /* set reply flag */
-        pdu->header.flags |= SMB2_FLAGS_SERVER_TO_REDIR;
-
-        req_pdu = smb2_find_pdu_by_command(smb2, pdu->header.command);
+        req_pdu = smb2_find_pdu(smb2, pdu->header.message_id);
         if (req_pdu == NULL) {
                 if (pdu->header.command != SMB2_OPLOCK_BREAK) {
                         smb2_set_error(smb2, "no matching request PDU "
-                                       "found for reply to cmd %d",
-                                        pdu->header.command);
+                                       "found for reply to cmd %d id %llu",
+                                        pdu->header.command, pdu->header.message_id);
                         return -1;
                 } else {
                         /* sending an unsolicited break */
@@ -594,21 +648,58 @@ smb2_correlate_reply(struct smb2_context *smb2, struct smb2_pdu *pdu)
                         pdu->header.session_id = 0;
                 }
         }  else {
-                SMB2_LIST_REMOVE(&smb2->waitqueue, req_pdu);
+                uint16_t credit_grant = req_pdu->header.credit_request_response;
 
-                pdu->header.credit_request_response =
-                                        64 + req_pdu->header.credit_charge;
+                /* some clients (lookin at you nautilus) break if their credits
+                 * increment too far (and probably wrap to 0) so limit credits
+                 * to what the client requests only and if the clients charge
+                 * is greater than ours, charge the larger amount so they cant
+                 * accumulate on the client
+                 */
+                if (credit_grant > 0xf000) {
+                        pdu->header.credit_request_response = 0xffff;
+                } else {
+                        pdu->header.credit_request_response = credit_grant;
+                }
+
+                if (req_pdu->header.credit_charge > pdu->header.credit_charge) {
+                        pdu->header.credit_charge = req_pdu->header.credit_charge;
+                }
 
                 /* replies always have to have the same message-id and tree-id as
                  * the request we sent, so use the request from the wait queue
                  * to make sure that is the case. (exception is tree-connect where
-                 * the reply has the new tree-id and request was 0 )
+                 * the reply has the new tree-id and request was 0)
                  */
                 pdu->header.message_id = req_pdu->header.message_id;
                 if (pdu->header.command != SMB2_TREE_CONNECT) {
                         pdu->header.sync.tree_id = req_pdu->header.sync.tree_id;
                 }
-                smb2_free_pdu(smb2, req_pdu);
+
+                /* remove the request from the waitqueue when we get its reply
+                 * unless this is an async status-pending reply
+                */
+                if ((pdu->header.flags & SMB2_FLAGS_ASYNC_COMMAND) &&
+                               (pdu->header.status == SMB2_STATUS_PENDING)) {
+                        /* the real reply will be queued later so we leave the request
+                         * in the list to be correlated with that. we will also mark the
+                         * request as async as well so when the real reply gets here
+                         * we will know to set the async-id and flag
+                         */
+                        pdu->header.async.async_id = ++smb2->async_id;
+                        req_pdu->header.async.async_id = pdu->header.async.async_id;
+                        req_pdu->header.flags |= SMB2_FLAGS_ASYNC_COMMAND;
+               } else {
+                       /* if this is the real-reply to an async operation, also
+                        * set the async flag and id (MS-SMB2 3.2.5.1.5)
+                        */
+                       if (req_pdu->header.flags & SMB2_FLAGS_ASYNC_COMMAND) {
+                               pdu->header.flags |= SMB2_FLAGS_ASYNC_COMMAND;
+                               pdu->header.async.async_id = req_pdu->header.async.async_id;
+                       }
+                       SMB2_LIST_REMOVE(&smb2->waitqueue, req_pdu);
+                       smb2_free_pdu(smb2, req_pdu);
+                }
         }
         return ret;
 }
@@ -617,16 +708,51 @@ void
 smb2_queue_pdu(struct smb2_context *smb2, struct smb2_pdu *pdu)
 {
         struct smb2_pdu *p;
+        uint64_t prev_compound_mid = 0;
 
         /* Update all the PDU headers in this chain */
         for (p = pdu; p; p = p->next_compound) {
                 if (smb2_is_server(smb2)) {
-                        if (!(pdu->header.flags & SMB2_FLAGS_ASYNC_COMMAND)) {
-                                smb2_correlate_reply(smb2, p);
-                                /* TODO - care about check reply failures? */
+                        /* set reply flag, servers will only reply */
+                        pdu->header.flags |= SMB2_FLAGS_SERVER_TO_REDIR;
+
+                        /* set async flag for status==pending */
+                        if (pdu->header.status == SMB2_STATUS_PENDING) {
+                                pdu->header.flags |= SMB2_FLAGS_ASYNC_COMMAND;
                         }
+
+                        /* the server handler functions must set message id unless this
+                         * is a negotiate request, in which case it should be 0
+                         */
+                        if (!pdu->header.message_id && pdu->header.command != SMB2_NEGOTIATE) {
+                                smb2_set_error(smb2, "Queued pdu has no message id");
+                                smb2_free_pdu(smb2, pdu);
+                                return;
+                        }
+
+                        smb2_correlate_reply(smb2, p);
+                        /* TODO - care about check reply failures? */
                 }
                 smb2_encode_header(smb2, &p->out.iov[0], &p->header);
+                if (!smb2_is_server(smb2)) {
+                        /*
+                         * Track the mid of the previous command in the chain
+                         * so we can enforce ordering on receive.
+                         *
+                         * Related compounds require replies to be processed
+                         * in order.
+                         *
+                         * Unrelated compounds do not have this dependency.
+                         */
+                        if (p->unrelated_compound) {
+                                p->prev_compound_mid = 0;
+                        } else {
+                                p->prev_compound_mid = prev_compound_mid;
+                        }
+
+                        prev_compound_mid = p->header.message_id;
+                }
+
                 if (smb2->sign ||
                     (p->header.command == SMB2_TREE_CONNECT && smb2->dialect == SMB2_VERSION_0311 && !smb2->seal)) {
                         if (smb2_pdu_add_signature(smb2, p) < 0) {
@@ -639,7 +765,69 @@ smb2_queue_pdu(struct smb2_context *smb2, struct smb2_pdu *pdu)
 
         smb3_encrypt_pdu(smb2, pdu);
 
+        /*
+         * The preauth hash has to cover the bytes we actually put on the
+         * wire, so it can only be taken now that the header is encoded and
+         * the pdu is signed. It also has to be taken before the pdu goes
+         * on the outqueue, because a server writes its replies out from
+         * there straight away and frees them, and reading the pdu back
+         * afterwards is a use after free.
+         */
+        if (pdu->update_preauth_hash) {
+                smb3_update_preauth_hash(smb2, pdu->out.niov, &pdu->out.iov[0]);
+        }
+
         smb2_add_to_outqueue(smb2, pdu);
+}
+
+struct smb2_pdu *
+smb2_get_compound_pdu(struct smb2_context *smb2,
+                      struct smb2_pdu *pdu)
+{
+        if (pdu && pdu->next_compound) {
+                return pdu->next_compound;
+        }
+
+        return NULL;
+}
+
+void
+smb2_set_pdu_status(struct smb2_context *smb2, struct smb2_pdu *pdu, int status)
+{
+        pdu->header.status = status;
+}
+
+void
+smb2_set_pdu_message_id(struct smb2_context *smb2, struct smb2_pdu *pdu, uint64_t message_id)
+{
+        pdu->header.message_id = message_id;
+}
+
+uint64_t
+smb2_get_pdu_message_id(struct smb2_context *smb2, struct smb2_pdu *pdu)
+{
+        if (pdu) {
+                return pdu->header.message_id;
+        }
+        return 0;
+}
+
+uint64_t
+smb2_get_last_request_message_id(struct smb2_context *smb2)
+{
+        if (smb2) {
+                return smb2->message_id;
+        }
+        return 0;
+}
+
+uint64_t
+smb2_get_last_reply_message_id(struct smb2_context *smb2)
+{
+        if (smb2) {
+                return smb2->hdr.message_id;
+        }
+        return 0;
 }
 
 struct smb2_pdu *
@@ -658,6 +846,11 @@ smb2_find_pdu(struct smb2_context *smb2,
 static int
 smb2_is_error_response(struct smb2_context *smb2,
                        struct smb2_pdu *pdu) {
+        if (pdu->header.command == SMB2_IOCTL &&
+            smb2_ioctl_status_uses_reply_format(pdu->ctl_code,
+                                                smb2->hdr.status)) {
+                return 0;
+        }
         if ((smb2->hdr.status & SMB2_STATUS_SEVERITY_MASK) ==
             SMB2_STATUS_SEVERITY_ERROR) {
                 switch (smb2->hdr.status) {
@@ -1018,7 +1211,9 @@ void smb2_timeout_pdus(struct smb2_context *smb2)
                         SMB2_LIST_REMOVE(&smb2->outqueue, pdu);
                         pdu->cb(smb2, SMB2_STATUS_IO_TIMEOUT, NULL,
                                 pdu->cb_data);
-                        smb2_free_pdu(smb2, pdu);
+                        if (!pdu->caller_frees_pdu) {
+                                smb2_free_pdu(smb2, pdu);
+                        }
                 }
                 pdu = next;
         }
@@ -1030,7 +1225,9 @@ void smb2_timeout_pdus(struct smb2_context *smb2)
                         SMB2_LIST_REMOVE(&smb2->waitqueue, pdu);
                         pdu->cb(smb2, SMB2_STATUS_IO_TIMEOUT, NULL,
                                 pdu->cb_data);
-                        smb2_free_pdu(smb2, pdu);
+                        if (!pdu->caller_frees_pdu) {
+                                smb2_free_pdu(smb2, pdu);
+                        }
                 }
                 pdu = next;
         }

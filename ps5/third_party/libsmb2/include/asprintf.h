@@ -13,7 +13,7 @@
 #define inline __inline
 #endif
 
-#ifndef _XBOX
+#if !defined(_XBOX) && !defined(__MINGW32__)
 #ifndef _vscprintf
 /* For some reason, MSVC fails to honour this #ifndef. */
 /* Hence function renamed to _vscprintf_so(). */

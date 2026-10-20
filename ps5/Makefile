@@ -60,7 +60,8 @@ NETFS_SMB_SRC := netfs/backend_smb.cpp
 NETFS_NFS_SRC := netfs/backend_nfs.cpp
 NETFS_SRC := $(NETFS_CORE_SRC) $(NETFS_SMB_SRC) $(NETFS_NFS_SRC)
 # libsmb2 and libnfs (LGPL-2.1) are vendored into these folders, with their notices. While a folder is absent
-# its list is empty and nothing is built. libsmb2 6.2 is built from a config.h of ours (no CMake). It needs no
+# its list is empty and nothing is built (versions: third_party/libsmb2/README.snes9xps5, third_party/libnfs/PATCHES.md).
+# libsmb2 is built from a config.h of ours (no CMake). It needs no
 # PS4_PLATFORM: prospero-clang defines __FreeBSD__, which selects libsmb2's FreeBSD headers. Its fcntl and
 # getaddrinfo calls reach the console shims through the --wrap list above.
 LIBSMB2 := third_party/libsmb2

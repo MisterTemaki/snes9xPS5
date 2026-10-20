@@ -19,6 +19,10 @@
 #include "config.h"
 #endif
 
+#ifdef __linux__
+#define _GNU_SOURCE
+#endif
+
 #ifdef AROS
 #include "aros_compat.h"
 #endif
@@ -86,6 +90,7 @@
 #include <string.h>
 #include <errno.h>
 #include <time.h>
+#include <limits.h>
 #include <sys/types.h>
 #include "libnfs-zdr.h"
 #include "libnfs.h"
@@ -108,6 +113,21 @@ static int
 rpc_reconnect_requeue(struct rpc_context *rpc);
 
 static int
+rpc_set_sockaddr(struct rpc_context *rpc, const char *server, int port);
+
+#ifdef HAVE_NFS4_2
+static void
+rpc_nfs4_rebind_session(struct rpc_context *rpc);
+#endif /* HAVE_NFS4_2 */
+
+/*
+ * How hard rpc_set_sockaddr() tries when the resolver reports a transient
+ * failure. This runs on the caller's event loop thread, so keep it short.
+ */
+#define RESOLVE_RETRIES      3
+#define RESOLVE_RETRY_NSECS  (100 * 1000 * 1000)
+
+static int
 create_socket(int domain, int type, int protocol)
 {
 #ifdef SOCK_CLOEXEC
@@ -116,8 +136,19 @@ create_socket(int domain, int type, int protocol)
 	   close-on-exec flag on all sockets to avoid leaking file
 	   descriptors to child processes */
 	int fd = socket(domain, type|SOCK_CLOEXEC, protocol);
-	if (fd >= 0 || errno != EINVAL)
+	if (fd >= 0 || errno != EINVAL) {
+                if (type == SOCK_DGRAM) {
+                        int opt;
+                        if (domain == AF_INET) {
+                                opt = 1;
+                                setsockopt(fd, IPPROTO_IP, IP_PKTINFO, &opt, sizeof(opt));
+                        } else {
+                                opt = 1;
+                                setsockopt(fd, IPPROTO_IPV6, IPV6_PKTINFO, &opt, sizeof(opt));
+                        }
+                }
 		return fd;
+        }
 #endif
 #endif
 
@@ -280,11 +311,102 @@ rpc_get_fd(struct rpc_context *rpc)
 	return rpc->fd;
 }
 
-static int
-rpc_has_queue(struct rpc_queue *q)
+int
+rpc_get_evfd(struct rpc_context *rpc)
 {
-	return q->head != NULL;
+        return rpc->evfd;
 }
+
+void
+rpc_wakeup_service_thread(struct rpc_context *rpc)
+{
+#ifdef LIBNFS_EVENTFD_WAKEUP
+        uint64_t val = 1;
+        ssize_t cnt;
+
+        if (rpc->evfd == -1) {
+                return;
+        }
+
+        cnt = write(rpc->evfd, &val, sizeof(val));
+        if (cnt != (ssize_t)sizeof(val)) {
+                /*
+                 * Losing a wakeup only costs us up to rpc->poll_timeout of
+                 * latency, so log it and carry on rather than failing the
+                 * caller, who is usually mid-enqueue and holding rpc_mutex.
+                 */
+                RPC_LOG(rpc, 2, "Failed to signal service thread on evfd %d: %s",
+                        rpc->evfd, strerror(errno));
+        }
+#else
+        /*
+         * No wakeup fd on this build, so nothing to poke and no reference to
+         * write(), which MSVC does not declare.
+         */
+        (void)rpc;
+#endif
+}
+
+/*
+ * Does rpc->outqueue have one or more PDUs waiting to be sent out?
+ * Takes rpc_mutex, so it must not be called with the mutex already held.
+ */
+static bool_t
+rpc_outqueue_present(struct rpc_context *rpc)
+{
+        bool_t present;
+
+#ifdef HAVE_MULTITHREADING
+        if (rpc->multithreading_enabled) {
+                nfs_mt_mutex_lock(&rpc->rpc_mutex);
+        }
+#endif /* HAVE_MULTITHREADING */
+
+        present = (rpc->outqueue.head != NULL);
+        assert(present == (rpc->stats.outqueue_len != 0));
+
+#ifdef HAVE_MULTITHREADING
+        if (rpc->multithreading_enabled) {
+                nfs_mt_mutex_unlock(&rpc->rpc_mutex);
+        }
+#endif /* HAVE_MULTITHREADING */
+
+        return present;
+}
+
+#ifdef HAVE_NFS4_2
+/*
+ * Is the pdu at the head of the send queue one that cannot go out yet because
+ * the session has no free slot? The queue is walked by the service thread, so
+ * the head has to be read under the same lock rpc_outqueue_present() uses
+ * rather than dereferenced on its own.
+ */
+static bool_t
+rpc_outqueue_head_waits_for_slot(struct rpc_context *rpc)
+{
+        bool_t waiting;
+
+#ifdef HAVE_MULTITHREADING
+        if (rpc->multithreading_enabled) {
+                nfs_mt_mutex_lock(&rpc->rpc_mutex);
+        }
+#endif /* HAVE_MULTITHREADING */
+        waiting = rpc->outqueue.head != NULL &&
+                rpc->outqueue.head->nfs4_needs_slot &&
+                !rpc->outqueue.head->nfs4_slot_held;
+#ifdef HAVE_MULTITHREADING
+        if (rpc->multithreading_enabled) {
+                nfs_mt_mutex_unlock(&rpc->rpc_mutex);
+        }
+#endif /* HAVE_MULTITHREADING */
+
+        /*
+         * The slot table has its own lock, taken after rpc_mutex is dropped
+         * so that the two are never held at once.
+         */
+        return waiting && !nfs4_session_has_free_slot(rpc);
+}
+#endif /* HAVE_NFS4_2 */
 
 int
 rpc_which_events(struct rpc_context *rpc)
@@ -300,19 +422,26 @@ rpc_which_events(struct rpc_context *rpc)
 		return POLLIN;
 	}
 
-#ifdef HAVE_MULTITHREADING
-        if (rpc->multithreading_enabled) {
-                nfs_mt_mutex_lock(&rpc->rpc_mutex);
-        }
-#endif /* HAVE_MULTITHREADING */
-	if (rpc_has_queue(&rpc->outqueue)) {
+	if (rpc_outqueue_present(rpc)) {
 		events |= POLLOUT;
 	}
-#ifdef HAVE_MULTITHREADING
-        if (rpc->multithreading_enabled) {
-                nfs_mt_mutex_unlock(&rpc->rpc_mutex);
-        }
-#endif /* HAVE_MULTITHREADING */
+
+#ifdef HAVE_NFS4_2
+	/*
+	 * An NFSv4.2 COMPOUND cannot go out until a session slot frees up, and
+	 * a slot only frees when a reply arrives. Asking for POLLOUT while the
+	 * slot table is full would just spin, since the socket is writable and
+	 * we would decline to write, so wait on POLLIN alone until then.
+	 *
+	 * This looks at the head of the queue only, and only at whether that
+	 * one pdu carries a SEQUENCE. An NFSv4.0 or NFSv3 pdu never does, so
+	 * nothing here can throttle them.
+	 */
+	if ((events & POLLOUT) && rpc_outqueue_head_waits_for_slot(rpc)) {
+		events &= ~POLLOUT;
+	}
+#endif /* HAVE_NFS4_2 */
+
 	return events;
 }
 
@@ -383,6 +512,26 @@ rpc_write_to_socket(struct rpc_context *rpc)
                         /* Fully sent PDU should not be sitting in outqueue */
                         assert(num_done < pdu->out.total_size);
 
+#ifdef HAVE_NFS4_2
+                        /*
+                         * An NFSv4.2 COMPOUND claims its session slot here,
+                         * as it is about to be written, rather than when it
+                         * was built. That is what lets an application queue
+                         * up as many requests as it likes while only as many
+                         * as the session has slots are in flight. When no
+                         * slot is free we stop building this batch and leave
+                         * the rest queued; a reply will free one and
+                         * rpc_which_events() asks for POLLOUT again.
+                         *
+                         * Only a pdu carrying a SEQUENCE gets here, so an
+                         * NFSv4.0 or NFSv3 pdu is never held back.
+                         */
+                        if (pdu->nfs4_needs_slot && !pdu->nfs4_slot_held &&
+                            nfs4_pdu_take_slot(rpc, pdu) < 0) {
+                                break;
+                        }
+#endif /* HAVE_NFS4_2 */
+
                         for (i = 0; i < pdu_niov; i++) {
                                 char *buf = pdu->out.iov[i].buf;
                                 size_t len = pdu->out.iov[i].len;
@@ -414,6 +563,18 @@ rpc_write_to_socket(struct rpc_context *rpc)
                           rpc->max_waitpdu_len > (rpc->waitpdu_len + num_pdus)) &&
                          pdu != NULL && niov < iovcnt);
 
+#ifdef HAVE_NFS4_2
+                /*
+                 * The head of the queue is waiting for a session slot, so
+                 * there is nothing to write yet. rpc_which_events() will stop
+                 * asking for POLLOUT until a reply frees one.
+                 */
+                if (niov == 0) {
+                        ret = 0;
+                        goto finished;
+                }
+#endif /* HAVE_NFS4_2 */
+
                 /*
                  * We must never be doing 0-byte writes as those can get into
                  * infinite loop.
@@ -423,9 +584,27 @@ rpc_write_to_socket(struct rpc_context *rpc)
                 count = writev(rpc->fd, iov, niov);
                 if (count == -1) {
                         if (errno == EAGAIN || errno == EWOULDBLOCK) {
-                                ret = 0;
-                                 goto finished;
+                                /*
+                                 * The socket send buffer is full. Close out
+                                 * the current run of bytes written, we will
+                                 * not write again until poll() reports
+                                 * POLLOUT.
+                                 *
+                                 * Only a run that actually wrote something is
+                                 * a sample. Once the buffer is full every
+                                 * further attempt returns EAGAIN having
+                                 * written nothing, and counting those empty
+                                 * runs would drag the average to zero.
+                                 */
+                                if (rpc->stats.last_write_bytes_before_eagain) {
+                                        rpc->stats.tot_write_bytes_before_eagain +=
+                                                rpc->stats.last_write_bytes_before_eagain;
+                                        rpc->stats.last_write_bytes_before_eagain = 0;
+                                        INC_STATS(rpc, num_write_eagain);
+                                }
 
+                                ret = 0;
+                                goto finished;
                         }
                         rpc_set_error_locked(rpc, "Error when writing to "
 					     "socket :%d %s", errno,
@@ -433,6 +612,8 @@ rpc_write_to_socket(struct rpc_context *rpc)
                         ret = -1;
                         goto finished;
                 }
+
+                rpc->stats.last_write_bytes_before_eagain += count;
 
                 /* Check how many pdu we completed */
                 while (count > 0 && (pdu = rpc->outqueue.head) != NULL) {
@@ -443,13 +624,34 @@ rpc_write_to_socket(struct rpc_context *rpc)
                                 count -= remaining;
 
                                 pdu->out.num_done = pdu->out.total_size;
+#ifdef HAVE_NFS4_2
+                                pdu->nfs4_slot_sent = 1;
+#endif /* HAVE_NFS4_2 */
 
                                 rpc->outqueue.head = pdu->next;
                                 if (rpc->outqueue.head == NULL)
                                         rpc->outqueue.tail = NULL;
 
+                                /*
+                                 * We just dequeued the last high priority pdu,
+                                 * the high priority run is now empty.
+                                 */
+                                if (rpc->outqueue.tailp == pdu)
+                                        rpc->outqueue.tailp = NULL;
+
+                                assert(rpc->stats.outqueue_len > 0);
+                                rpc->stats.outqueue_len--;
+
                                 /* RPC sent, original or retransmit */
                                 INC_STATS(rpc, num_req_sent);
+
+#ifdef HAVE_CLOCK_GETTIME
+                                /*
+                                 * Now this RPC is completely written over the socket.
+                                 * Note current wallclock time as the dispatch time.
+                                 */
+                                pdu->dispatch_usecs = rpc_wallclock_time();
+#endif
 
                                 if (pdu->discard_after_sending) {
                                         rpc_free_pdu(rpc, pdu);
@@ -467,6 +669,9 @@ rpc_write_to_socket(struct rpc_context *rpc)
                                 }
                         } else {
                                 pdu->out.num_done += count;
+#ifdef HAVE_NFS4_2
+                                pdu->nfs4_slot_sent = 1;
+#endif /* HAVE_NFS4_2 */
                                 break;
                         }
                 }
@@ -493,9 +698,14 @@ static int adjust_inbuf(struct rpc_context *rpc, uint32_t pdu_size)
         char *buf;
 
         if (rpc->inbuf_size < pdu_size) {
-                if (pdu_size > NFS_MAX_XFER_SIZE + 4096) {
+                /*
+                 * Bound on what a server can make us allocate. This tracks
+                 * the inbound record limit rather than NFS_MAX_XFER_SIZE,
+                 * which covers outbound WRITE payloads too and is far larger.
+                 */
+                if (pdu_size > MAX_FRAGMENT_SIZE + 4096) {
                         rpc_set_error(rpc, "Incoming PDU exceeds limit of %d "
-                                      "bytes.", NFS_MAX_XFER_SIZE + 4096);
+                                      "bytes.", MAX_FRAGMENT_SIZE + 4096);
                         return -1;
                 }
                 buf = realloc(rpc->inbuf, pdu_size);
@@ -558,6 +768,13 @@ static void rpc_finished_pdu(struct rpc_context *rpc)
         rpc->state = READ_RM;
         rpc->inpos  = 0;
         if (rpc->pdu && (rpc->is_udp == 0 || rpc->is_broadcast == 0)) {
+#ifdef HAVE_NFS4_2
+                if (rpc->pdu->nfs4_delay_until) {
+                        nfs4_defer_pdu(rpc, rpc->pdu);
+                        rpc->pdu = NULL;
+                        return;
+                }
+#endif
                 rpc_free_pdu(rpc, rpc->pdu);
                 rpc->pdu = NULL;
         }
@@ -571,13 +788,14 @@ static void rpc_finished_pdu(struct rpc_context *rpc)
 #define ZCRP 1024
 
 #define MAX_UDP_SIZE 65536
-#define MAX_FRAGMENT_SIZE 8*1024*1024
 static int
 rpc_read_from_socket(struct rpc_context *rpc)
 {
 	ssize_t count;
         int pos;
         uint32_t inbuf_size;
+        int saved_fd = rpc->fd;
+        int saved_is_connected = rpc->is_connected;
 
 	assert(rpc->magic == RPC_CONTEXT_MAGIC);
         if (rpc->socket_disabled) {
@@ -593,8 +811,51 @@ rpc_read_from_socket(struct rpc_context *rpc)
                                       "recvfrom");
 			return -1;
 		}
+#ifdef __linux__
+                struct sockaddr_in *sin;
+                struct sockaddr_in6 *sin6;
+                char cmbuf[0x100];
+                struct iovec iov = { buf, MAX_UDP_SIZE };
+                struct msghdr mh = {
+                        .msg_iov = &iov,
+                        .msg_iovlen = 1,
+                        .msg_name = &rpc->udp_src,
+                        .msg_namelen = socklen,
+                        .msg_control = cmbuf,
+                        .msg_controllen = sizeof(cmbuf),
+                };
+                count = recvmsg(rpc->fd, &mh, 0);
+                for (struct cmsghdr *cmsg = CMSG_FIRSTHDR(&mh);
+                     cmsg != NULL;
+                     cmsg = CMSG_NXTHDR(&mh, cmsg)) {
+                        /*
+                         * IPv6 packet info arrives as IPV6_PKTINFO, which is
+                         * a different value from IP_PKTINFO, so testing only
+                         * the latter discarded every IPv6 cmsg and left
+                         * udp_dst unset for IPv6.
+                         */
+                        if (cmsg->cmsg_type != IP_PKTINFO &&
+                            cmsg->cmsg_type != IPV6_PKTINFO) {
+                                continue;
+                        }
+                        switch (cmsg->cmsg_level) {
+                        case IPPROTO_IP:
+                                sin = (struct sockaddr_in *)&rpc->udp_dst;
+                                sin->sin_family = AF_INET;
+                                sin->sin_addr.s_addr = ((struct in_pktinfo *)(void *)CMSG_DATA(cmsg))->ipi_addr.s_addr;
+                                break;
+                        case IPPROTO_IPV6:
+                                sin6 = (struct sockaddr_in6 *)&rpc->udp_dst;
+                                sin6->sin6_family = AF_INET6;
+                                memcpy(&sin6->sin6_addr.s6_addr[0], &((struct in6_pktinfo *)(void *)CMSG_DATA(cmsg))->ipi6_addr.s6_addr[0], 16);
+                                break;
+                        }
+                        break;
+                }
+#else /* __linux__ */
 		count = recvfrom(rpc->fd, buf, MAX_UDP_SIZE, MSG_DONTWAIT,
                                  (struct sockaddr *)&rpc->udp_src, &socklen);
+#endif /* __linux__ */
 		if (count == -1) {
 			free(buf);
 			if (errno == EINTR || errno == EAGAIN) {
@@ -606,14 +867,17 @@ rpc_read_from_socket(struct rpc_context *rpc)
 		}
 		if (!rpc->is_server_context) {
 			rpc->rm_xid[0] = count;
-			rpc->rm_xid[1] = ntohl(*(uint32_t *)&buf[0]);
-			rpc->pdu = rpc_find_pdu(rpc, ntohl(*(uint32_t *)&buf[0]));
+			rpc->rm_xid[1] = ntohl(*(uint32_t *)(void *)&buf[0]);
+			rpc->pdu = rpc_find_pdu(rpc, ntohl(*(uint32_t *)(void *)&buf[0]));
 			if (rpc->pdu == NULL) {
 				rpc_set_error(rpc, "Failed to match incoming PDU/XID."
 						" Ignoring PDU");
 				free(buf);
-				return -1;
+				return 0;
 			}
+		}
+		if (rpc->pdu) {
+			rpc->pdu->resp_size = count;
 		}
 		if (rpc_process_pdu(rpc, buf, count) != 0) {
 			rpc_set_error(rpc, "Invalid/garbage pdu received from "
@@ -626,9 +890,34 @@ rpc_read_from_socket(struct rpc_context *rpc)
 	}
 
         while (1){
+                /*
+                 * A reply callback may disconnect the current endpoint and
+                 * start a new asynchronous connection. For example, the
+                 * portmapper callback replaces the connected portmapper
+                 * socket with a mountd socket that is still connecting.
+                 * Leave the read loop and let poll() finish that connection
+                 * before attempting to read from the replacement socket.
+                 */
+                if (!rpc->is_server_context && !rpc->is_connected) {
+                        return 0;
+                }
+
                 if (rpc->inpos == 0) {
                         switch (rpc->state) {
                         case READ_RM:
+                                if (rpc->fragments) {
+                                        /*
+                                         * Continuation fragment of a record we
+                                         * are already reassembling. Only the 4
+                                         * byte marker follows; the 4 bytes
+                                         * after it are payload, not an xid.
+                                         * rpc->pdu was resolved from the first
+                                         * fragment and must survive.
+                                         */
+                                        rpc->pdu_size = 4;
+                                        rpc->buf = (char *)&rpc->rm_xid[0];
+                                        break;
+                                }
                                 /*
                                  * Read record marker,
                                  * And if this is a cleint context read the next 4 bytes
@@ -639,8 +928,8 @@ rpc_read_from_socket(struct rpc_context *rpc)
                                 rpc->pdu = NULL;
                                 break;
                         case READ_PAYLOAD:
-                                /* we already read 4 bytes into the buffer */
-                                rpc->inpos = 4;
+                                /* the marker read may have prefetched 4 bytes */
+                                rpc->inpos = rpc->rm_prefetch;
                                 rpc->pdu_size = rpc->rm_xid[0];
                                 rpc->buf = rpc->inbuf + rpc->inpos;
 
@@ -661,14 +950,15 @@ rpc_read_from_socket(struct rpc_context *rpc)
                                  */
                                 if (rpc->sec != RPC_SEC_KRB5P)
 #endif /* HAVE_LIBKRB5 */
-                                        if (rpc->pdu && rpc->pdu->in.base && rpc->pdu_size > ZCRP) {
+                                        if (rpc->pdu && rpc->pdu->in.base &&
+                                            !rpc->fragments && rpc->pdu_size > ZCRP) {
                                                 rpc->pdu_size = ZCRP;
                                         }
                                 break;
                         case READ_UNKNOWN:
                         case READ_FRAGMENT:
-                                /* we already read 4 bytes into the buffer */
-                                rpc->inpos = 4;
+                                /* the marker read may have prefetched 4 bytes */
+                                rpc->inpos = rpc->rm_prefetch;
                                 rpc->pdu_size = rpc->rm_xid[0];
                                 rpc->buf = rpc->inbuf + rpc->inpos;
                                 assert(rpc->pdu_size <= rpc->inbuf_size);
@@ -748,14 +1038,54 @@ rpc_read_from_socket(struct rpc_context *rpc)
                         case READ_RM:
                                 /* We have just read the record marker */
                                 rpc->rm_xid[0] = ntohl(rpc->rm_xid[0]);
-                                if (rpc->rm_xid[0] & 0x80000000) {
-                                        rpc->state = READ_PAYLOAD;
-                                } else {
-                                        rpc_set_error(rpc, "Fragment support not yet working");
-                                        rpc->state = READ_FRAGMENT;
-                                        return -1;
-                                }
+
+                                /*
+                                 * The top bit marks the last fragment of the
+                                 * record. Anything else is a continuation and
+                                 * has to be stashed until the record is whole.
+                                 */
+                                rpc->state = (rpc->rm_xid[0] & 0x80000000) ?
+                                        READ_PAYLOAD : READ_FRAGMENT;
                                 rpc->rm_xid[0] &= 0x7fffffff;
+
+                                if (rpc->fragments) {
+                                        /*
+                                         * Continuation fragment. No xid to
+                                         * parse, and no minimum size: only the
+                                         * first fragment has to be big enough
+                                         * to hold one. Reject an empty one
+                                         * though, we would read 0 bytes below
+                                         * and mistake that for a closed
+                                         * connection.
+                                         */
+                                        if (rpc->rm_xid[0] == 0 ||
+                                            rpc->rm_xid[0] > MAX_FRAGMENT_SIZE) {
+                                                rpc_set_error(rpc, "Invalid recordmarker size");
+                                                return -1;
+                                        }
+                                        /*
+                                         * Bound the record, not just each
+                                         * fragment, or a peer can chain
+                                         * fragments until we run out of
+                                         * memory.
+                                         */
+                                        if (rpc->rm_xid[0] >
+                                            MAX_FRAGMENT_SIZE - rpc->fragments_size) {
+                                                rpc_set_error(rpc, "Reassembled record "
+                                                              "exceeds limit of %d bytes",
+                                                              MAX_FRAGMENT_SIZE);
+                                                return -1;
+                                        }
+                                        if (adjust_inbuf(rpc, rpc->rm_xid[0]) != 0) {
+                                                rpc_set_error(rpc, "adjust_inbuf failed "
+                                                              "for socket fd %d", rpc->fd);
+                                                return -1;
+                                        }
+                                        rpc->rm_prefetch = 0;
+                                        rpc->inpos = 0;
+                                        continue;
+                                }
+
                                 if (rpc->rm_xid[0] < 8 || rpc->rm_xid[0] > MAX_FRAGMENT_SIZE) {
                                         rpc_set_error(rpc, "Invalid recordmarker size");
                                         return -1;
@@ -781,8 +1111,10 @@ rpc_read_from_socket(struct rpc_context *rpc)
 #ifdef HAVE_LIBKRB5
                                         if (rpc->sec != RPC_SEC_KRB5P)
 #endif /* HAVE_LIBKRB5 */
-                                                if (rpc->state != READ_FRAGMENT && rpc->pdu && rpc->pdu->in.base) {
-                                                        inbuf_size = ZCRP + 4;
+                                                if (rpc->state != READ_FRAGMENT &&
+                                                    !rpc->fragments &&
+                                                    rpc->pdu && rpc->pdu->in.base) {
+                                                        inbuf_size = ZCRP;
                                                 }
                                 }
 
@@ -819,12 +1151,13 @@ rpc_read_from_socket(struct rpc_context *rpc)
                                 }
 
                                 /* Copy the next 4 bytes into inbuf */
-                                *((uint32_t *)rpc->inbuf) = htonl(rpc->rm_xid[1]);
+                                *((uint32_t *)(void *)rpc->inbuf) = htonl(rpc->rm_xid[1]);
 
                                 /* but set inpos to 0, we will update it above
                                  * that we have already read these 4 bytes in
                                  * PAYLOAD and FRAGMENT
                                  */
+                                rpc->rm_prefetch = 4;
                                 rpc->inpos = 0;   
 
                                 if (!rpc->is_server_context) {
@@ -858,11 +1191,39 @@ rpc_read_from_socket(struct rpc_context *rpc)
                                 } else {
                                         rpc->buf = rpc->inbuf;
                                 }
+                                if (rpc->pdu) {
+                                	/* pdu_size is the RPC message length; +4 for record marker */
+                                	rpc->pdu->resp_size = rpc->pdu_size + 4;
+                                }
                                 if (rpc_process_pdu(rpc, rpc->buf, rpc->pdu_size) != 0) {
                                         rpc_set_error(rpc, "Invalid/garbage pdu"
                                                       " received from server. "
                                                       "Closing socket");
                                         return -1;
+                                }
+                                if (rpc->fd != saved_fd ||
+                                    rpc->is_connected != saved_is_connected) {
+                                        /*
+                                         * A callback replaced the connection
+                                         * under us, so we must not carry on
+                                         * reading with state that belongs to
+                                         * the old one. The reply we just
+                                         * processed still has to be released,
+                                         * or every reconnect driven from a
+                                         * callback leaks its PDU, which is
+                                         * what the mount sequence does at each
+                                         * step as it moves between portmap,
+                                         * mountd and nfsd.
+                                         *
+                                         * Finishing here cannot invoke a
+                                         * callback twice: free_pdu is only set
+                                         * on the zero-copy read path, and that
+                                         * path breaks out before running any
+                                         * callback, so it cannot be what
+                                         * changed the connection.
+                                         */
+                                        rpc_finished_pdu(rpc);
+                                        return 0;
                                 }
 #ifdef HAVE_LIBKRB5
                                 /*
@@ -881,8 +1242,18 @@ rpc_read_from_socket(struct rpc_context *rpc)
                                                  * If the READ failed, bail out here as there is no
                                                  * data.
                                                  */
-                                                const READ3res *res = (READ3res *) rpc->pdu->zdr_decode_buf;
+                                                const READ3res *res = (READ3res *)(void *) rpc->pdu->zdr_decode_buf;
                                                 if (res->status != NFS3_OK) {
+                                                        goto payload_finished;
+                                                }
+                                        }
+                                        if (rpc->program == NFS4_PROGRAM && rpc->version == NFS_V4) {
+                                                /*
+                                                 * Same for v4. The COMPOUND status is the status of
+                                                 * the last op, which for a zero-copy read is the READ.
+                                                 */
+                                                const COMPOUND4res *res = (COMPOUND4res *)(void *) rpc->pdu->zdr_decode_buf;
+                                                if (res->status != NFS4_OK) {
                                                         goto payload_finished;
                                                 }
                                         }
@@ -896,15 +1267,21 @@ rpc_read_from_socket(struct rpc_context *rpc)
                                                 return -1;
 
                                         /*
-                                         * Now pos is pointing at the start of data, while rpc->inpos
-                                         * is the total bytes we have read for this RPC response,
-                                         * including the RPC header, so "rpc->inpos - pos" is the
-                                         * number of data bytes read. This will be less than ZCRP,
-                                         * since we clamped the read size to ZCRP above.
+                                         * Now pos is pointing at the start of data, and
+                                         * rpc->buf/rpc->pdu_size is the record we just
+                                         * processed, so "rpc->pdu_size - pos" is the number
+                                         * of data bytes we hold. For a single record that is
+                                         * rpc->inbuf and is less than ZCRP, since we clamped
+                                         * the read size to ZCRP above. For a reply that came
+                                         * in fragments it is the reassembly buffer and the
+                                         * whole record, so the entire read payload and not
+                                         * bounded by ZCRP. rpc->inpos cannot be used here: in
+                                         * the reassembled case it only covers the last
+                                         * fragment.
                                          */
                                         pos = zdr_getpos(&rpc->pdu->zdr);
-                                        count = rpc->inpos - pos;
-                                        assert(count <= ZCRP);
+                                        count = rpc->pdu_size - pos;
+                                        assert(rpc->fragments || count <= ZCRP);
                                         /*
                                          * No sane server will return more read data than we asked for.
                                          * If the server is buggy and does send more, we discard the extra
@@ -930,10 +1307,29 @@ rpc_read_from_socket(struct rpc_context *rpc)
                                         if (rpc->pdu->in.remaining_size < count) {
                                                 count = rpc->pdu->in.remaining_size;
                                         }
-                                        rpc_memcpy_cursor(rpc, &rpc->pdu->in, &rpc->inbuf[pos], count);
+                                        rpc_memcpy_cursor(rpc, &rpc->pdu->in, &rpc->buf[pos], count);
 
                                         if (rpc->pdu->in.remaining_size == 0) {
                                                 // handle padding?
+                                        } else if (rpc->fragments) {
+                                                /*
+                                                 * A reassembled record is whole,
+                                                 * so there is nothing left on
+                                                 * the socket for this reply. If
+                                                 * it still claims more read data
+                                                 * than the record carried it is
+                                                 * malformed, and continuing into
+                                                 * READ_IOVEC would consume the
+                                                 * next record as payload and
+                                                 * desync the stream.
+                                                 */
+                                                rpc_set_error(rpc, "READ reply declares "
+                                                              "more data than the "
+                                                              "reassembled record holds");
+                                                free(rpc->buf);
+                                                rpc->buf = NULL;
+                                                rpc_free_all_fragments(rpc);
+                                                return -1;
                                         } else {
                                                 rpc->pdu->read_count -= count;
                                                 rpc->state = READ_IOVEC;
@@ -952,6 +1348,9 @@ rpc_read_from_socket(struct rpc_context *rpc)
                                 break;
                         case READ_IOVEC:
                                 rpc->pdu->read_count -= rpc->pdu_size;
+                                if (rpc->rm_xid[0] < rpc->pdu_size) {
+                                        return -1;
+                                }
                                 rpc->rm_xid[0] -= rpc->pdu_size;
                                 if (!rpc->rm_xid[0]) {
                                         rpc_finished_pdu(rpc);
@@ -1060,7 +1459,10 @@ rpc_timeout_scan(struct rpc_context *rpc)
                         RPC_LOG(rpc, 2, "[pdu %p] Request timed out in outqueue, "
                                 "will send when connection allows!", pdu);
                 } else {
-		        rpc_remove_pdu_from_queue(&rpc->outqueue, pdu);
+		        if (rpc_remove_pdu_from_queue(&rpc->outqueue, pdu)) {
+                                assert(rpc->stats.outqueue_len > 0);
+                                rpc->stats.outqueue_len--;
+                        }
 			rpc_set_error_locked(rpc, "command timed out");
                         if (pdu->cb) {
                                 pdu->cb(rpc, RPC_STATUS_TIMEOUT,
@@ -1159,10 +1561,277 @@ rpc_timeout_scan(struct rpc_context *rpc)
 	return (need_reconnect ? -1 : 0);
 }
 
+#ifdef HAVE_NFS4_2
+/*
+ * The reply to a keepalive SEQUENCE. There is nothing to do with a good one.
+ * A bad one means the session is no longer there, which is what happens when
+ * the lease ran out before we got here, so drop it rather than keep sending
+ * into it.
+ */
+static void
+renew_session_cb(struct rpc_context *rpc, int status, void *command_data,
+                 void *private_data _U_)
+{
+	COMPOUND4res *res = command_data;
+
+	if (status == RPC_STATUS_SUCCESS && res && res->status == NFS4_OK) {
+		return;
+	}
+	if (status == RPC_STATUS_CANCEL) {
+		return;
+	}
+
+	RPC_LOG(rpc, 1, "NFSv4 session keepalive failed, the session is gone. "
+		"The context has to be remounted.");
+	nfs4_session_destroy(rpc);
+}
+
+/*
+ * A session whose lease is never renewed is reaped by the server, and every
+ * COMPOUND after that fails. Ordinary traffic renews the lease for free,
+ * since any SEQUENCE does, so this only has to cover a connection that has
+ * gone quiet: nfs4_pdu_take_slot() pushes the deadline out on every request,
+ * and this sends a SEQUENCE of its own if the deadline is ever reached.
+ *
+ * Driven from rpc_service(), so it needs the application to keep servicing
+ * the context. One that has stopped doing even that is not going to notice
+ * the session either way.
+ */
+static void
+rpc_nfs4_maybe_renew_session(struct rpc_context *rpc)
+{
+	uint64_t now;
+
+	if (!rpc->is_connected || !rpc_nfs4_session_is_valid(rpc)) {
+		return;
+	}
+
+	now = rpc_current_time();
+	if (rpc->nfs4_renew_due == 0) {
+		rpc->nfs4_renew_due = now + NFS4_SESSION_RENEW_MSECS;
+		return;
+	}
+	if (now < rpc->nfs4_renew_due) {
+		return;
+	}
+
+	/*
+	 * Move the deadline before sending, not after, so that a failure to
+	 * queue does not turn into one attempt per call.
+	 */
+	rpc->nfs4_renew_due = now + NFS4_SESSION_RENEW_MSECS;
+	if (rpc_nfs4_renew_session_task(rpc, renew_session_cb, NULL) == NULL) {
+		RPC_LOG(rpc, 2, "failed to queue an NFSv4 session keepalive. "
+			"%s", rpc_get_error(rpc));
+		return;
+	}
+	RPC_LOG(rpc, 2, "sent an NFSv4 session keepalive");
+}
+#endif /* HAVE_NFS4_2 */
+
+static void
+nfs40_renew_lock(struct rpc_context *rpc)
+{
+#ifdef HAVE_MULTITHREADING
+	if (rpc->multithreading_enabled) {
+		nfs_mt_mutex_lock(&rpc->nfs40_renew_mutex);
+	}
+#endif /* HAVE_MULTITHREADING */
+	(void)rpc;
+}
+
+static void
+nfs40_renew_unlock(struct rpc_context *rpc)
+{
+#ifdef HAVE_MULTITHREADING
+	if (rpc->multithreading_enabled) {
+		nfs_mt_mutex_unlock(&rpc->nfs40_renew_mutex);
+	}
+#endif /* HAVE_MULTITHREADING */
+	(void)rpc;
+}
+
+/* Doubles from 1s on each consecutive failure, capped at the interval. */
+static uint64_t
+nfs40_renew_retry(struct rpc_context *rpc)
+{
+	uint64_t retry = rpc->nfs40_renew_backoff ?
+	                 rpc->nfs40_renew_backoff * 2 : 1000;
+
+	if (retry > rpc->nfs40_renew_interval) {
+		retry = rpc->nfs40_renew_interval;
+	}
+	rpc->nfs40_renew_backoff = retry;
+	return retry;
+}
+
+static void
+nfs40_stop_renew_locked(struct rpc_context *rpc)
+{
+	rpc->nfs40_renew_enabled = 0;
+	rpc->nfs40_renew_pending = 0;
+	rpc->nfs40_renew_due = 0;
+	rpc->nfs40_renew_backoff = 0;
+	rpc->nfs40_renew_epoch++;
+}
+
+void rpc_nfs40_stop_renew(struct rpc_context *rpc)
+{
+	nfs40_renew_lock(rpc);
+	nfs40_stop_renew_locked(rpc);
+	nfs40_renew_unlock(rpc);
+}
+
+void rpc_nfs40_start_renew(struct rpc_context *rpc, uint64_t clientid,
+                           uint32_t lease_seconds)
+{
+	nfs40_renew_lock(rpc);
+	nfs40_stop_renew_locked(rpc);
+	rpc->nfs40_clientid = clientid;
+	rpc->nfs40_renew_interval = (uint64_t)lease_seconds * 500;
+	rpc->nfs40_renew_due = rpc_current_time() + rpc->nfs40_renew_interval;
+	rpc->nfs40_renew_enabled = 1;
+	nfs40_renew_unlock(rpc);
+}
+
+/* Milliseconds until rpc_service() next has renewal work, or -1 for none. */
+int rpc_nfs40_renew_delay(struct rpc_context *rpc)
+{
+	uint64_t now, remaining;
+	int delay = -1;
+
+	if (!rpc->nfs40_renew_enabled) {
+		return -1;
+	}
+	nfs40_renew_lock(rpc);
+	if (rpc->is_connected && rpc->nfs40_renew_enabled) {
+		now = rpc_current_time();
+		remaining = rpc->nfs40_renew_due > now ?
+		            rpc->nfs40_renew_due - now : 0;
+		delay = remaining < INT_MAX ? (int)remaining : INT_MAX;
+	}
+	nfs40_renew_unlock(rpc);
+	return delay;
+}
+
+static void
+nfs40_renew_cb(struct rpc_context *rpc, int status, void *command_data,
+               void *private_data)
+{
+	COMPOUND4res *res = NULL;
+	uint32_t epoch = (uint32_t)(uintptr_t)private_data;
+	uint64_t now;
+
+	if (status == RPC_STATUS_SUCCESS) {
+		res = command_data;
+	}
+	nfs40_renew_lock(rpc);
+	if (epoch != rpc->nfs40_renew_epoch || !rpc->nfs40_renew_enabled) {
+		nfs40_renew_unlock(rpc);
+		return;
+	}
+	rpc->nfs40_renew_pending = 0;
+	now = rpc_current_time();
+	if (res && (res->status == NFS4_OK ||
+	            res->status == NFS4ERR_CB_PATH_DOWN)) {
+		rpc->nfs40_renew_due = now + rpc->nfs40_renew_interval;
+		rpc->nfs40_renew_backoff = 0;
+		nfs40_renew_unlock(rpc);
+		RPC_LOG(rpc, 2, "NFSv4.0 lease renewed");
+	} else if (res && (res->status == NFS4ERR_EXPIRED ||
+	                   res->status == NFS4ERR_STALE_CLIENTID)) {
+		nfs40_stop_renew_locked(rpc);
+		nfs40_renew_unlock(rpc);
+		RPC_LOG(rpc, 1, "NFSv4.0 lease lost (%s); context must be remounted",
+		        nfsstat4_to_str(res->status));
+	} else {
+		rpc->nfs40_renew_due = now + nfs40_renew_retry(rpc);
+		nfs40_renew_unlock(rpc);
+		RPC_LOG(rpc, 1, "NFSv4.0 RENEW failed (RPC %d, NFS %d)",
+		        status, res ? (int)res->status : -1);
+	}
+}
+
+/* A RENEW still pending when due is cancelled and resent, if fully sent. */
+static void
+rpc_nfs40_maybe_renew(struct rpc_context *rpc)
+{
+	uint64_t now;
+	uint32_t epoch, stale_xid;
+	int stalled;
+	struct rpc_pdu *pdu;
+
+	if (!rpc->nfs40_renew_enabled) {
+		return;
+	}
+	nfs40_renew_lock(rpc);
+	if (!rpc->is_connected || !rpc->nfs40_renew_enabled) {
+		nfs40_renew_unlock(rpc);
+		return;
+	}
+	now = rpc_current_time();
+	if (now < rpc->nfs40_renew_due) {
+		nfs40_renew_unlock(rpc);
+		return;
+	}
+	stalled = rpc->nfs40_renew_pending;
+	stale_xid = rpc->nfs40_renew_xid;
+	epoch = rpc->nfs40_renew_epoch;
+	nfs40_renew_unlock(rpc);
+
+	if (stalled && rpc_cancel_sent_pdu(rpc, stale_xid) != 0) {
+		/* Not fully written yet; a new one would only queue behind it. */
+		nfs40_renew_lock(rpc);
+		if (epoch == rpc->nfs40_renew_epoch) {
+			rpc->nfs40_renew_due = now + rpc->nfs40_renew_interval / 2;
+		}
+		nfs40_renew_unlock(rpc);
+		RPC_LOG(rpc, 1, "NFSv4.0 RENEW still unsent, waiting");
+		return;
+	}
+
+	nfs40_renew_lock(rpc);
+	if (epoch != rpc->nfs40_renew_epoch) {
+		nfs40_renew_unlock(rpc);
+		return;
+	}
+	epoch = ++rpc->nfs40_renew_epoch;
+	rpc->nfs40_renew_due = now + rpc->nfs40_renew_interval / 2;
+	rpc->nfs40_renew_pending = 1;
+	nfs40_renew_unlock(rpc);
+	if (stalled) {
+		RPC_LOG(rpc, 1, "NFSv4.0 RENEW got no reply, sending another");
+	}
+
+	/* Unlocked: queueing takes rpc_mutex. */
+	pdu = rpc_nfs40_renew_task(rpc, nfs40_renew_cb,
+	                           (void *)(uintptr_t)epoch);
+	nfs40_renew_lock(rpc);
+	if (epoch == rpc->nfs40_renew_epoch) {
+		if (pdu) {
+			rpc->nfs40_renew_xid = pdu->xid;
+		} else {
+			rpc->nfs40_renew_pending = 0;
+			rpc->nfs40_renew_due = now + nfs40_renew_retry(rpc);
+		}
+	}
+	nfs40_renew_unlock(rpc);
+	if (pdu == NULL) {
+		RPC_LOG(rpc, 1, "Failed to queue NFSv4.0 RENEW: %s",
+		        rpc_get_error(rpc));
+		return;
+	}
+	RPC_LOG(rpc, 2, "Queued NFSv4.0 RENEW");
+}
+
 int
 rpc_service(struct rpc_context *rpc, int revents)
 {
 	assert(rpc->magic == RPC_CONTEXT_MAGIC);
+
+#ifdef HAVE_NFS4_2
+        nfs4_service_delayed(rpc);
+#endif
 
 	/*
 	 * rpc_timeout_scan() will return -1 to indicate that we need to perform
@@ -1173,6 +1842,11 @@ rpc_service(struct rpc_context *rpc, int revents)
 	if (rpc_timeout_scan(rpc) != 0) {
 		return rpc_reconnect_requeue(rpc);
 	}
+	rpc_nfs40_maybe_renew(rpc);
+
+#ifdef HAVE_NFS4_2
+	rpc_nfs4_maybe_renew_session(rpc);
+#endif /* HAVE_NFS4_2 */
 
 	if (revents == -1 || revents & (POLLERR|POLLHUP)) {
 		if (revents != -1 && revents & POLLERR) {
@@ -1196,13 +1870,13 @@ rpc_service(struct rpc_context *rpc, int revents)
 				rpc_set_error(rpc, "rpc_service: POLLERR, "
 						   "Unknown socket error.");
 			}
-		}
-		if (revents != -1 && revents & POLLHUP) {
+		} else if (revents != -1 && revents & POLLHUP) {
 			rpc_set_error(rpc, "Socket failed with POLLHUP");
 		}
 		if (rpc->auto_reconnect) {
 			return rpc_reconnect_requeue(rpc);
 		}
+		rpc_nfs40_stop_renew(rpc);
 		maybe_call_connect_cb(rpc, RPC_STATUS_ERROR);
 		return -1;
 
@@ -1318,7 +1992,7 @@ rpc_service(struct rpc_context *rpc, int revents)
         }
 #endif
 
-	if (revents & POLLOUT && rpc_has_queue(&rpc->outqueue)) {
+	if ((revents & POLLOUT) && rpc_outqueue_present(rpc)) {
 		if (rpc_write_to_socket(rpc) != 0) {
                         if (rpc->is_server_context) {
                                 return -1;
@@ -1357,13 +2031,6 @@ rpc_set_resiliency(struct rpc_context *rpc,
                 return;
         }
 
-	assert(retrans >= 0);
-	/*
-	 * Retransmission count doesn't have any significance for infinite timeouts,
-	 * warn the caller.
-	 */
-	assert(retrans == 0 || timeout_msecs > 0);
-
 	rpc->auto_reconnect = num_tcp_reconnect;
 	rpc->timeout = timeout_msecs;
 	rpc->retrans = retrans;
@@ -1390,10 +2057,43 @@ rpc_connect_sockaddr_async(struct rpc_context *rpc)
 
 	assert(rpc->magic == RPC_CONTEXT_MAGIC);
 
+	/*
+	 * The user asked for the server name to be resolved afresh on every
+	 * reconnect, rather than reusing the address we resolved on the
+	 * initial connect. rpc_reconnect_requeue() sets resolve_server.
+	 */
+	if (rpc->resolve_server) {
+		int ret;
+
+		if (rpc->server == NULL) {
+			rpc->resolve_server = 0;
+			rpc_set_error(rpc, "Cannot resolve on reconnect, "
+				      "server name is not known");
+			return -1;
+		}
+
+		RPC_LOG(rpc, 2, "Resolving server %s on reconnect (port %d)",
+			rpc->server, rpc->port);
+
+		/*
+		 * Left set across the call, rpc_set_sockaddr() uses it to
+		 * decide whether to report an address change.
+		 */
+		ret = rpc_set_sockaddr(rpc, rpc->server, rpc->port);
+		rpc->resolve_server = 0;
+		if (ret != 0) {
+			return -1;
+		}
+	}
+
 	switch (s->ss_family) {
 	case AF_INET:
 		socksize = sizeof(struct sockaddr_in);
 		rpc->fd = create_socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+		if (rpc->fd == -1) {
+			/* Report the socket error, not a bogus bind error */
+			break;
+		}
 		if (set_bind_device(rpc->fd, rpc->ifname) != 0) {
 			rpc_set_error (rpc, "Failed to bind to interface");
 			return -1;
@@ -1408,6 +2108,10 @@ rpc_connect_sockaddr_async(struct rpc_context *rpc)
 	case AF_INET6:
 		socksize = sizeof(struct sockaddr_in6);
 		rpc->fd = create_socket(AF_INET6, SOCK_STREAM, IPPROTO_TCP);
+		if (rpc->fd == -1) {
+			/* Report the socket error, not a bogus bind error */
+			break;
+		}
 		if (set_bind_device(rpc->fd, rpc->ifname) != 0) {
 			rpc_set_error (rpc, "Failed to bind to interface");
 			return -1;
@@ -1425,7 +2129,7 @@ rpc_connect_sockaddr_async(struct rpc_context *rpc)
 	}
 
 	if (rpc->fd == -1) {
-		rpc_set_error(rpc, "Failed to open socket");
+		rpc_set_error(rpc, "Failed to open socket: %s", strerror(errno));
 		return -1;
 	}
 
@@ -1564,15 +2268,61 @@ static int
 rpc_set_sockaddr(struct rpc_context *rpc, const char *server, int port)
 {
 	struct addrinfo *ai = NULL;
+	int err, i;
 
-	if (getaddrinfo(server, NULL, NULL, &ai) != 0) {
+	/*
+	 * A resolver hiccup should not tear the mount down, so retry a
+	 * transient failure a few times. Keep the bound small, this runs on
+	 * the caller's event loop thread.
+	 */
+	for (i = 0, err = 0; i < RESOLVE_RETRIES; i++) {
+		if (i) {
+			RPC_LOG(rpc, 2, "rpc_set_sockaddr: getaddrinfo(%s) failed "
+				"temporarily (%d), retrying", server, err);
+#if defined(WIN32)
+			Sleep(RESOLVE_RETRY_NSECS / 1000000);
+#else
+			{
+				struct timespec ts = {0, RESOLVE_RETRY_NSECS};
+				nanosleep(&ts, NULL);
+			}
+#endif
+		}
+		err = getaddrinfo(server, NULL, NULL, &ai);
+#ifdef EAI_AGAIN
+		/* Only a transient failure is worth another try. */
+		if (err != EAI_AGAIN)
+			break;
+#else
+		break;
+#endif
+	}
+
+	if (err != 0) {
 		rpc_set_error(rpc, "Invalid address:%s. "
-			      "Can not resolv into IPv4/v6 structure.", server);
+			      "Can not resolv into IPv4/v6 structure. "
+			      "getaddrinfo error %d", server, err);
 		return -1;
  	}
 
 	switch (ai->ai_family) {
 	case AF_INET:
+		if (rpc->resolve_server &&
+		    ((struct sockaddr_in *)&rpc->s)->sin_family == AF_INET) {
+			const uint32_t o =
+				ntohl(((struct sockaddr_in *)&rpc->s)->sin_addr.s_addr);
+			const uint32_t n =
+				ntohl(((struct sockaddr_in *)(void *)(ai->ai_addr))->sin_addr.s_addr);
+
+			if (o != n) {
+				RPC_LOG(rpc, 1, "rpc_set_sockaddr (%s): IPv4 address "
+					"changed from %u.%u.%u.%u -> %u.%u.%u.%u",
+					server,
+					o >> 24, (o >> 16) & 0xff, (o >> 8) & 0xff, o & 0xff,
+					n >> 24, (n >> 16) & 0xff, (n >> 8) & 0xff, n & 0xff);
+			}
+		}
+
 		((struct sockaddr_in *)&rpc->s)->sin_family = ai->ai_family;
 		((struct sockaddr_in *)&rpc->s)->sin_port = htons(port);
 		((struct sockaddr_in *)&rpc->s)->sin_addr =
@@ -1596,6 +2346,9 @@ rpc_set_sockaddr(struct rpc_context *rpc, const char *server, int port)
 #endif
 	}
 	freeaddrinfo(ai);
+
+	/* Remember the port so a re-resolve on reconnect can reuse it. */
+	rpc->port = port;
 
         return 0;
 }
@@ -1631,6 +2384,7 @@ rpc_connect_async(struct rpc_context *rpc, const char *server, int port,
 	rpc->connect_data = private_data;
 
 	if (rpc_connect_sockaddr_async(rpc) != 0) {
+		rpc->connect_cb = NULL;
 		return -1;
 	}
 
@@ -1641,6 +2395,7 @@ int
 rpc_disconnect(struct rpc_context *rpc, const char *error)
 {
 	assert(rpc->magic == RPC_CONTEXT_MAGIC);
+	rpc_nfs40_stop_renew(rpc);
 
 	if (rpc->fd != -1) {
 		close(rpc->fd);
@@ -1649,6 +2404,9 @@ rpc_disconnect(struct rpc_context *rpc, const char *error)
 
 	/* Do not re-disconnect if we are already disconnected */
 	if (!rpc->is_connected) {
+		/* but a connect still in flight must be cancelled */
+		rpc_set_resiliency(rpc, 0, rpc->timeout, 0);
+		maybe_call_connect_cb(rpc, RPC_STATUS_CANCEL);
 		return 0;
 	}
 
@@ -1656,6 +2414,21 @@ rpc_disconnect(struct rpc_context *rpc, const char *error)
 	rpc_set_resiliency(rpc, 0, rpc->timeout, 0);
 
 	rpc->is_connected = 0;
+
+        /*
+         * Whatever we were part way through reading belongs to the socket we
+         * just closed. Only rpc_reconnect_requeue() reset this, so a plain
+         * disconnect followed by a fresh connect resumed mid-record and ate
+         * the new connection's first bytes as the tail of the old one.
+         *
+         * rpc->pdu is deliberately left alone here. When the disconnect comes
+         * from inside a reply callback, which is what the mount sequence
+         * does, rpc_read_from_socket() sees the connection change under it
+         * and completes that pdu itself.
+         */
+        rpc->state = READ_RM;
+        rpc->inpos = 0;
+        rpc_free_all_fragments(rpc);
 
         if (!rpc->is_server_context) {
                 rpc_error_all_pdus(rpc, error);
@@ -1701,8 +2474,68 @@ reconnect_cb_tls(struct rpc_context *rpc, int status,
 	}
 
 	RPC_LOG(rpc, 2, "reconnect_cb_tls: TLS handshake completed successfully!");
+
+#ifdef HAVE_NFS4_2
+	rpc_nfs4_rebind_session(rpc);
+#endif /* HAVE_NFS4_2 */
 }
 #endif
+
+#ifdef HAVE_NFS4_2
+/*
+ * Result of rebinding the session to a reconnected socket. A failure here
+ * means the session is gone for good, usually because the lease ran out
+ * while we were disconnected. Drop it so that the COMPOUNDs behind it fail
+ * with a session error rather than being sent into a session the server no
+ * longer has.
+ */
+static void
+bind_conn_cb(struct rpc_context *rpc, int status, void *command_data,
+             void *private_data _U_)
+{
+	COMPOUND4res *res = command_data;
+
+	assert(rpc->magic == RPC_CONTEXT_MAGIC);
+
+	if (status == RPC_STATUS_SUCCESS && res && res->status == NFS4_OK) {
+		RPC_LOG(rpc, 2, "NFSv4 session rebound to the new connection");
+		return;
+	}
+
+	RPC_LOG(rpc, 1, "BIND_CONN_TO_SESSION failed, the NFSv4 session is "
+		"gone. The context has to be remounted.");
+	nfs4_session_destroy(rpc);
+}
+
+/*
+ * An NFSv4.1+ session belongs to the connection it was created on. The
+ * session itself survives a reconnect, since the server holds it until the
+ * lease expires, but the new connection is not associated with it yet and
+ * every COMPOUND we are about to retransmit would come back
+ * NFS4ERR_CONN_NOT_BOUND_TO_SESSION. Rebind before anything else goes out,
+ * which is why the operation is queued at the head of the send queue.
+ *
+ * Called once the connection is ready to carry NFS, which with TLS means
+ * after the handshake rather than after the TCP connect.
+ */
+static void
+rpc_nfs4_rebind_session(struct rpc_context *rpc)
+{
+	if (!rpc_nfs4_session_is_valid(rpc)) {
+		return;
+	}
+	if (rpc_nfs4_bind_conn_to_session_task(rpc, bind_conn_cb,
+					       NULL) != NULL) {
+		return;
+	}
+
+	RPC_LOG(rpc, 1, "failed to rebind the NFSv4 session to the new "
+		"connection. %s", rpc_get_error(rpc));
+	nfs4_session_destroy(rpc);
+	rpc_error_all_pdus(rpc, "RPC ERROR: Failed to rebind the NFSv4 "
+			   "session to the reconnected socket");
+}
+#endif /* HAVE_NFS4_2 */
 
 static void
 reconnect_cb(struct rpc_context *rpc, int status, void *data,
@@ -1723,6 +2556,8 @@ reconnect_cb(struct rpc_context *rpc, int status, void *data,
 #ifdef HAVE_TLS
 	/*
 	 * For secure NFS connections, we need to setup TLS session now.
+	 * Rebinding an NFSv4 session has to wait until the handshake is done,
+	 * so reconnect_cb_tls() does it in that case.
 	 */
 	RPC_LOG(rpc, 2, "reconnect_cb called with status %d", status);
 	if (rpc->use_tls) {
@@ -1745,8 +2580,13 @@ reconnect_cb(struct rpc_context *rpc, int status, void *data,
 			rpc_reconnect_requeue(rpc);
 			return;
 		}
+		return;
 	}
 #endif /* HAVE_TLS */
+
+#ifdef HAVE_NFS4_2
+	rpc_nfs4_rebind_session(rpc);
+#endif /* HAVE_NFS4_2 */
 }
 
 /* Disconnect but do not error all PDUs, just move pdus in-flight back to the
@@ -1776,6 +2616,14 @@ rpc_reconnect_requeue(struct rpc_context *rpc)
 	rpc->fd  = -1;
 	rpc->is_connected = 0;
 
+	/*
+	 * The run of bytes written so far belongs to the socket we just
+	 * dropped, and it was cut short by the disconnect rather than by the
+	 * peer's receive window. Discard it instead of letting it run on into
+	 * the next connection and bias the average downwards.
+	 */
+	rpc->stats.last_write_bytes_before_eagain = 0;
+
 	if (rpc->outqueue.head) {
 		rpc->outqueue.head->out.num_done = 0;
 	}
@@ -1783,6 +2631,11 @@ rpc_reconnect_requeue(struct rpc_context *rpc)
 	rpc->inpos = 0;
 	rpc->state = READ_RM;
 
+        /*
+         * Drop all fragments on reconnect
+         */
+        rpc_free_all_fragments(rpc);
+        
 	/* Socket is closed so we will not get any replies to any commands
 	 * in flight. Move them all over from the waitpdu queue back to the
          * out queue.
@@ -1810,6 +2663,10 @@ rpc_reconnect_requeue(struct rpc_context *rpc)
                 rpc->pdu = NULL;
         }
 
+#ifdef HAVE_NFS4_2
+        nfs4_requeue_delayed(rpc);
+#endif /* HAVE_NFS4_2 */
+
 #ifdef HAVE_MULTITHREADING
         if (rpc->multithreading_enabled) {
                 nfs_mt_mutex_unlock(&rpc->rpc_mutex);
@@ -1819,8 +2676,15 @@ rpc_reconnect_requeue(struct rpc_context *rpc)
 	if (rpc->auto_reconnect < 0 || rpc->num_retries > 0) {
 		rpc->num_retries--;
 		rpc->connect_cb  = reconnect_cb;
-		RPC_LOG(rpc, 1, "reconnect initiated");
+		RPC_LOG(rpc, 1, "reconnect initiated to %s",
+			rpc->server ? rpc->server : "<last address>");
+		/*
+		 * Tell rpc_connect_sockaddr_async() to re-resolve the server
+		 * name first, if the user asked for that behaviour.
+		 */
+		rpc->resolve_server = rpc->resolve_on_reconnect;
 		if (rpc_connect_sockaddr_async(rpc) != 0) {
+			rpc->connect_cb = NULL;
 			rpc_error_all_pdus(rpc, "RPC ERROR: Failed to "
                                            "reconnect async");
 			return -1;
@@ -1924,31 +2788,44 @@ rpc_set_udp_destination(struct rpc_context *rpc, char *addr, int port,
 }
 
 struct sockaddr *
-rpc_get_recv_sockaddr(struct rpc_context *rpc)
+rpc_get_udp_src_sockaddr(struct rpc_context *rpc)
 {
 	assert(rpc->magic == RPC_CONTEXT_MAGIC);
 
 	return (struct sockaddr *)&rpc->udp_src;
 }
 
+#ifdef __linux__
+struct sockaddr *
+rpc_get_udp_dst_sockaddr(struct rpc_context *rpc)
+{
+	assert(rpc->magic == RPC_CONTEXT_MAGIC);
+
+	return (struct sockaddr *)&rpc->udp_dst;
+}
+#endif
+
 int
 rpc_queue_length(struct rpc_context *rpc)
 {
 	int i = 0;
-	struct rpc_pdu *pdu;
 
 	assert(rpc->magic == RPC_CONTEXT_MAGIC);
-
-	for(pdu = rpc->outqueue.head; pdu; pdu = pdu->next) {
-		i++;
-	}
 
 #ifdef HAVE_MULTITHREADING
         if (rpc->multithreading_enabled) {
                 nfs_mt_mutex_lock(&rpc->rpc_mutex);
         }
 #endif /* HAVE_MULTITHREADING */
+	/*
+	 * outqueue_len replaces the open coded walk of rpc->outqueue, and
+	 * unlike that walk it is read under the lock.
+	 */
+	i += rpc->stats.outqueue_len;
 	i += rpc->waitpdu_len;
+#ifdef HAVE_NFS4_2
+        i += rpc->nfs4_delay_queue_len;
+#endif
 #ifdef HAVE_MULTITHREADING
         if (rpc->multithreading_enabled) {
                 nfs_mt_mutex_unlock(&rpc->rpc_mutex);
@@ -1976,6 +2853,14 @@ rpc_set_fd(struct rpc_context *rpc, int fd)
 	assert(rpc->magic == RPC_CONTEXT_MAGIC);
 
 	rpc->fd = fd;
+}
+
+void
+rpc_set_resolve_on_reconnect(struct rpc_context *rpc, int enabled)
+{
+	assert(rpc->magic == RPC_CONTEXT_MAGIC);
+
+	rpc->resolve_on_reconnect = !!enabled;
 }
 
 int

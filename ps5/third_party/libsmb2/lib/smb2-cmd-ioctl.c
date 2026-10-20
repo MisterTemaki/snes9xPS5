@@ -55,6 +55,61 @@
 #include "libsmb2.h"
 #include "libsmb2-private.h"
 
+/*
+ * Some ctl codes report certain errors using the normal IOCTL reply
+ * format (struct smb2_ioctl_reply, with an output buffer) instead of the
+ * generic SMB2 error format. FSCTL_SRV_COPYCHUNK/_WRITE do this for
+ * STATUS_INVALID_PARAMETER, using the output buffer to carry a
+ * SRV_COPYCHUNK_RESPONSE with the server's copy limits.
+ */
+int
+smb2_ioctl_status_uses_reply_format(uint32_t ctl_code, uint32_t status)
+{
+        switch (ctl_code) {
+        case SMB2_FSCTL_SRV_COPYCHUNK:
+        case SMB2_FSCTL_SRV_COPYCHUNK_WRITE:
+                return status == SMB2_STATUS_INVALID_PARAMETER;
+        default:
+                return 0;
+        }
+}
+
+/*
+ * How many bytes of output do we tell the server it may return ?
+ *
+ * We have always asked for 64k, and callers that memset their request
+ * still get that, but the fsctls that only set state and return nothing
+ * are rejected by windows with STATUS_INVALID_PARAMETER unless the max
+ * output is exactly zero.
+ *
+ * Windows also rejects an ioctl whose InputCount + MaxOutputResponse is
+ * more than MaxTransactSize - 8 (measured on Windows Server 2016), which
+ * the 64k default is in SMB 2.0.2, where MaxTransactSize is 64k. A
+ * caller that is given a short reply can read the rest, as a named pipe
+ * reader does after STATUS_BUFFER_OVERFLOW.
+ */
+static uint32_t
+smb2_ioctl_max_output_response(struct smb2_context *smb2,
+                               struct smb2_ioctl_request *req)
+{
+        uint32_t max = 65535;
+
+        switch (req->ctl_code) {
+        case SMB2_FSCTL_SET_REPARSE_POINT:
+                return 0;
+        default:
+                break;
+        }
+        if (req->max_output_response) {
+                return req->max_output_response;
+        }
+        if (smb2->max_transact_size >= 8 + req->input_count &&
+            max > smb2->max_transact_size - 8 - req->input_count) {
+                max = smb2->max_transact_size - 8 - req->input_count;
+        }
+        return max;
+}
+
 static int
 smb2_encode_ioctl_request(struct smb2_context *smb2,
                           struct smb2_pdu *pdu,
@@ -72,6 +127,9 @@ smb2_encode_ioctl_request(struct smb2_context *smb2,
         }
 
         iov = smb2_add_iovector(smb2, &pdu->out, buf, len, free);
+        if (iov == NULL) {
+                return -1;
+        }
 
         smb2_set_uint16(iov, 0, SMB2_IOCTL_REQUEST_SIZE);
         smb2_set_uint32(iov, 4, req->ctl_code);
@@ -80,12 +138,15 @@ smb2_encode_ioctl_request(struct smb2_context *smb2,
                         (SMB2_IOCTL_REQUEST_SIZE & 0xfffffffe));
         smb2_set_uint32(iov, 28, req->input_count);
         smb2_set_uint32(iov, 32, 0); /* Max input response */
-        smb2_set_uint32(iov, 44, 65535); /* Max output response */
+        smb2_set_uint32(iov, 44, smb2_ioctl_max_output_response(smb2, req));
         smb2_set_uint32(iov, 48, req->flags);
 
         if (req->input_count) {
                 iov = smb2_add_iovector(smb2, &pdu->out, req->input,
                                         req->input_count, NULL);
+                if (iov == NULL) {
+                        return -1;
+                }
         }
 
         return 0;
@@ -102,6 +163,7 @@ smb2_cmd_ioctl_async(struct smb2_context *smb2,
         if (pdu == NULL) {
                 return NULL;
         }
+        pdu->ctl_code = req->ctl_code;
 
         if (smb2_encode_ioctl_request(smb2, pdu, req)) {
                 smb2_free_pdu(smb2, pdu);
@@ -133,8 +195,12 @@ smb2_encode_ioctl_reply(struct smb2_context *smb2,
         }
 
         iov = smb2_add_iovector(smb2, &pdu->out, buf, len, free);
+        if (iov == NULL) {
+                return -1;
+        }
 
         ioctlv = NULL;
+        len = 0;
         if (rep->output_count) {
                 switch (rep->ctl_code) {
                 case SMB2_FSCTL_VALIDATE_NEGOTIATE_INFO:
@@ -161,6 +227,9 @@ smb2_encode_ioctl_reply(struct smb2_context *smb2,
                 }
                 memset(buf, 0, rep->output_count);
                 ioctlv = smb2_add_iovector(smb2, &pdu->out, buf, len, free);
+                if (ioctlv == NULL) {
+                        return -1;
+                }
 
                 switch (rep->ctl_code) {
                 case SMB2_FSCTL_VALIDATE_NEGOTIATE_INFO:
@@ -192,12 +261,15 @@ smb2_encode_ioctl_reply(struct smb2_context *smb2,
         smb2_set_uint16(iov, 0, SMB2_IOCTL_REPLY_SIZE);
         smb2_set_uint32(iov, 4, rep->ctl_code);
         memcpy(iov->buf + 8, rep->file_id, SMB2_FD_SIZE);
+        /* input offset */
         smb2_set_uint32(iov, 24, SMB2_HEADER_SIZE +
                         (SMB2_IOCTL_REPLY_SIZE & 0xfffffffe));
         smb2_set_uint32(iov, 28, rep->input_count);
+        /* output offset, aligned after input */
         smb2_set_uint32(iov, 32, SMB2_HEADER_SIZE +
                         (SMB2_IOCTL_REPLY_SIZE & 0xfffffffe) +
                         PAD_TO_64BIT(rep->input_count));
+        /* output_count */
         smb2_set_uint32(iov, 36, len);
         smb2_set_uint32(iov, 40, rep->flags);
 
@@ -229,7 +301,7 @@ smb2_cmd_ioctl_reply_async(struct smb2_context *smb2,
         return pdu;
 }
 
-#define IOV_OFFSET (rep->output_offset - SMB2_HEADER_SIZE - \
+#define IOV_OFFSET_IOCTL (rep->output_offset - SMB2_HEADER_SIZE - \
                     (SMB2_IOCTL_REPLY_SIZE & 0xfffe))
 
 int
@@ -250,7 +322,7 @@ smb2_process_ioctl_fixed(struct smb2_context *smb2,
                 return -1;
         }
 
-        rep = malloc(sizeof(*rep));
+        rep = calloc(1, sizeof(*rep));
         if (rep == NULL) {
                 smb2_set_error(smb2, "Failed to allocate ioctl reply");
                 return -1;
@@ -259,6 +331,8 @@ smb2_process_ioctl_fixed(struct smb2_context *smb2,
 
         smb2_get_uint32(iov, 4, &rep->ctl_code);
         memcpy(rep->file_id, iov->buf + 8, SMB2_FD_SIZE);
+        smb2_get_uint32(iov, 24, &rep->input_offset);
+        smb2_get_uint32(iov, 28, &rep->input_count);
         smb2_get_uint32(iov, 32, &rep->output_offset);
         smb2_get_uint32(iov, 36, &rep->output_count);
         smb2_get_uint32(iov, 40, &rep->flags);
@@ -276,10 +350,38 @@ smb2_process_ioctl_fixed(struct smb2_context *smb2,
                 return -1;
         }
 
-        /* Return the amount of data that the output buffer will take up.
-         * Including any padding before the output buffer itself.
+        /* input_count, output_count and output_offset are all 32 bit values
+         * straight off the wire and the size returned below is computed
+         * from all three in 32 bit arithmetic. Without this both the
+         * PAD_TO_64BIT() rounding and the additions can wrap, and even
+         * without wrapping the result drives a malloc in the receive loop,
+         * so a 4 byte field would buy a ~2GB allocation. Everything has to
+         * describe data inside this PDU.
          */
-        return IOV_OFFSET + rep->output_count;
+        if ((uint64_t)rep->output_offset + rep->output_count >
+            (uint64_t)smb2->spl) {
+                smb2_set_error(smb2, "Ioctl output buffer extends beyond "
+                               "end of PDU");
+                pdu->payload = NULL;
+                free(rep);
+                return -1;
+        }
+        if (rep->input_count &&
+            ((uint64_t)rep->input_offset + rep->input_count >
+             (uint64_t)smb2->spl)) {
+                smb2_set_error(smb2, "Ioctl input buffer extends beyond "
+                               "end of PDU");
+                pdu->payload = NULL;
+                free(rep);
+                return -1;
+        }
+
+        /* Return the amount of data that the output buffer will take up.
+         * Including any padding before the input and output buffer itself.
+         * note: input_count should be 0, but there are exceptions, see
+         * MS-SMB 3.3.5.15.8 (passthrough)
+         */
+        return IOV_OFFSET_IOCTL + PAD_TO_64BIT(rep->input_count) + rep->output_count;
 }
 
 int
@@ -291,17 +393,21 @@ smb2_process_ioctl_variable(struct smb2_context *smb2,
         struct smb2_iovec vec;
         void *ptr;
 
-        if (rep->output_count > iov->len - IOV_OFFSET) {
+        if (IOV_OFFSET_IOCTL > iov->len ||
+            rep->output_count > iov->len - IOV_OFFSET_IOCTL) {
                 return -EINVAL;
         }
 
-        vec.buf = &iov->buf[IOV_OFFSET];
-        vec.len = iov->len - IOV_OFFSET;
+        vec.buf = &iov->buf[IOV_OFFSET_IOCTL];
+        vec.len = iov->len - IOV_OFFSET_IOCTL;
 
         switch (rep->ctl_code) {
         case SMB2_FSCTL_GET_REPARSE_POINT:
                 ptr = smb2_alloc_init(smb2,
                                       sizeof(struct smb2_reparse_data_buffer));
+                if (ptr == NULL) {
+                        return -ENOMEM;
+                }
                 if (smb2_decode_reparse_data_buffer(smb2, ptr, ptr, &vec)) {
                         smb2_set_error(smb2, "could not decode reparse "
                                        "data buffer. %s",
@@ -309,12 +415,50 @@ smb2_process_ioctl_variable(struct smb2_context *smb2,
                         return -1;
                 }
                 break;
+        case SMB2_FSCTL_SRV_REQUEST_RESUME_KEY:
+                if (rep->output_count < SMB2_SRV_COPYCHUNK_RESUME_KEY_SIZE) {
+                        smb2_set_error(smb2, "Resume key reply too short");
+                        return -1;
+                }
+                ptr = smb2_alloc_init(smb2,
+                                      sizeof(struct smb2_srv_copychunk_resume_key));
+                if (ptr == NULL) {
+                        return -ENOMEM;
+                }
+                memcpy(((struct smb2_srv_copychunk_resume_key *)ptr)->resume_key,
+                       vec.buf, SMB2_SRV_COPYCHUNK_RESUME_KEY_SIZE);
+                break;
+        case SMB2_FSCTL_SRV_COPYCHUNK:
+        case SMB2_FSCTL_SRV_COPYCHUNK_WRITE:
+                if (rep->output_count < 12) {
+                        smb2_set_error(smb2, "Copychunk reply too short");
+                        return -1;
+                }
+                ptr = smb2_alloc_init(smb2,
+                                      sizeof(struct smb2_srv_copychunk_reply));
+                if (ptr == NULL) {
+                        return -ENOMEM;
+                }
+                smb2_get_uint32(&vec, 0,
+                                &((struct smb2_srv_copychunk_reply *)ptr)->chunks_written);
+                smb2_get_uint32(&vec, 4,
+                                &((struct smb2_srv_copychunk_reply *)ptr)->chunk_bytes_written);
+                smb2_get_uint32(&vec, 8,
+                                &((struct smb2_srv_copychunk_reply *)ptr)->total_bytes_written);
+                break;
         default:
                 ptr = smb2_alloc_init(smb2, rep->output_count);
                 if (ptr == NULL) {
                         return -ENOMEM;
                 }
-                memcpy(ptr, &iov->buf[IOV_OFFSET], iov->len - IOV_OFFSET);
+                /*
+                 * Only copy the output buffer. iov->len also covers the
+                 * padding and any input buffer that precedes it (see the
+                 * length smb2_process_ioctl_fixed() returned), so using it
+                 * as the copy length overruns the allocation whenever
+                 * input_count is non-zero.
+                 */
+                memcpy(ptr, &iov->buf[IOV_OFFSET_IOCTL], rep->output_count);
         }
 
         rep->output = ptr;
@@ -322,7 +466,7 @@ smb2_process_ioctl_variable(struct smb2_context *smb2,
         return 0;
 }
 
-#define IOVREQ_OFFSET (req->input_offset - SMB2_HEADER_SIZE - \
+#define IOVREQ_OFFSET_IOCTL (req->input_offset - SMB2_HEADER_SIZE - \
                     (SMB2_IOCTL_REQUEST_SIZE & 0xfffe))
 
 int
@@ -355,10 +499,10 @@ smb2_process_ioctl_request_fixed(struct smb2_context *smb2,
         smb2_get_uint32(iov, 24, &req->input_offset);
         smb2_get_uint32(iov, 28, &req->input_count);
         smb2_get_uint32(iov, 32, &req->max_input_response);
-        smb2_get_uint32(iov, 40, &req->output_offset);
-        smb2_get_uint32(iov, 44, &req->output_count);
-        smb2_get_uint32(iov, 48, &req->max_output_response);
-        smb2_get_uint32(iov, 52, &req->flags);
+        smb2_get_uint32(iov, 36, &req->output_offset);
+        smb2_get_uint32(iov, 40, &req->output_count);
+        smb2_get_uint32(iov, 44, &req->max_output_response);
+        smb2_get_uint32(iov, 48, &req->flags);
 
         if (req->input_count == 0) {
                 return 0;
@@ -376,7 +520,7 @@ smb2_process_ioctl_request_fixed(struct smb2_context *smb2,
         /* Return the amount of data that the input buffer will take up.
          * Including any padding before the input buffer itself.
          */
-        return IOVREQ_OFFSET + req->input_count;
+        return IOVREQ_OFFSET_IOCTL + req->input_count;
 }
 
 int
@@ -388,19 +532,28 @@ smb2_process_ioctl_request_variable(struct smb2_context *smb2,
         struct smb2_iovec vec;
         void *ptr = NULL;
         struct smb2_ioctl_validate_negotiate_info *info;
-        /* this one is handled locally regardless of proxy or not */
-        ptr = smb2_alloc_init(smb2, sizeof(struct smb2_ioctl_validate_negotiate_info));
-        info = ptr;
 
-        if (req->input_count > iov->len - IOVREQ_OFFSET) {
+        if (IOVREQ_OFFSET_IOCTL > iov->len ||
+            req->input_count > iov->len - IOVREQ_OFFSET_IOCTL) {
                 return -EINVAL;
         }
 
-        vec.buf = &iov->buf[IOVREQ_OFFSET];
-        vec.len = iov->len - IOVREQ_OFFSET;
+        vec.buf = &iov->buf[IOVREQ_OFFSET_IOCTL];
+        vec.len = iov->len - IOVREQ_OFFSET_IOCTL;
 
         switch (req->ctl_code) {
         case SMB2_FSCTL_VALIDATE_NEGOTIATE_INFO:
+                /* this one is handled locally regardless of proxy or not */
+                if (vec.len < 24) {
+                        smb2_set_error(smb2, "Validate negotiate info request "
+                                       "is too short");
+                        return -EINVAL;
+                }
+                ptr = smb2_alloc_init(smb2, sizeof(struct smb2_ioctl_validate_negotiate_info));
+                if (ptr == NULL) {
+                        return -ENOMEM;
+                }
+                info = ptr;
                 smb2_get_uint32(&vec, 0, &info->capabilities);
                 memcpy(info->guid, &vec.buf[4], 16);
                 smb2_get_uint16(&vec, 20, &info->security_mode);
@@ -423,4 +576,3 @@ smb2_process_ioctl_request_variable(struct smb2_context *smb2,
         req->input = ptr;
         return 0;
 }
-

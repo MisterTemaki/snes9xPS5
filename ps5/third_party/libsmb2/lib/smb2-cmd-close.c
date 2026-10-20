@@ -72,6 +72,10 @@ smb2_encode_close_request(struct smb2_context *smb2,
         }
 
         iov = smb2_add_iovector(smb2, &pdu->out, buf, len, free);
+        if (iov == NULL) {
+                smb2_set_error(smb2, "Failed to add iovector for close request");
+                return -1;
+        }
 
         smb2_set_uint16(iov, 0, SMB2_CLOSE_REQUEST_SIZE);
         smb2_set_uint16(iov, 2, req->flags);
@@ -122,16 +126,21 @@ smb2_encode_close_reply(struct smb2_context *smb2,
         }
 
         iov = smb2_add_iovector(smb2, &pdu->out, buf, len, free);
+        if (iov == NULL) {
+                smb2_set_error(smb2, "Failed to add iovector for close reply");
+                return -1;
+        }
 
         smb2_set_uint16(iov, 0, SMB2_CLOSE_REPLY_SIZE);
         smb2_set_uint16(iov, 2, rep->flags);
-        smb2_set_uint64(iov, 4, rep->creation_time);
-        smb2_set_uint64(iov, 12, rep->last_access_time);
-        smb2_set_uint64(iov, 20, rep->last_write_time);
-        smb2_set_uint64(iov, 28, rep->change_time);
-        smb2_set_uint64(iov, 36, rep->allocation_size);
-        smb2_set_uint64(iov, 44, rep->end_of_file);
-        smb2_set_uint32(iov, 52, rep->file_attributes);
+        /* 4 bytes reserved at offset 4 */
+        smb2_set_uint64(iov, 8, rep->creation_time);
+        smb2_set_uint64(iov, 16, rep->last_access_time);
+        smb2_set_uint64(iov, 24, rep->last_write_time);
+        smb2_set_uint64(iov, 32, rep->change_time);
+        smb2_set_uint64(iov, 40, rep->allocation_size);
+        smb2_set_uint64(iov, 48, rep->end_of_file);
+        smb2_set_uint32(iov, 56, rep->file_attributes);
 
         return 0;
 }

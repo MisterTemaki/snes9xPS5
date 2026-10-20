@@ -1,19 +1,29 @@
 libsmb2 for Snes9x PS5
 ======================
 
-What:     libsmb2 6.2, the SMB 2/3 client library by Ronnie Sahlberg and contributors.
+What:     libsmb2 from upstream master after 6.2 (no release has the fixes below yet), commit
+          57fea04fd29403e3978000179339c8e13ce46b5c (2026-10-20, "libdcerpc: tests: schannel over the RPC
+          layer"), the SMB 2/3 client library by Ronnie Sahlberg and contributors. Taken over 6.2 for its
+          fixes of memory-safety bugs a malicious server can reach: CVE-2025-57632 (5e75eeb, heap OOB write
+          in smb2_add_iovector via chained PDUs), CVE-2026-110712 (57bee9f, OOB read in
+          smb2_decode_file_all_info), d0801c5 (off-by-one in the compat strdup), and the later "Bound ..."
+          fixes (bf8d97d create/read/ioctl/notify replies, dd0bbde FILESYSTEM_INFO labels, a68698e ntlmssp,
+          09424fa iovec skip loop, be408f4 and 4ace19a query-info encoders, 595d128 ntlm: hashes).
 Licence:  LGPL-2.1 (LICENCE-LGPL-2.1.txt, COPYING). Statically linked into the app; the sources
           here are the complete corresponding source. Replace the files and rebuild to relink.
-Source:   libsmb2_6.2+dfsg.orig.tar.gz from the Debian archive
-          (https://deb.debian.org/debian/pool/main/libs/libsmb2/),
-          sha256 5fa97ecb099d0cebcf7ba6b0a5e3f84d89eb66aeed7e71111e6dee22699d031b
-          Upstream: https://github.com/sahlberg/libsmb2
-
+Source:   git archive of that commit from https://github.com/sahlberg/libsmb2
+          (6.2 came from libsmb2_6.2+dfsg.orig.tar.gz in the Debian archive).
 Kept:     lib/*.c and lib/*.h (the client; the server code that shares libsmb2.c comes with it),
           include/ (smb2/*.h, libsmb2-private.h, portable-endian.h, slist.h, asprintf.h).
-Left out: Kerberos (krb5-wrapper.c), the other platforms' folders and makefiles, examples, tests,
-          CMake, packaging.
-Changed:  nothing in lib/ or include/. config.h is ours (it replaces the CMake-generated one).
+          Share enumeration is lib/smb2-share-enum.c (include/smb2/libsmb2-share-enum.h); upstream moved
+          the general DCE/RPC code (6.2's dcerpc*.c) into a separate libdcerpc, which is not needed here.
+Left out: Kerberos (krb5-wrapper.c), SMB over QUIC (quic.c, needs Linux QUIC), SMB Direct (smbdirect.c,
+          needs RDMA), Apple CommonCrypto AES (aes_apple.c/.h), libdcerpc, the other platforms' folders
+          and makefiles, examples, tests, utils, CMake, packaging.
+Changed:  nothing in lib/ or include/. config.h is ours (it replaces the CMake-generated one); it takes
+          randomness from arc4random_buf (HAVE_ARC4RANDOM_BUF) on both the host and the console.
           On the console, libsmb2's fcntl() and getaddrinfo() calls reach netfs/netfs_shims_ps5.cpp
           through the link-time --wrap list (NETFS_WRAPPED_PS5 in ps5/Makefile).
 Built by: ps5/Makefile (LIBSMB2_*), used by ps5/netfs/backend_smb.cpp.
+Updating: replace lib/ and include/ from the new upstream commit (minus the files left out above), keep
+          config.h (check upstream's cmake/config.h.cmake for new HAVE_* switches), then make -C ps5 test.

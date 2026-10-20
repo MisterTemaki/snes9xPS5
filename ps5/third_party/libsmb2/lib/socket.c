@@ -59,7 +59,10 @@
 #include <string.h>
 #endif
 
-#ifdef HAVE_SYS_IOCTL_H
+/* On libogc/libogc2 FIONBIO must come from <network.h>, which only defines it
+ * if nobody did before. The toolchain's <sys/ioctl.h> defines a different
+ * value that net_ioctl() rejects with EINVAL, so don't include it there. */
+#if defined(HAVE_SYS_IOCTL_H) && !defined(__wii__) && !defined(__gamecube__)
 #include <sys/ioctl.h>
 #endif
 
@@ -98,6 +101,8 @@
 #ifdef HAVE_SYS_SOCKET_H
 #include <sys/socket.h>
 #endif
+
+#include <errno.h>
 
 #include "compat.h"
 
@@ -154,12 +159,27 @@ smb2_close_connecting_fds(struct smb2_context *smb2)
 }
 
 static int
+smb2_get_real_credit_charge_for_one_pdu(struct smb2_context *smb2, struct smb2_header *hdr)
+{
+        int credits;
+
+        credits = hdr->credit_charge;
+        if (hdr->command == SMB2_NEGOTIATE) {
+                /* Mirror the special case in smb2_allocate_pdu. */
+        } else if (smb2->dialect <= SMB2_VERSION_0202) {
+                ++ credits;
+        }
+
+        return credits;
+}
+
+static int
 smb2_get_credit_charge(struct smb2_context *smb2, struct smb2_pdu *pdu)
 {
         int credits = 0;
 
         while (pdu) {
-                credits += pdu->header.credit_charge;
+                credits += smb2_get_real_credit_charge_for_one_pdu(smb2, &pdu->header);
                 pdu = pdu->next_compound;
         }
 
@@ -170,6 +190,19 @@ int
 smb2_which_events(struct smb2_context *smb2)
 {
         int events = SMB2_VALID_SOCKET(smb2->fd) ? POLLIN : POLLOUT;
+
+#ifdef HAVE_LIBQUIC
+        if (smb2->quic_hs != NULL) {
+                return smb2_quic_events(smb2);
+        }
+#endif
+#ifdef HAVE_LIBRDMACM
+        /* The epoll fd never polls writable. Output is flushed when we
+         * queue it and whenever completions are serviced. */
+        if (smb2->rdma && SMB2_VALID_SOCKET(smb2->fd)) {
+                return POLLIN;
+        }
+#endif
 
         if (smb2->outqueue != NULL &&
             smb2_get_credit_charge(smb2, smb2->outqueue) <= smb2->credits) {
@@ -204,7 +237,7 @@ smb2_get_fds(struct smb2_context *smb2, size_t *fd_count, int *timeout)
         }
 }
 
-static int
+int
 smb2_write_to_socket(struct smb2_context *smb2)
 {
         struct smb2_pdu *pdu;
@@ -220,15 +253,11 @@ smb2_write_to_socket(struct smb2_context *smb2)
                 size_t num_done = pdu->out.num_done;
                 int i, niov = 1;
                 ssize_t count;
-                uint32_t spl = 0, tmp_spl, credit_charge = 0;
+                uint32_t spl = 0, tmp_spl, credit_charge;
 
-                for (tmp_pdu = pdu; tmp_pdu; tmp_pdu = tmp_pdu->next_compound) {
-                        credit_charge += pdu->header.credit_charge;
-                }
-                if (smb2->dialect > SMB2_VERSION_0202) {
-                        if (credit_charge > (uint32_t)smb2->credits) {
-                                return 0;
-                        }
+                credit_charge = smb2_get_credit_charge(smb2, pdu);
+                if (credit_charge > (uint32_t)smb2->credits) {
+                        return 0;
                 }
 
                 if (pdu->seal) {
@@ -276,6 +305,16 @@ smb2_write_to_socket(struct smb2_context *smb2)
 #else
                 tmpiov->iov_len -= (size_t)num_done;
 #endif
+#ifdef HAVE_LIBQUIC
+                if (smb2->quic) {
+                        count = smb2_quic_writev(smb2, tmpiov, niov);
+                } else
+#endif
+#ifdef HAVE_LIBRDMACM
+                if (smb2->rdma) {
+                        count = smb2_rdma_writev(smb2, tmpiov, niov);
+                } else
+#endif
                 count = writev(smb2->fd, tmpiov, niov);
 
                 if (count == -1) {
@@ -302,14 +341,28 @@ smb2_write_to_socket(struct smb2_context *smb2)
                                  * PDUs as individual PDUs.
                                  */
                                 pdu->next_compound = NULL;
-                                smb2->credits -= pdu->header.credit_charge;
 
                                 if (!smb2_is_server(smb2)) {
-                                        /* queue requests we send to correlate replies with */
-                                        SMB2_LIST_ADD_END(&smb2->waitqueue, pdu);
+                                        smb2->credits -= smb2_get_real_credit_charge_for_one_pdu(smb2, &pdu->header);
+                                        if (pdu->header.command == SMB2_CANCEL) {
+                                                /*
+                                                 * The server never sends a reply to a
+                                                 * CANCEL request, so there is nothing to
+                                                 * correlate on the wait queue. Complete
+                                                 * it locally now that it has been sent.
+                                                 */
+                                                if (pdu->cb) {
+                                                        pdu->cb(smb2, 0, NULL, pdu->cb_data);
+                                                }
+                                                smb2_free_pdu(smb2, pdu);
+                                        } else {
+                                                /* queue requests we send to correlate replies with */
+                                                SMB2_LIST_ADD_END(&smb2->waitqueue, pdu);
+                                        }
                                 }
                                 else {
-                                        smb2->credits += pdu->header.credit_request_response;
+                                        /* alway allow writing replies */
+                                        smb2->credits = 128;
                                         /* no longer need this reply we've sent */
                                         smb2_free_pdu(smb2, pdu);
                                 }
@@ -351,11 +404,24 @@ read_more_data:
         }
         tmpiov = iov;
 
-        /* Skip the vectors we have already read */
-        while (num_done >= tmpiov->iov_len) {
+        /* Skip the vectors we have already read.
+         *
+         * The niov test is not redundant: a zero length vector, or a state
+         * where we have already read everything we asked for, makes this
+         * walk past the last populated entry and start reading iov_len out
+         * of uninitialised stack, for as long as it keeps finding zeros.
+         * Every caller below is supposed to have queued something left to
+         * read, so if there is nothing, that is a bug rather than an
+         * on-the-wire condition.
+         */
+        while (niov > 0 && num_done >= tmpiov->iov_len) {
                 num_done -= tmpiov->iov_len;
                 tmpiov++;
                 niov--;
+        }
+        if (niov <= 0) {
+                smb2_set_error(smb2, "No io vectors left to read into");
+                return -1;
         }
 
         /* Adjust the first vector to read */
@@ -375,7 +441,7 @@ read_more_data:
                 int err = errno;
                 if (err == EINTR || err == EAGAIN || err == EWOULDBLOCK) {
 #endif
-                        return 0;
+                        return -EAGAIN;
                 }
                 smb2_set_error(smb2, "Read from socket failed, "
                                "errno:%d. Closing socket.", err);
@@ -397,22 +463,107 @@ read_more_data:
         switch (smb2->recv_state) {
         case SMB2_RECV_SPL:
                 smb2->spl = be32toh(smb2->spl);
+                /*
+                 * The SPL is fully controlled by the peer and is used all over
+                 * this function to compute buffer sizes and remaining byte
+                 * counts. Reject anything that can not describe at least a
+                 * bare SMB2 header, or that is large enough to be a memory
+                 * exhaustion vector, before we act on it.
+                 */
+                if (smb2->spl < SMB2_HEADER_SIZE ||
+                    smb2->spl > smb2_recv_pdu_cap(smb2)) {
+                        smb2_set_error(smb2, "Invalid session packet length "
+                                       "%u in PDU", smb2->spl);
+                        return -1;
+                }
                 smb2->recv_state = SMB2_RECV_HEADER;
-                smb2_add_iovector(smb2, &smb2->in, &smb2->header[0],
-                                  SMB2_HEADER_SIZE, NULL);
+                if (smb2_add_iovector(smb2, &smb2->in, &smb2->header[0],
+                                  SMB2_HEADER_SIZE, NULL) == NULL) {
+                        smb2_set_error(smb2, "Too many I/O vectors when adding header");
+                        return -1;
+                }
                 goto read_more_data;
         case SMB2_RECV_HEADER:
                 if (!memcmp(smb2->in.iov[smb2->in.niov - 1].buf, smb3tfrm, 4)) {
+                        if (!smb2_is_server(smb2)) {
+                                /* validate the transform header before allocating for its payload */
+                                const uint8_t *th = smb2->in.iov[smb2->in.niov - 1].buf;
+                                uint32_t orig_size;
+                                uint16_t th_flags;
+                                uint64_t th_session;
+
+                                memcpy(&orig_size, &th[36], 4);
+                                orig_size = le32toh(orig_size);
+                                memcpy(&th_flags, &th[42], 2);
+                                th_flags = le16toh(th_flags);
+                                memcpy(&th_session, &th[44], 8);
+                                th_session = le64toh(th_session);
+                                if (!smb2->enc_keys_ready) {
+                                        smb2_set_error(smb2, "Transform header "
+                                                       "received before the "
+                                                       "encryption keys exist");
+                                        return -1;
+                                }
+                                if (th_flags != 0x0001) {
+                                        smb2_set_error(smb2, "Transform header "
+                                                       "flags 0x%04x are not "
+                                                       "'encrypted'", th_flags);
+                                        return -1;
+                                }
+                                if (th_session != smb2->session_id) {
+                                        smb2_set_error(smb2, "Transform header "
+                                                       "for another session");
+                                        return -1;
+                                }
+                                if (smb2->spl < 52 ||
+                                    orig_size != smb2->spl - 52 ||
+                                    orig_size < SMB2_HEADER_SIZE) {
+                                        smb2_set_error(smb2, "Transform header "
+                                                       "OriginalMessageSize %u "
+                                                       "does not match its "
+                                                       "payload", orig_size);
+                                        return -1;
+                                }
+                        }
+                        /*
+                         * We have already read SMB2_HEADER_SIZE bytes, of
+                         * which the first 52 are the transform header and the
+                         * remaining 12 are the start of the encrypted payload
+                         * that we copy into the payload buffer below. The
+                         * buffer must therefore be able to hold those 12
+                         * bytes.
+                         */
+                        if (smb2->spl < 52 + 12) {
+                                smb2_set_error(smb2, "Transform header PDU is "
+                                               "too short: %u", smb2->spl);
+                                return -1;
+                        }
                         smb2->in.iov[smb2->in.niov - 1].len = 52;
                         len = smb2->spl - 52;
                         smb2->in.total_size -= 12;
-                        smb2_add_iovector(smb2, &smb2->in,
-                                          malloc(len),
-                                          len, free);
+                        {
+                                uint8_t *tmp = malloc(len);
+                                if (tmp == NULL) {
+                                        smb2_set_error(smb2, "malloc failed while adding TRFM payload");
+                                        return -1;
+                                }
+                                if (smb2_add_iovector(smb2, &smb2->in,tmp,len, free) == NULL) {
+                                        free(tmp);
+                                        smb2_set_error(smb2, "Failed to add iovector for TRFM payload");
+                                        return -1;
+                                }
+                        }
                         memcpy(smb2->in.iov[smb2->in.niov - 1].buf,
                                &smb2->in.iov[smb2->in.niov - 2].buf[52], 12);
                         smb2->recv_state = SMB2_RECV_TRFM;
                         goto read_more_data;
+                }
+                /* once sealing keys exist, refuse any PDU that did not arrive inside a transform */
+                if (!smb2_is_server(smb2) && smb2->seal &&
+                    smb2->enc_keys_ready && smb2->enc == NULL) {
+                        smb2_set_error(smb2, "Unencrypted PDU received on an "
+                                       "encrypted session");
+                        return -1;
                 }
                 if (smb2_decode_header(smb2, &smb2->in.iov[smb2->in.niov - 1],
                                        &smb2->hdr) != 0) {
@@ -458,6 +609,8 @@ read_more_data:
 
                 if (!smb2_is_server(smb2)) {
                         smb2->credits += smb2->hdr.credit_request_response;
+                        /* Got credit, recheck if there are pending pdu to be sent. */
+                        smb2_change_events(smb2, smb2->fd, smb2_which_events(smb2));
                 }
 
                 if (!smb2_is_server(smb2) && !(smb2->hdr.flags & SMB2_FLAGS_SERVER_TO_REDIR)) {
@@ -483,11 +636,67 @@ read_more_data:
                         if (!has_xfrmhdr) {
                                 len += SMB2_SPL_SIZE;
                         }
+                        /*
+                         * A header-only interim response (an SPL of exactly
+                         * SMB2_HEADER_SIZE, which passes the SPL check
+                         * above) leaves no padding at all. Queueing a zero
+                         * length vector for it would leave num_done equal to
+                         * total_size and send the skip loop off the end of
+                         * the work array, so just finish the PDU here.
+                         */
+                        if (len < 0) {
+                                smb2_set_error(smb2, "Negative number of PAD "
+                                               "bytes in PENDING reply");
+                                return -1;
+                        }
+                        if (len == 0) {
+                                /* Nothing to skip, so this interim reply is
+                                 * already complete. Finish it here rather
+                                 * than falling through the shared tail
+                                 * below, which assumes at least two input
+                                 * vectors and would reject a decrypted
+                                 * header-only PDU, where the only vector is
+                                 * the header itself.
+                                 */
+                                if (!smb2_is_server(smb2)) {
+                                        pdu = smb2_find_pdu(smb2,
+                                                        smb2->hdr.message_id);
+                                        if (pdu != NULL &&
+                                            (smb2->hdr.flags & SMB2_FLAGS_ASYNC_COMMAND)) {
+                                                /*
+                                                 * Remember the AsyncId from this
+                                                 * interim response so the request
+                                                 * can still be cancelled correctly
+                                                 * (MS-SMB2 2.2.30). The final reply
+                                                 * is still correlated by MessageId,
+                                                 * so the pdu stays on the wait
+                                                 * queue as-is.
+                                                 */
+                                                pdu->header.flags |= SMB2_FLAGS_ASYNC_COMMAND;
+                                                pdu->header.async.async_id = smb2->hdr.async.async_id;
+                                        }
+                                        if (smb2->passthrough && pdu) {
+                                                pdu->cb(smb2, smb2->hdr.status,
+                                                        pdu->payload,
+                                                        pdu->cb_data);
+                                        }
+                                }
+                                smb2->in.num_done = 0;
+                                return 0;
+                        }
                         /* Add padding before the next PDU */
                         smb2->recv_state = SMB2_RECV_PAD;
-                        smb2_add_iovector(smb2, &smb2->in,
-                                          malloc(len),
-                                          len, free);
+                        {
+                                uint8_t *tmp = malloc(len);
+                                if (tmp == NULL) {
+                                        smb2_set_error(smb2, "malloc failed while adding PENDING padding");
+                                        return -1;
+                                }
+                                if (smb2_add_iovector(smb2, &smb2->in,tmp, len, free) == NULL) {
+                                        free(tmp);
+                                        return -1;
+                                }
+                        }
                         goto read_more_data;
                 }
 
@@ -495,7 +704,7 @@ read_more_data:
                         pdu = smb2->pdu;
                         if (!pdu) {
                                 smb2_set_error(smb2, "no pdu for request");
-                                return -ENOMEM;
+                                return -1;
                         }
                         /* set the pdu header's message id to the request's id and
                         *  the tree id to the request's tree id
@@ -505,27 +714,73 @@ read_more_data:
                                 pdu->header.sync.tree_id = smb2->hdr.sync.tree_id;
                         }
                         /* if the session is properly opened then we could get
-                         * any request from the client, so use the headers command
-                         * not the pdus command for the rest of input
+                         * any request from the client, so use the header's command
+                         * not the pdu's command for the rest of input
                          */
-                        if (pdu->header.command > SMB2_SESSION_SETUP) {
+                        if (smb2->hdr.command > SMB2_SESSION_SETUP) {
                                 pdu->header.command = smb2->hdr.command;
                         }
-                }
-                else {
-                        if (smb2->hdr.command != SMB2_OPLOCK_BREAK) {
+                        pdu->header.credit_charge = smb2->hdr.credit_charge;
+                        pdu->header.credit_request_response = smb2->hdr.credit_request_response;
+                } else {
+                        if ((smb2->hdr.command != SMB2_OPLOCK_BREAK) ||
+                                        (smb2->hdr.message_id != 0xffffffffffffffffULL)) {
                                 if (smb2->pdu) {
                                         smb2_free_pdu(smb2, smb2->pdu);
                                         smb2->pdu = NULL;
                                 }
                                 pdu = smb2->pdu = smb2_find_pdu(smb2, smb2->hdr.message_id);
                                 if (pdu == NULL) {
-                                        smb2_set_error(smb2, "no matching PDU found");
+                                        len = smb2->spl - smb2->in.num_done;
+                                        if (!has_xfrmhdr) {
+                                                len += SMB2_SPL_SIZE;
+                                        }
+                                        if (len < 0 || (uint32_t)len > smb2_recv_pdu_cap(smb2)) {
+                                                smb2_set_error(smb2, "no matching PDU found");
+                                                return -1;
+                                        }
+                                        /* As in the PENDING case above, a
+                                         * header-only reply leaves nothing
+                                         * to skip, so do not queue an empty
+                                         * vector for it.
+                                         */
+                                        if (len == 0) {
+                                                smb2->in.num_done = 0;
+                                                return 0;
+                                        }
+                                        smb2->recv_state = SMB2_RECV_UNKNOWN;
+                                        {
+                                                uint8_t *tmp = malloc(len);
+                                                if (tmp == NULL) {
+                                                        smb2_set_error(smb2, "malloc failed while adding UNKNOWN padding");
+                                                        return -1;
+                                                }
+                                                if (smb2_add_iovector(smb2, &smb2->in, tmp, len, free) == NULL) {
+                                                        free(tmp);
+                                                        return -1;
+                                                }
+                                        }
+                                        goto read_more_data;
+                                }
+                                /*
+                                 * Related compound requests must receive replies
+                                 * in order.
+                                 *
+                                 * Unrelated compound requests are independent and
+                                 * may receive replies in any order.
+                                 */
+                                if (!pdu->unrelated_compound &&
+                                    pdu->prev_compound_mid &&
+                                    smb2_find_pdu(smb2, pdu->prev_compound_mid)) {
+                                        smb2_set_error(smb2, "compound reply received out of order");
                                         return -1;
                                 }
+
                                 SMB2_LIST_REMOVE(&smb2->waitqueue, pdu);
                         } else {
-                                /* oplock and lease break notifications won't have a pdu */
+                                /* oplock and lease break notifications won't have a pdu so make one
+                                 * oplock replies (that are NOT notifications, i.e. have a valid message_id)
+                                 * are normal replies handled above */
                                 pdu = smb2->pdu;
                                 if (!pdu) {
                                         pdu = smb2->pdu = smb2_allocate_pdu(smb2, SMB2_OPLOCK_BREAK,
@@ -545,9 +800,20 @@ read_more_data:
                 }
 
                 smb2->recv_state = SMB2_RECV_FIXED;
-                smb2_add_iovector(smb2, &smb2->in,
-                                  malloc(len & 0xfffe),
-                                  len & 0xfffe, free);
+                {
+                        size_t alen = len & 0xfffe;
+                        uint8_t *tmp = malloc(alen);
+                        if (tmp == NULL) {
+                                smb2_set_error(smb2, "malloc failed while adding FIXED payload");
+                                return -1;
+                        }
+                        if (smb2_add_iovector(smb2, &smb2->in,
+                                  tmp,
+                                  alen, free) == NULL) {
+                                free(tmp);
+                                return -1;
+                        }
+                }
                 goto read_more_data;
         case SMB2_RECV_FIXED:
                 len = smb2_process_payload_fixed(smb2, pdu);
@@ -566,9 +832,11 @@ read_more_data:
                                 if (num > (size_t)len) {
                                         num = (size_t)len;
                                 }
-                                smb2_add_iovector(smb2, &smb2->in,
+                                if (smb2_add_iovector(smb2, &smb2->in,
                                                   pdu->in.iov[i].buf,
-                                                  num, NULL);
+                                                  num, NULL) == NULL) {
+                                        return -1;
+                                }
                                 len -= num;
 
                                 if (len == 0) {
@@ -578,9 +846,19 @@ read_more_data:
                         }
                         if (len > 0) {
                                 smb2->recv_state = SMB2_RECV_VARIABLE;
-                                smb2_add_iovector(smb2, &smb2->in,
-                                                  malloc(len),
-                                                  len, free);
+                                {
+                                        uint8_t *tmp = malloc(len);
+                                        if (tmp == NULL) {
+                                                smb2_set_error(smb2, "malloc failed while adding VARIABLE tail");
+                                                return -1;
+                                        }
+                                        if (smb2_add_iovector(smb2, &smb2->in,
+                                                  tmp,
+                                                  len, free) == NULL) {
+                                                free(tmp);
+                                                return -1;
+                                        }
+                                }
                                 goto read_more_data;
                         }
                 }
@@ -608,9 +886,19 @@ read_more_data:
                 if (len > 0) {
                         /* Add padding before the next PDU */
                         smb2->recv_state = SMB2_RECV_PAD;
-                        smb2_add_iovector(smb2, &smb2->in,
-                                          malloc(len),
-                                          len, free);
+                        {
+                                uint8_t *tmp = malloc(len);
+                                if (tmp == NULL) {
+                                        smb2_set_error(smb2, "malloc failed while adding PAD");
+                                        return -1;
+                                }
+                                if (smb2_add_iovector(smb2, &smb2->in,
+                                          tmp,
+                                          len, free) == NULL) {
+                                        free(tmp);
+                                        return -1;
+                                }
+                        }
                         goto read_more_data;
                 }
 
@@ -648,9 +936,18 @@ read_more_data:
                 if (len > 0) {
                         /* Add padding before the next PDU */
                         smb2->recv_state = SMB2_RECV_PAD;
-                        smb2_add_iovector(smb2, &smb2->in,
-                                          malloc(len),
-                                          len, free);
+                        uint8_t * tmp = malloc(len);
+                        if (tmp == NULL) {
+                            smb2_set_error(smb2, "malloc failed while adding PAD");
+                            return -1;
+                        }
+                        if (smb2_add_iovector(smb2, &smb2->in,
+                                              tmp,
+                                              len, free) == NULL) {
+                                free(tmp);
+                                smb2_set_error(smb2, "Failed to add iovector for PAD");
+                                return -1;
+                        }
                         goto read_more_data;
                 }
 
@@ -675,6 +972,14 @@ read_more_data:
                  * and restart with a new SPL for the next chain.
                  */
                 return 0;
+        case SMB2_RECV_UNKNOWN:
+                /* We have finished reading the payload the the unknown reply we
+                 * just received. As it is not matching anything we are waiting on
+                 * there is no PDU associated with this and thus nothing else we need
+                 * to do.
+                 */
+                smb2->in.num_done = 0;
+                return 0;
         }
 
         if (smb2->in.niov < 2) {
@@ -686,17 +991,31 @@ read_more_data:
                 /* This was a pending command. Just ignore it and proceed
                  * to read the next chain.
                  */
-                if (smb2->passthrough) {
+                if (!smb2_is_server(smb2)) {
                         pdu = smb2_find_pdu(smb2, smb2->hdr.message_id);
-                        if (pdu == NULL) {
-                                smb2_set_error(smb2, "no matching PDU found");
-                                return -1;
+                        if (pdu != NULL &&
+                            (smb2->hdr.flags & SMB2_FLAGS_ASYNC_COMMAND)) {
+                                /*
+                                 * Remember the AsyncId from this interim
+                                 * response so the request can still be
+                                 * cancelled correctly (MS-SMB2 2.2.30). The
+                                 * final reply is still correlated by
+                                 * MessageId, so the pdu stays on the wait
+                                 * queue as-is.
+                                 */
+                                pdu->header.flags |= SMB2_FLAGS_ASYNC_COMMAND;
+                                pdu->header.async.async_id = smb2->hdr.async.async_id;
                         }
-                        else
-                        {
-                                /* need to pass all pdus through note we do not free
-                                * the pdu or delist the request */
-                                pdu->cb(smb2, smb2->hdr.status, pdu->payload, pdu->cb_data);
+                        if (smb2->passthrough) {
+                                if (pdu == NULL) {
+                                        smb2_set_error(smb2, "no matching PDU found");
+                                }
+                                else
+                                {
+                                        /* need to pass all pdus through note we do not free
+                                        * the pdu or delist the request */
+                                        pdu->cb(smb2, smb2->hdr.status, pdu->payload, pdu->cb_data);
+                                }
                         }
                 }
                 smb2->in.num_done = 0;
@@ -705,12 +1024,30 @@ read_more_data:
 
         /* We don't yet have the signing key until later, once session
          * setup has completed, so we can not yet verify the signature
-         * of the final leg of session setup.
+         * of the final leg of session setup. NEGOTIATE is exempt for the
+         * same reason, and a PDU that arrived inside a transform header has
+         * already been authenticated by the AEAD tag.
+         *
+         * Everything else has to be signed once signing is in effect. Note
+         * that we must not make the check itself conditional on
+         * SMB2_FLAGS_SIGNED: that flag lives in the very header we are
+         * trying to authenticate, so treating a cleared flag as "nothing to
+         * verify" lets anyone on the path strip it from a forged PDU and
+         * bypass signing entirely. MS-SMB2 3.2.5.1.3 requires us to drop
+         * such a message instead.
          */
         if (smb2->sign &&
-            (smb2->hdr.flags & SMB2_FLAGS_SIGNED) &&
-            (smb2->hdr.command != SMB2_SESSION_SETUP) ) {
+            (smb2->hdr.command != SMB2_NEGOTIATE) &&
+            (smb2->hdr.command != SMB2_SESSION_SETUP) &&
+            !smb2->enc) {
                 uint8_t signature[16] _U_;
+
+                if (!(smb2->hdr.flags & SMB2_FLAGS_SIGNED)) {
+                        smb2_set_error(smb2, "PDU for command %d is not "
+                                       "signed but signing is required",
+                                       smb2->hdr.command);
+                        return -1;
+                }
                 memcpy(&signature[0], &smb2->in.iov[1 + iov_offset].buf[48], 16);
                 if (smb2_calc_signature(smb2, &smb2->in.iov[1 + iov_offset].buf[48],
                                         &smb2->in.iov[1 + iov_offset],
@@ -733,10 +1070,11 @@ read_more_data:
                 pdu->cb(smb2, smb2->hdr.status, pdu->payload, pdu->cb_data);
                 smb2->pdu = smb2->next_pdu;
                 smb2->next_pdu = NULL;
-        }
-        else {
+        } else {
                 pdu->cb(smb2, smb2->hdr.status, pdu->payload, pdu->cb_data);
-                smb2_free_pdu(smb2, pdu);
+                if (!pdu->caller_frees_pdu) {
+                        smb2_free_pdu(smb2, pdu);
+                }
                 smb2->pdu = NULL;
         }
 
@@ -744,8 +1082,11 @@ read_more_data:
                 /* Record at which iov we ended in this loop so we know where to start in the next */
                 iov_offset = smb2->in.niov - 1;
                 smb2->recv_state = SMB2_RECV_HEADER;
-                smb2_add_iovector(smb2, &smb2->in, &smb2->header[0],
-                                  SMB2_HEADER_SIZE, NULL);
+                if (smb2_add_iovector(smb2, &smb2->in, &smb2->header[0],
+                                  SMB2_HEADER_SIZE, NULL) == NULL) {
+                        smb2_set_error(smb2, "Too many I/O vectors when adding chained header");
+                        return -1;
+                }
                 goto read_more_data;
         }
 
@@ -760,28 +1101,48 @@ read_more_data:
 static ssize_t smb2_readv_from_socket(struct smb2_context *smb2,
                                       const struct iovec *iov, int iovcnt)
 {
-        ssize_t rc = readv(smb2->fd, (struct iovec*) iov, iovcnt);
+        ssize_t rc;
+
+#ifdef HAVE_LIBRDMACM
+        if (smb2->rdma) {
+                return smb2_rdma_readv(smb2, iov, iovcnt);
+        }
+#endif
+        rc = readv(smb2->fd, (struct iovec*) iov, iovcnt);
         return rc;
 }
 
 static int
 smb2_read_from_socket(struct smb2_context *smb2)
 {
-        /* initialize the input vectors to the spl and the header
-         * which are both static data in the smb2 context.
-         * additional vectors will be added when we can map this to
-         * the corresponding pdu.
-         */
-        if (smb2->in.num_done == 0) {
-                smb2->recv_state = SMB2_RECV_SPL;
-                smb2->spl = 0;
+        int count;
 
-                smb2_free_iovector(smb2, &smb2->in);
-                smb2_add_iovector(smb2, &smb2->in, (uint8_t *)&smb2->spl,
-                                  SMB2_SPL_SIZE, NULL);
+        while(1) {
+                /* initialize the input vectors to the spl and the header
+                 * which are both static data in the smb2 context.
+                 * additional vectors will be added when we can map this to
+                 * the corresponding pdu.
+                 */
+                if (smb2->in.num_done == 0) {
+                        smb2->recv_state = SMB2_RECV_SPL;
+                        smb2->spl = 0;
+
+                        smb2_free_iovector(smb2, &smb2->in);
+                        if (smb2_add_iovector(smb2, &smb2->in, (uint8_t *)&smb2->spl,
+                                          SMB2_SPL_SIZE, NULL) == NULL) {
+                                smb2_set_error(smb2, "Too many I/O vectors when adding SPL");
+                                return -1;
+                        }
+                }
+
+                count = smb2_read_data(smb2, smb2_readv_from_socket, 0);
+                if (count == -EAGAIN) {
+                        return 0;
+                }
+                if (count) {
+                        return count;
+                }
         }
-
-        return smb2_read_data(smb2, smb2_readv_from_socket, 0);
 }
 
 static ssize_t smb2_readv_from_buf(struct smb2_context *smb2,
@@ -819,7 +1180,8 @@ smb2_close_connecting_fd(struct smb2_context *smb2, t_socket fd)
                 if (fd == smb2->connecting_fds[i]) {
                         memmove(&smb2->connecting_fds[i],
                                 &smb2->connecting_fds[i + 1],
-                                smb2->connecting_fds_count - i - 1);
+                                (smb2->connecting_fds_count - i - 1)
+                                * sizeof(smb2->connecting_fds[0]));
                         smb2->connecting_fds_count--;
                         return;
                 }
@@ -857,6 +1219,80 @@ smb2_service_fd(struct smb2_context *smb2, t_socket fd, int revents)
                         return 0;
                 }
         }
+
+#ifdef HAVE_LIBQUIC
+        if (smb2->quic_hs != NULL) {
+                if (revents & (POLLERR | POLLHUP)) {
+                        /* the peer did not answer within the idle
+                         * timeout or closed the connection */
+                        smb2_set_error(smb2, "QUIC handshake failed, "
+                                       "no QUIC server listening?");
+                        smb2_quic_reset(smb2);
+                        ret = -1;
+                } else {
+                        ret = smb2_quic_handshake_service(smb2);
+                }
+                if (ret < 0) {
+                        if (smb2->connect_cb) {
+                                smb2->connect_cb(smb2, EIO, NULL,
+                                                 smb2->connect_data);
+                                smb2->connect_cb = NULL;
+                        }
+                        goto out;
+                }
+                smb2_change_events(smb2, smb2->fd, smb2_which_events(smb2));
+                if (ret == 1) {
+                        ret = 0;
+                        if (smb2->connect_cb) {
+                                smb2->connect_cb(smb2, 0, NULL,
+                                                 smb2->connect_data);
+                                smb2->connect_cb = NULL;
+                        }
+                }
+                goto out;
+        }
+#endif
+
+#ifdef HAVE_LIBRDMACM
+        if (smb2->rdma) {
+                int was_connected = smb2_rdma_connected(smb2);
+
+                ret = smb2_rdma_service(smb2);
+                if (ret < 0) {
+                        if (smb2->connect_cb) {
+                                smb2->connect_cb(smb2, EIO, NULL,
+                                                 smb2->connect_data);
+                                smb2->connect_cb = NULL;
+                        }
+                        goto out;
+                }
+                if (ret == 1) {
+                        ret = 0;
+                        if (smb2->connect_cb) {
+                                smb2->connect_cb(smb2, 0, NULL,
+                                                 smb2->connect_data);
+                                smb2->connect_cb = NULL;
+                        }
+                }
+                if (!was_connected || !smb2_rdma_connected(smb2)) {
+                        goto out;
+                }
+                if (smb2_read_from_socket(smb2) != 0) {
+                        ret = -1;
+                        goto out;
+                }
+                if (smb2->outqueue != NULL &&
+                    smb2_write_to_socket(smb2) != 0) {
+                        ret = -1;
+                        goto out;
+                }
+                /* grant the credits for what we just consumed */
+                if (smb2_rdma_flush_output(smb2) < 0) {
+                        ret = -1;
+                }
+                goto out;
+        }
+#endif
 
         if (revents & POLLERR) {
                 int err = 0;
@@ -954,7 +1390,7 @@ smb2_service_fd(struct smb2_context *smb2, t_socket fd, int revents)
                 }
         }
 
- out:
+  out:
         if (smb2->timeout) {
                 smb2_timeout_pdus(smb2);
         }
@@ -980,6 +1416,20 @@ set_nonblocking(t_socket fd)
 #elif (defined(__AMIGA__) || defined(__AROS__)) && !defined(__amigaos4__) && !defined(__amigaos3__)
         unsigned long opt = 0;
         IoctlSocket(fd, FIONBIO, (char *)&opt);
+#elif defined(__wii__) || defined(__gamecube__)
+        /* net_fcntl(F_SETFL, O_NONBLOCK) is a dead end on this platform:
+         * IOS's SO_FCNTL only recognises its own internal IOS_O_NONBLOCK
+         * bit (0x04) - the flags word goes straight through to IOS with
+         * no translation of this toolchain's real O_NONBLOCK (0x4000),
+         * so the call "succeeds" (ret=0) without the socket ever actually
+         * becoming non-blocking. net_ioctl(FIONBIO) does the correct
+         * translation internally, so use that instead of building the
+         * F_SETFL flags word ourselves. FIONBIO has to be libogc's own
+         * definition from <network.h> (see the <sys/ioctl.h> note above),
+         * otherwise net_ioctl() fails with EINVAL and the socket silently
+         * stays blocking. */
+        int one = 1;
+        net_ioctl(fd, FIONBIO, &one);
 #else
         unsigned v;
         v = fcntl(fd, F_GETFL, 0);
@@ -1048,6 +1498,17 @@ connect_async_ai(struct smb2_context *smb2, const struct addrinfo *ai, int *fd_o
         }
         family = ai->ai_family;
 
+#ifdef HAVE_LIBQUIC
+        if (smb2->quic) {
+                fd = socket(family, SOCK_STREAM, IPPROTO_QUIC);
+                if (!SMB2_VALID_SOCKET(fd)) {
+                        smb2_set_error(smb2, "Failed to open QUIC socket, "
+                                       "is the quic kernel module loaded? "
+                                       "Errno:%s(%d).", strerror(errno), errno);
+                        return -EIO;
+                }
+        } else
+#endif
         fd = socket(family, SOCK_STREAM, 0);
         if (!SMB2_VALID_SOCKET(fd)) {
                 smb2_set_error(smb2, "Failed to open smb2 socket. "
@@ -1071,6 +1532,9 @@ connect_async_ai(struct smb2_context *smb2, const struct addrinfo *ai, int *fd_o
 #endif
 
         set_nonblocking(fd);
+#ifdef HAVE_LIBQUIC
+        if (!smb2->quic)
+#endif
         set_tcp_sockopt(fd, TCP_NODELAY, 1);
 #if 0 == CONFIGURE_OPTION_TCP_LINGER
         setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, (const void*)&yes, sizeof yes);
@@ -1078,10 +1542,10 @@ connect_async_ai(struct smb2_context *smb2, const struct addrinfo *ai, int *fd_o
 #endif
 
         if (connect(fd, (struct sockaddr *)&ss, socksize) != 0
-#ifndef _MSC_VER
-                  && errno != EINPROGRESS) {
-#else
+#if defined(_WIN32) || defined(_MSC_VER)
                   && WSAGetLastError() != WSAEWOULDBLOCK) {
+#else
+                  && errno != EINPROGRESS) {
 #endif
                 smb2_set_error(smb2, "Connect failed with errno : "
                         "%s(%d)", strerror(errno), errno);
@@ -1100,6 +1564,20 @@ smb2_connect_async_next_addr(struct smb2_context *smb2, const struct addrinfo *b
         const struct addrinfo *ai;
         for (ai = base; ai != NULL; ai = ai->ai_next) {
                 int fd;
+#ifdef HAVE_LIBRDMACM
+                if (smb2->rdma) {
+                        /* rdma_cm resolves and connects on its own
+                         * channel, connect_cb is called once the SMBD
+                         * negotiate has completed. */
+                        err = smb2_rdma_connect(smb2, ai);
+                        if (err == 0) {
+                                smb2_set_error(smb2, "");
+                                smb2_close_connecting_fds(smb2);
+                                return 0;
+                        }
+                        continue;
+                }
+#endif
                 err = connect_async_ai(smb2, ai, &fd);
 
                 if (err == 0) {
@@ -1111,6 +1589,30 @@ smb2_connect_async_next_addr(struct smb2_context *smb2, const struct addrinfo *b
                                 smb2->change_fd(smb2, fd, SMB2_ADD_FD);
                                 smb2_change_events(smb2, fd, POLLOUT);
                         }
+#ifdef HAVE_LIBQUIC
+                        if (smb2->quic) {
+                                /* connect() on a QUIC socket only sets the
+                                 * peer address, the socket does not become
+                                 * writable until the handshake is done. So
+                                 * use this address and start the handshake
+                                 * now, connect_cb is called when it has
+                                 * completed. */
+                                smb2->fd = fd;
+                                smb2_close_connecting_fds(smb2);
+                                if (smb2_quic_handshake_start(smb2) < 0) {
+                                        if (smb2->change_fd) {
+                                                smb2->change_fd(smb2, fd,
+                                                                SMB2_DEL_FD);
+                                        }
+                                        close(fd);
+                                        smb2->fd = SMB2_INVALID_SOCKET;
+                                        return -EIO;
+                                }
+                                smb2_change_events(smb2, fd,
+                                                   smb2_which_events(smb2));
+                                return 0;
+                        }
+#endif
 
                         smb2->next_addrinfo = ai->ai_next;
                         break;
@@ -1170,6 +1672,17 @@ smb2_connect_async(struct smb2_context *smb2, const char *server,
                                "connected.");
                 return -EINVAL;
         }
+#ifdef HAVE_LIBRDMACM
+        /* SMB2 over RDMA needs dialect 3.0 or later */
+        if (smb2->rdma &&
+            (smb2->version == SMB2_VERSION_ANY2 ||
+             smb2->version == SMB2_VERSION_0202 ||
+             smb2->version == SMB2_VERSION_0210)) {
+                smb2_set_error(smb2, "rdma: SMB Direct needs SMB 3.0 or "
+                               "later, it can not be used with vers=2.x");
+                return -EINVAL;
+        }
+#endif
 
         addr = strdup(server);
         if (addr == NULL) {
@@ -1201,6 +1714,11 @@ smb2_connect_async(struct smb2_context *smb2, const char *server,
                 *port++ = 0;
         } else {
                 port = (char*)"445";
+#ifdef HAVE_LIBQUIC
+                if (smb2->quic) {
+                        port = (char*)"443";
+                }
+#endif
         }
 
         /* is it a hostname ? */
@@ -1281,6 +1799,9 @@ smb2_bind_and_listen(const uint16_t port, const int max_connections, int *out_fd
         t_socket fd;
         socklen_t socksize;
         struct sockaddr_in serv_addr;
+#if defined(SO_REUSEADDR) && !defined(_WIN32) && !defined(_MSC_VER)
+        int const yes = 1;
+#endif
 
              *out_fd = -1;
 
@@ -1292,16 +1813,30 @@ smb2_bind_and_listen(const uint16_t port, const int max_connections, int *out_fd
         set_nonblocking(fd);
         set_tcp_sockopt(fd, TCP_NODELAY, 1);
 
+#if defined(SO_REUSEADDR) && !defined(_WIN32) && !defined(_MSC_VER)
+        /*
+         * Allow binding while an old socket for this port is still sitting
+         * in TIME_WAIT, otherwise stopping and restarting the server fails
+         * with EADDRINUSE.
+         *
+         * Not done on windows, where SO_REUSEADDR lets an unrelated
+         * process take over a port we are already listening on.
+         */
+        setsockopt(fd, SOL_SOCKET, SO_REUSEADDR,
+                   (const void *)&yes, sizeof(yes));
+#endif
+
+        memset(&serv_addr, 0, sizeof(serv_addr));
         serv_addr.sin_port = htons(port);
         serv_addr.sin_family = AF_INET;
         serv_addr.sin_addr.s_addr = INADDR_ANY;
         socksize = sizeof(serv_addr);
 
         if (bind(fd, (struct sockaddr *)&serv_addr, socksize) != 0
-#ifndef _MSC_VER
-                  && errno != EINPROGRESS) {
-#else
+#if defined(_WIN32) || defined(_MSC_VER)
                   && WSAGetLastError() != WSAEWOULDBLOCK) {
+#else
+                  && errno != EINPROGRESS) {
 #endif
                 close(fd);
                 return -EIO;

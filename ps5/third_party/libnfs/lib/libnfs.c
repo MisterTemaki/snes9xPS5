@@ -34,6 +34,10 @@
 #include <unistd.h>
 #endif
 
+#ifdef HAVE_PWD_H
+#include <pwd.h>
+#endif
+
 #ifdef HAVE_SYS_VFS_H
 #include <sys/vfs.h>
 #endif
@@ -71,6 +75,8 @@
 #endif
 
 #include <errno.h>
+#include <fcntl.h>
+#include <inttypes.h>
 #include <stdarg.h>
 #include <stdlib.h>
 #include <string.h>
@@ -198,15 +204,35 @@ nfs_set_xprtsecurity(struct nfs_context *nfs, enum rpc_xprtsec xprtsec)
 #endif /* HAVE_TLS */
 
 int
+nfs_get_tid(struct nfs_context *nfs)
+{
+	assert(nfs->rpc->magic == RPC_CONTEXT_MAGIC);
+	return nfs->rpc->tid;
+}
+
+int
 nfs_get_fd(struct nfs_context *nfs)
 {
 	return rpc_get_fd(nfs->rpc);
 }
 
 int
+nfs_get_evfd(struct nfs_context *nfs)
+{
+	return rpc_get_evfd(nfs->rpc);
+}
+
+
+int
 nfs_queue_length(struct nfs_context *nfs)
 {
 	return rpc_queue_length(nfs->rpc);
+}
+
+void
+nfs_set_resolve_on_reconnect(struct nfs_context *nfs, int enabled)
+{
+	rpc_set_resolve_on_reconnect(nfs->rpc, enabled);
 }
 
 int
@@ -248,6 +274,19 @@ nfs_set_interface(struct nfs_context *nfs, const char *ifname)
 #endif
 
 static int
+nfs_set_context_args_no_val(struct nfs_context *nfs, const char *arg)
+{
+	if (!strcmp(arg, "readonly")) {
+		nfs_set_readonly(nfs, 1);
+	} else {
+                nfs_set_error(nfs, "Unknown url argument : %s",
+                              arg);
+                return -1;
+        }
+	return 0;
+}
+
+static int
 nfs_set_context_args(struct nfs_context *nfs, const char *arg, const char *val)
 {
 	if (!strcmp(arg, "tcp-syncnt")) {
@@ -284,9 +323,37 @@ nfs_set_context_args(struct nfs_context *nfs, const char *arg, const char *val)
 		nfs_set_interface(nfs, val);
 #endif
 	} else if (!strcmp(arg, "version")) {
-		if (nfs_set_version(nfs, atoi(val)) < 0) {
-			nfs_set_error(nfs, "NFS version %d is not supported",
-				      atoi(val));
+		/*
+		 * Minor versions are spelled "4.2", which atoi() would read as
+		 * a plain 4, so they have to be matched in full. Anything else
+		 * carrying a minor version is rejected rather than silently
+		 * truncated down to the major version.
+		 */
+		int v;
+
+		if (!strcmp(val, "4.2")) {
+#ifdef LIBNFS_FEATURE_NFS4_2
+			v = NFS_V4_2;
+#else
+			nfs_set_error(nfs, "NFS version %s is not supported",
+				      val);
+			return -1;
+#endif
+		} else if (!strcmp(val, "4.0")) {
+			v = NFS_V4;
+		} else if (strchr(val, '.')) {
+			nfs_set_error(nfs, "NFS version %s is not supported",
+				      val);
+			return -1;
+		} else {
+			v = atoi(val);
+		}
+		/*
+		 * nfs_set_version() has already set a specific error, such as
+		 * the version being understood but not built in, so leave it
+		 * alone rather than flattening it to "not supported".
+		 */
+		if (nfs_set_version(nfs, v) < 0) {
 			return -1;
 		}
 	} else if (!strcmp(arg, "nfsport")) {
@@ -298,9 +365,8 @@ nfs_set_context_args(struct nfs_context *nfs, const char *arg, const char *val)
 	} else if (!strcmp(arg, "wsize")) {
 		nfs_set_writemax(nfs, atoi(val));
 	} else if (!strcmp(arg, "readdir-buffer")) {
-		char *strp = strchr(val, ',');
+		const char *strp = strchr(val, ',');
 		if (strp) {
-			*strp = 0;
 			strp++;
 			nfs_set_readdir_max_buffer_size(nfs, atoi(val), atoi(strp));
 		} else {
@@ -361,8 +427,9 @@ static struct nfs_url *
 nfs_parse_url(struct nfs_context *nfs, const char *url, int dir, int incomplete)
 {
 	struct nfs_url *urls;
-	char *strp, *flagsp, *strp2, ch;
+	char *strp, *flagsp, *strp2, ch, *original_server, *port_str, *slash_pos, *end_ptr;
         int tmp;
+        size_t port_len;
 
 	if (strncmp(url, "nfs://", 6)) {
 		nfs_set_error(nfs, "Invalid URL specified");
@@ -402,7 +469,7 @@ nfs_parse_url(struct nfs_context *nfs, const char *url, int dir, int incomplete)
                 }
                 ch |= tmp & 0x0f;
                 *strp = ch;
-                strcpy(strp + 1, strp + 3);
+                memmove(strp + 1, strp + 3, strlen(strp + 3) + 1);
                 strp++;
         }
 
@@ -416,6 +483,44 @@ nfs_parse_url(struct nfs_context *nfs, const char *url, int dir, int incomplete)
 		nfs_set_error(nfs, "Invalid server string");
 		return NULL;
 	}
+
+	strp = strchr(urls->server, ':');
+        if (strp) {
+                strp++;
+                slash_pos = strchr(strp, '/');
+                port_len = slash_pos ? (size_t)(slash_pos - strp) : strlen(strp);
+                port_str = (char*)malloc(port_len + 1);
+                if (!port_str)
+                {
+                        nfs_destroy_url(urls);
+                        nfs_set_error(nfs, "Out of memory");
+                        return NULL;
+                }
+                strncpy(port_str, strp, port_len);
+                port_str[port_len] = '\0';
+                int port_num = strtol(port_str, &end_ptr, 10);
+                if (end_ptr == port_str || port_num < 0 || port_num > 65535)
+                {
+                        free(port_str);
+                        nfs_destroy_url(urls);
+                        nfs_set_error(nfs, "Invalid port number");
+                        return NULL;
+                }
+		nfs->nfsi->nfsport =  port_num;
+                if (slash_pos == NULL)
+                {
+                        *strp = '\0';
+                }
+                else
+                {
+                        memmove(strp - 1, slash_pos, strlen(slash_pos) + 1);
+                }
+
+                free(port_str);
+        }
+
+	if (strp == NULL)
+		strp = urls->server;
 
 	strp = strchr(urls->server, '/');
 	if (strp == NULL) {
@@ -435,12 +540,6 @@ nfs_parse_url(struct nfs_context *nfs, const char *url, int dir, int incomplete)
 		return NULL;
 	}
 	*strp = 0;
-
-	strp = strchr(urls->server, ':');
-        if (strp) {
-                *strp++ = 0;
-		nfs->nfsi->nfsport =  atoi(strp);
-        }
 
 	if (dir) {
 		flagsp = strchr(urls->path, '?');
@@ -496,7 +595,12 @@ flags:
                                 nfs_destroy_url(urls);
 				return NULL;
                         }
-		}
+		} else {
+			if (nfs_set_context_args_no_val(nfs, strp) != 0) {
+                                nfs_destroy_url(urls);
+				return NULL;
+                        }
+                }
 	}
 
         strp =strchr(urls->server, '@');
@@ -506,31 +610,39 @@ flags:
                         nfs_destroy_url(urls);
                         return NULL;
                 }
+                original_server = urls->server;
                 urls->server = strdup(strp);
 		if (urls->server == NULL) {
+                        urls->server = original_server;
 			nfs_destroy_url(urls);
 			rpc_set_error(nfs->rpc,
 				      "Out of memory: Failed to allocate "
 				      "server name");
 			return NULL;
 		}
+                free(original_server);
         }
 	if (urls->server && strlen(urls->server) <= 1) {
 		free(urls->server);
 		urls->server = NULL;
 	}
 
+	urls->port = nfs->nfsi->nfsport;
+	if (nfs->nfsi->mountport)
+		urls->port = nfs->nfsi->mountport;
+
 #ifdef HAVE_TLS
 	/*
 	 * Call this in the end after all options are processed, as it uses
 	 * rpc->debug.
-	 */
-	if (nfs->rpc->wanted_xprtsec != RPC_XPRTSEC_NONE) {
+	 */ 
+	if (nfs->rpc->wanted_xprtsec == RPC_XPRTSEC_TLS ||
+            nfs->rpc->wanted_xprtsec == RPC_XPRTSEC_MTLS) {
 		/* tls_global_init() MUST succeed for us to use TLS security */
 		if (tls_global_init(nfs->rpc) != 0) {
-			nfs_set_error(nfs, "tls_global_init() failed!");
-			nfs_destroy_url(urls);
-			return NULL;
+                        nfs_set_error(nfs, "tls_global_init() failed!");
+                        nfs_destroy_url(urls);
+                        return NULL;
 		}
 	}
 #endif
@@ -575,6 +687,12 @@ nfs_init_context(void)
 {
 	struct nfs_context *nfs;
 	struct nfs_context_internal *nfsi;
+#ifdef HAVE_LIBKRB5
+	char *login;
+#if defined(HAVE_PWD_H) && defined(HAVE_UNISTD_H)
+	struct passwd *euid_passwd;
+#endif
+#endif
         int i;
         uint64_t v;
         verifier4 verifier;
@@ -599,7 +717,16 @@ nfs_init_context(void)
 		return NULL;
 	}
 #ifdef HAVE_LIBKRB5
-        rpc_set_username(nfs->rpc, getlogin());
+	login = getenv("USER");
+#if defined(HAVE_PWD_H) && defined(HAVE_UNISTD_H)
+	if (login == NULL) {
+		euid_passwd = getpwuid(geteuid());
+		if (euid_passwd) {
+			login = euid_passwd->pw_name;
+		}
+	}
+#endif
+	rpc_set_username(nfs->rpc, login ? login : "");
 #endif
 	nfs->nfsi->cwd = strdup("/");
 	nfs->nfsi->mask = 022;
@@ -637,14 +764,30 @@ nfs_init_context(void)
         }
         nfs4_set_verifier(nfs, verifier);
 
-        snprintf(client_name, MAX_CLIENT_NAME, "Libnfs pid:%d %d", getpid(),
-                 (int)time(NULL));
+        /*
+         * The client name is the NFSv4 client identity. It must differ for
+         * every context: a second SETCLIENTID under an id the server already
+         * knows means "that client rebooted", and the server then purges the
+         * state -- including open stateids -- belonging to the earlier
+         * context. pid plus whole seconds is not enough, because an
+         * application that mounts several exports does so well within one
+         * second and every context after the first evicts its predecessors,
+         * which then fail with NFS4ERR_EXPIRED / NFS4ERR_STALE_CLIENTID.
+         *
+         * Adding the context address and a millisecond timestamp makes the
+         * name unique without needing a lock or an atomic counter: two live
+         * contexts cannot share an address, and an address can only be reused
+         * once the previous context has been destroyed, at which point its
+         * state is no longer wanted.
+         */
+        snprintf(client_name, MAX_CLIENT_NAME, "Libnfs pid:%d %" PRIu64 " %p",
+                 getpid(), rpc_current_time(), (void *)nfs);
         nfs4_set_client_name(nfs, client_name);
 
 #ifdef HAVE_MULTITHREADING
         nfs_mt_mutex_init(&nfs->nfsi->nfs_mutex);
         nfs_mt_mutex_init(&nfs->nfsi->nfs4_open_counter_mutex);
-        nfs_mt_mutex_init(&nfs->nfsi->nfs4_open_call_mutex);
+        nfs_mt_sem_init(&nfs->nfsi->nfs4_open_call_sem, 1);
 #endif /* HAVE_MULTITHREADING */
 
 #ifdef HAVE_SIGNAL_H
@@ -708,7 +851,7 @@ nfs_destroy_context(struct nfs_context *nfs)
 	}
 
 #ifdef HAVE_MULTITHREADING
-        nfs_mt_mutex_destroy(&nfs->nfsi->nfs4_open_call_mutex);
+        nfs_mt_sem_destroy(&nfs->nfsi->nfs4_open_call_sem);
         nfs_mt_mutex_destroy(&nfs->nfsi->nfs4_open_counter_mutex);
         nfs_mt_mutex_destroy(&nfs->nfsi->nfs_mutex);
         while (nfs->nfsi->thread_ctx) {
@@ -871,7 +1014,7 @@ rpc_connect_program_5_cb(struct rpc_context *rpc, int status,
 	}
 
 #ifdef HAVE_LIBKRB5
-        if (data->program == 100003 && rpc->wanted_sec != RPC_SEC_UNDEFINED) {
+        if (data->program == 100003 && rpc->wanted_sec != RPC_SEC_UNDEFINED && rpc->username) {
                 rpc_gss_init_arg gia;
 
                 rpc->sec = rpc->wanted_sec;
@@ -1210,6 +1353,9 @@ _nfs_mount_async(struct nfs_context *nfs, const char *server,
 	switch (nfs->nfsi->version) {
         case NFS_V3:
                 return nfs3_mount_async(nfs, server, export, cb, private_data);
+#ifdef HAVE_NFS4_2
+        case NFS_V4_2:
+#endif
         case NFS_V4:
                 return nfs4_mount_async(nfs, server, export, cb, private_data);
         default:
@@ -1235,8 +1381,18 @@ nfs_umount_async(struct nfs_context *nfs, nfs_cb cb, void *private_data)
 	switch (nfs->nfsi->version) {
         case NFS_V3:
                 return nfs3_umount_async(nfs, cb, private_data);
+#ifdef HAVE_NFS4_2
+        case NFS_V4_2:
+                /*
+                 * There is nothing to unmount in v4, but a 4.1+ session is
+                 * server side state that lives on until the lease expires
+                 * unless it is released, so give it back here.
+                 */
+                return nfs42_umount_async(nfs, cb, private_data);
+#endif
         case NFS_V4:
                 /* umount is a no-op in v4 */
+                rpc_nfs40_stop_renew(nfs->rpc);
                 (*cb)(0, nfs, NULL, private_data);
                 return 0;
         default:
@@ -1361,50 +1517,104 @@ nfs_stat_async(struct nfs_context *nfs, const char *path,
         }
 }
 
+static int
+nfs_stat64_dispatch(struct nfs_context *nfs, const char *path, int no_follow,
+                  const char *caller, nfs_cb cb, void *private_data)
+{
+	switch (nfs->nfsi->version) {
+        case NFS_V3:
+                return nfs3_stat64_async(nfs, path, no_follow,
+                                         cb, private_data);
+#ifdef HAVE_NFS4_2
+        case NFS_V4_2:
+#endif
+        case NFS_V4:
+                return nfs4_xstat64_async(nfs, path, no_follow, 0,
+                                          cb, private_data);
+        default:
+                nfs_set_error(nfs, "%s does not support NFSv%d",
+                              caller, nfs->nfsi->version);
+                return -1;
+        }
+}
+
 int
 nfs_stat64_async(struct nfs_context *nfs, const char *path,
                  nfs_cb cb, void *private_data)
 {
-	switch (nfs->nfsi->version) {
-        case NFS_V3:
-                return nfs3_stat64_async(nfs, path, 0,
-                                         cb, private_data);
-        case NFS_V4:
-                return nfs4_stat64_async(nfs, path, 0,
-                                         cb, private_data);
-        default:
-                nfs_set_error(nfs, "%s does not support NFSv%d",
-                              __FUNCTION__, nfs->nfsi->version);
-                return -1;
-        }
+        return nfs_stat64_dispatch(nfs, path, 0, __FUNCTION__,
+                                 cb, private_data);
 }
 
 int
 nfs_lstat64_async(struct nfs_context *nfs, const char *path,
                   nfs_cb cb, void *private_data)
 {
+        return nfs_stat64_dispatch(nfs, path, 1, __FUNCTION__,
+                                 cb, private_data);
+}
+
+/* The owner/group strings only exist in NFSv4. */
+static int
+nfs4_stat64_dispatch(struct nfs_context *nfs, const char *path, int no_follow,
+                    const char *caller, nfs_cb cb, void *private_data)
+{
 	switch (nfs->nfsi->version) {
-        case NFS_V3:
-                return nfs3_stat64_async(nfs, path, 1,
-                                         cb, private_data);
+#ifdef HAVE_NFS4_2
+        case NFS_V4_2:
+#endif
         case NFS_V4:
-                return nfs4_stat64_async(nfs, path, 1,
-                                         cb, private_data);
+                return nfs4_xstat64_async(nfs, path, no_follow, 1,
+                                          cb, private_data);
         default:
-                nfs_set_error(nfs, "%s does not support NFSv%d",
-                              __FUNCTION__, nfs->nfsi->version);
+                nfs_set_error(nfs, "%s is only supported for NFSv4",
+                              caller);
                 return -1;
         }
+}
+
+int
+nfs4_stat64_async(struct nfs_context *nfs, const char *path,
+                  nfs_cb cb, void *private_data)
+{
+        return nfs4_stat64_dispatch(nfs, path, 0, __FUNCTION__,
+                                   cb, private_data);
+}
+
+int
+nfs4_lstat64_async(struct nfs_context *nfs, const char *path,
+                   nfs_cb cb, void *private_data)
+{
+        return nfs4_stat64_dispatch(nfs, path, 1, __FUNCTION__,
+                                   cb, private_data);
+}
+
+void
+nfs4_free_stat64(struct nfs4_stat_64 *st)
+{
+        free(st->nfs_user);
+        free(st->nfs_group);
+        st->nfs_user = NULL;
+        st->nfs_group = NULL;
 }
 
 int
 nfs_open2_async(struct nfs_context *nfs, const char *path, int flags,
                 int mode, nfs_cb cb, void *private_data)
 {
+        if (nfs->nfsi->readonly && (flags & (O_WRONLY|O_RDWR|O_APPEND|O_CREAT|O_TRUNC))) {
+                nfs_set_error(nfs, "EROFS. Readonly mount");
+                cb(-EROFS, nfs, NULL, private_data);
+                return 0;
+        }
+
 	switch (nfs->nfsi->version) {
         case NFS_V3:
                 return nfs3_open_async(nfs, path, flags, mode,
                                        cb, private_data);
+#ifdef HAVE_NFS4_2
+        case NFS_V4_2:
+#endif
         case NFS_V4:
                 return nfs4_open_async(nfs, path, flags, mode,
                                        cb, private_data);
@@ -1430,6 +1640,9 @@ nfs_chdir_async(struct nfs_context *nfs, const char *path,
 	switch (nfs->nfsi->version) {
         case NFS_V3:
                 return nfs3_chdir_async(nfs, path, cb, private_data);
+#ifdef HAVE_NFS4_2
+        case NFS_V4_2:
+#endif
         case NFS_V4:
                 return nfs4_chdir_async(nfs, path, cb, private_data);
         default:
@@ -1439,25 +1652,136 @@ nfs_chdir_async(struct nfs_context *nfs, const char *path,
         }
 }
 
-int
-nfs_pread_async(struct nfs_context *nfs, struct nfsfh *nfsfh,
-                void *buf, size_t count, uint64_t offset,
-                nfs_cb cb, void *private_data)
+static int
+__nfs_pread_async(struct nfs_context *nfs, struct nfsfh *nfsfh,
+                  void *buf, size_t count, uint64_t offset,
+                  nfs_cb cb, void *private_data, int update_pos)
 {
 	switch (nfs->nfsi->version) {
         case NFS_V3:
                 return nfs3_pread_async_internal(nfs, nfsfh,
                                                  buf, count, offset,
-                                                 cb, private_data, 0);
+                                                 cb, private_data, update_pos);
+#ifdef HAVE_NFS4_2
+        case NFS_V4_2:
+#endif
         case NFS_V4:
                 return nfs4_pread_async_internal(nfs, nfsfh,
                                                  buf, count, offset,
-                                                 cb, private_data, 0);
+                                                 cb, private_data, update_pos);
         default:
                 nfs_set_error(nfs, "%s does not support NFSv%d",
                               __FUNCTION__, nfs->nfsi->version);
                 return -1;
         }
+}
+
+struct rw_data {
+        struct nfsfh *nfsfh;
+        int update_pos;
+        uint8_t *buf;
+        size_t count;
+        size_t remaining;
+        uint64_t offset;
+        nfs_cb cb;
+        void *private_data;
+};
+
+static void r_cb(int status, struct nfs_context *nfs,
+                   void *data, void *private_data)
+{
+        struct rw_data *rw_data = private_data;
+        size_t cnt;
+
+        if (status < 0) {
+                nfs_set_error(nfs, "%s multi pread failed with %d",
+                              __FUNCTION__, status);
+                rw_data->cb(status, nfs, NULL, rw_data->private_data);
+                free(rw_data);
+                return;
+        }
+
+        if (status > rw_data->remaining) {
+                status = rw_data->remaining;
+        }
+        rw_data->buf += status;
+        rw_data->offset += status;
+        rw_data->remaining -= status;
+        /*
+         * Read until we have all the data or the server retruned a short read (eof?)
+         */
+        if (rw_data->remaining == 0 || status < nfs_get_readmax(nfs)) {
+                rw_data->cb(rw_data->count - rw_data->remaining, nfs, NULL, rw_data->private_data);
+                free(rw_data);
+                return;
+        }
+        cnt = rw_data->remaining;
+        if (nfs_get_readmax(nfs) && cnt > nfs_get_readmax(nfs)) {
+                cnt = nfs_get_readmax(nfs);
+        }
+        if (__nfs_pread_async(nfs, rw_data->nfsfh, rw_data->buf, cnt, rw_data->offset, r_cb, rw_data, rw_data->update_pos)) {
+                nfs_set_error(nfs, "%s multi pread failed with ENOMEM",
+                              __FUNCTION__);
+                rw_data->cb(-ENOMEM, nfs, NULL, rw_data->private_data);
+                free(rw_data);
+                return;
+        }
+}
+
+        
+static int
+_nfs_pread_async(struct nfs_context *nfs, struct nfsfh *nfsfh,
+               void *buf, size_t count,  uint64_t offset,
+                 nfs_cb cb, void *private_data, int update_pos)
+{
+        struct rw_data *rw_data;
+        size_t cnt;
+        size_t readmax = nfs_get_readmax(nfs);
+
+        /*
+         * Single-RPC fast path when the request fits in one READ.
+         * Use <= so a full-sized transfer (common: count == readmax)
+         * still advances nfsfh->offset when update_pos is set.
+         */
+        if (!readmax || count <= readmax) {
+                return __nfs_pread_async(nfs, nfsfh, buf, count, offset,
+                                         cb, private_data, update_pos);
+        }
+
+        rw_data = malloc(sizeof(struct rw_data));
+        if (rw_data == NULL) {
+                return -ENOMEM;
+        }
+        /*
+         * Must preserve update_pos from nfs_read_async (1) vs
+         * nfs_pread_async (0). Forcing it to 0 left the file offset
+         * unchanged after large sequential nfs_read() calls, so a
+         * typical read-until-EOF loop never saw a 0 return.
+         */
+        rw_data->update_pos = update_pos;
+        rw_data->nfsfh = nfsfh;
+        rw_data->buf = buf;
+        rw_data->count = count;
+        rw_data->remaining = count;
+        rw_data->offset = offset;
+        rw_data->cb = cb;
+        rw_data->private_data = private_data;
+
+        cnt = count;
+        if (cnt > readmax) {
+                cnt = readmax;
+        }
+        return __nfs_pread_async(nfs, rw_data->nfsfh, rw_data->buf, cnt,
+                                 rw_data->offset, r_cb, rw_data,
+                                 rw_data->update_pos);
+}
+        
+int
+nfs_pread_async(struct nfs_context *nfs, struct nfsfh *nfsfh,
+               void *buf, size_t count,  uint64_t offset,
+               nfs_cb cb, void *private_data)
+{
+        return _nfs_pread_async(nfs, nfsfh, buf, count, offset, cb, private_data, 0);
 }
 
 int
@@ -1465,15 +1789,26 @@ nfs_read_async(struct nfs_context *nfs, struct nfsfh *nfsfh,
                void *buf, size_t count,
                nfs_cb cb, void *private_data)
 {
+        return _nfs_pread_async(nfs, nfsfh, buf, count, nfsfh->offset, cb, private_data, 1);
+}
+
+int
+nfs_preadv_async(struct nfs_context *nfs, struct nfsfh *nfsfh,
+                 const struct iovec *iov, int iovcnt, uint64_t offset,
+                 nfs_cb cb, void *private_data)
+{
 	switch (nfs->nfsi->version) {
         case NFS_V3:
-                return nfs3_pread_async_internal(nfs, nfsfh,
-                                                 buf, count, nfsfh->offset,
-                                                 cb, private_data, 1);
+                return nfs3_preadv_async_internal(nfs, nfsfh,
+                                                  iov, iovcnt, offset,
+                                                  cb, private_data, 0);
+#ifdef HAVE_NFS4_2
+        case NFS_V4_2:
+#endif
         case NFS_V4:
-                return nfs4_pread_async_internal(nfs, nfsfh,
-                                                 buf, count, nfsfh->offset,
-                                                 cb, private_data, 1);
+                return nfs4_preadv_async_internal(nfs, nfsfh,
+                                                  iov, iovcnt, offset,
+                                                  cb, private_data, 0);
         default:
                 nfs_set_error(nfs, "%s does not support NFSv%d",
                               __FUNCTION__, nfs->nfsi->version);
@@ -1482,20 +1817,46 @@ nfs_read_async(struct nfs_context *nfs, struct nfsfh *nfsfh,
 }
 
 int
-nfs_pwrite_async(struct nfs_context *nfs, struct nfsfh *nfsfh,
-                 const void *buf, size_t count, uint64_t offset,
-                 nfs_cb cb, void *private_data)
+nfs_readv_async(struct nfs_context *nfs, struct nfsfh *nfsfh,
+                const struct iovec *iov, int iovcnt,
+                nfs_cb cb, void *private_data)
+{
+	switch (nfs->nfsi->version) {
+        case NFS_V3:
+                return nfs3_preadv_async_internal(nfs, nfsfh,
+                                                  iov, iovcnt, nfsfh->offset,
+                                                  cb, private_data, 1);
+#ifdef HAVE_NFS4_2
+        case NFS_V4_2:
+#endif
+        case NFS_V4:
+                return nfs4_preadv_async_internal(nfs, nfsfh,
+                                                  iov, iovcnt, nfsfh->offset,
+                                                  cb, private_data, 1);
+        default:
+                nfs_set_error(nfs, "%s does not support NFSv%d",
+                              __FUNCTION__, nfs->nfsi->version);
+                return -1;
+        }
+}
+
+static int
+__nfs_pwrite_async(struct nfs_context *nfs, struct nfsfh *nfsfh,
+                   const void *buf, size_t count, uint64_t offset,
+                   nfs_cb cb, void *private_data, int update_pos)
 {
 	switch (nfs->nfsi->version) {
         case NFS_V3:
                 return nfs3_pwrite_async_internal(nfs, nfsfh,
                                                   buf, count, offset,
-                                                  cb, private_data, 0);
+                                                  cb, private_data, update_pos);
+#ifdef HAVE_NFS4_2
+        case NFS_V4_2:
+#endif
         case NFS_V4:
-                //qqq
-                return nfs4_pwrite_async_internal(nfs, nfsfh, offset,
-                                                  (size_t)count, buf,
-                                                  cb, private_data, 0);
+                return nfs4_pwrite_async_internal(nfs, nfsfh,
+                                                  buf, count, offset,
+                                                  cb, private_data, update_pos);
         default:
                 nfs_set_error(nfs, "%s does not support NFSv%d.",
                               __FUNCTION__, nfs->nfsi->version);
@@ -1503,25 +1864,144 @@ nfs_pwrite_async(struct nfs_context *nfs, struct nfsfh *nfsfh,
         }
 }
 
+static void w_cb(int status, struct nfs_context *nfs,
+                 void *data, void *private_data)
+{
+        struct rw_data *rw_data = private_data;
+        size_t cnt;
+
+        if (status < 0) {
+                nfs_set_error(nfs, "%s multi pwrite failed with %d",
+                              __FUNCTION__, status);
+                rw_data->cb(status, nfs, NULL, rw_data->private_data);
+                free(rw_data);
+                return;
+        }
+
+        if (status > rw_data->remaining) {
+                status = rw_data->remaining;
+        }
+        rw_data->buf += status;
+        rw_data->offset += status;
+        rw_data->remaining -= status;
+
+        /*
+         * Unlike a short read, a short write does not mean there is nothing
+         * left to do, so keep going until it is all written. A server that
+         * accepts nothing at all would have us spin here, so treat no
+         * progress as the end and report the partial write.
+         */
+        if (rw_data->remaining == 0 || status == 0) {
+                rw_data->cb(rw_data->count - rw_data->remaining, nfs, NULL,
+                            rw_data->private_data);
+                free(rw_data);
+                return;
+        }
+        cnt = rw_data->remaining;
+        if (nfs_get_writemax(nfs) && cnt > nfs_get_writemax(nfs)) {
+                cnt = nfs_get_writemax(nfs);
+        }
+        if (__nfs_pwrite_async(nfs, rw_data->nfsfh, rw_data->buf, cnt,
+                               rw_data->offset, w_cb, rw_data,
+                               rw_data->update_pos)) {
+                nfs_set_error(nfs, "%s multi pwrite failed with ENOMEM",
+                              __FUNCTION__);
+                rw_data->cb(-ENOMEM, nfs, NULL, rw_data->private_data);
+                free(rw_data);
+                return;
+        }
+}
+
+/*
+ * A single NFS WRITE cannot carry more than the server's writemax, but the
+ * caller should not have to care: like write(2), a request larger than that
+ * is split across as many WRITEs as it takes. This mirrors what
+ * _nfs_pread_async() already does for READ.
+ */
+static int
+_nfs_pwrite_async(struct nfs_context *nfs, struct nfsfh *nfsfh,
+                  const void *buf, size_t count, uint64_t offset,
+                  nfs_cb cb, void *private_data, int update_pos)
+{
+        struct rw_data *rw_data;
+        size_t cnt;
+        size_t writemax = nfs_get_writemax(nfs);
+
+        /* Single-RPC fast path when the request fits in one WRITE. */
+        if (!writemax || count <= writemax) {
+                return __nfs_pwrite_async(nfs, nfsfh, buf, count, offset,
+                                          cb, private_data, update_pos);
+        }
+
+        rw_data = malloc(sizeof(struct rw_data));
+        if (rw_data == NULL) {
+                return -ENOMEM;
+        }
+        rw_data->update_pos = update_pos;
+        rw_data->nfsfh = nfsfh;
+        rw_data->buf = discard_const(buf);
+        rw_data->count = count;
+        rw_data->remaining = count;
+        rw_data->offset = offset;
+        rw_data->cb = cb;
+        rw_data->private_data = private_data;
+
+        cnt = count;
+        if (cnt > writemax) {
+                cnt = writemax;
+        }
+        return __nfs_pwrite_async(nfs, rw_data->nfsfh, rw_data->buf, cnt,
+                                  rw_data->offset, w_cb, rw_data,
+                                  rw_data->update_pos);
+}
+
+int
+nfs_pwrite_async(struct nfs_context *nfs, struct nfsfh *nfsfh,
+                 const void *buf, size_t count, uint64_t offset,
+                 nfs_cb cb, void *private_data)
+{
+        if (nfsfh->is_readonly) {
+                nfs_set_error(nfs, "Trying to write to read-only file");
+                return -1;
+        }
+        return _nfs_pwrite_async(nfs, nfsfh, buf, count, offset,
+                                 cb, private_data, 0);
+}
+
 int
 nfs_write_async(struct nfs_context *nfs, struct nfsfh *nfsfh,
                 const void *buf, size_t count,
                 nfs_cb cb, void *private_data)
 {
-	switch (nfs->nfsi->version) {
-        case NFS_V3:
-                return nfs3_write_async(nfs, nfsfh,
-                                        buf, count,
-                                        cb, private_data);
-        case NFS_V4:
-                //qqq
-                return nfs4_write_async(nfs, nfsfh, count, buf,
-                                        cb, private_data);
-        default:
-                nfs_set_error(nfs, "%s does not support NFSv%d",
-                              __FUNCTION__, nfs->nfsi->version);
+        if (nfsfh->is_readonly) {
+                nfs_set_error(nfs, "Trying to write to read-only file");
                 return -1;
         }
+        /*
+         * O_APPEND has to resolve the current end of file first, so it keeps
+         * its own path. It is still limited to a single WRITE.
+         */
+        if (nfsfh->is_append) {
+                switch (nfs->nfsi->version) {
+                case NFS_V3:
+                        return nfs3_write_async(nfs, nfsfh,
+                                                buf, count,
+                                                cb, private_data);
+#ifdef HAVE_NFS4_2
+                case NFS_V4_2:
+#endif
+                case NFS_V4:
+                        return nfs4_write_async(nfs, nfsfh, count, buf,
+                                                cb, private_data);
+                default:
+                        nfs_set_error(nfs, "%s does not support NFSv%d",
+                                      __FUNCTION__, nfs->nfsi->version);
+                        return -1;
+                }
+        }
+
+        return _nfs_pwrite_async(nfs, nfsfh, buf, count, nfsfh->offset,
+                                 cb, private_data, 1);
 }
 
 int
@@ -1531,6 +2011,9 @@ nfs_close_async(struct nfs_context *nfs, struct nfsfh *nfsfh, nfs_cb cb,
 	switch (nfs->nfsi->version) {
         case NFS_V3:
                 return nfs3_close_async(nfs, nfsfh, cb, private_data);
+#ifdef HAVE_NFS4_2
+        case NFS_V4_2:
+#endif
         case NFS_V4:
                 return nfs4_close_async(nfs, nfsfh, cb, private_data);
         default:
@@ -1561,11 +2044,31 @@ nfs_fstat64_async(struct nfs_context *nfs, struct nfsfh *nfsfh, nfs_cb cb,
 	switch (nfs->nfsi->version) {
         case NFS_V3:
                 return nfs3_fstat64_async(nfs, nfsfh, cb, private_data);
+#ifdef HAVE_NFS4_2
+        case NFS_V4_2:
+#endif
         case NFS_V4:
-                return nfs4_fstat64_async(nfs, nfsfh, cb, private_data);
+                return nfs4_xfstat64_async(nfs, nfsfh, 0, cb, private_data);
         default:
                 nfs_set_error(nfs, "%s does not support NFSv%d",
                               __FUNCTION__, nfs->nfsi->version);
+                return -1;
+        }
+}
+
+int
+nfs4_fstat64_async(struct nfs_context *nfs, struct nfsfh *nfsfh, nfs_cb cb,
+                   void *private_data)
+{
+	switch (nfs->nfsi->version) {
+#ifdef HAVE_NFS4_2
+        case NFS_V4_2:
+#endif
+        case NFS_V4:
+                return nfs4_xfstat64_async(nfs, nfsfh, 1, cb, private_data);
+        default:
+                nfs_set_error(nfs, "%s is only supported for NFSv4",
+                              __FUNCTION__);
                 return -1;
         }
 }
@@ -1577,6 +2080,9 @@ nfs_fsync_async(struct nfs_context *nfs, struct nfsfh *nfsfh, nfs_cb cb,
 	switch (nfs->nfsi->version) {
         case NFS_V3:
                 return nfs3_fsync_async(nfs, nfsfh, cb, private_data);
+#ifdef HAVE_NFS4_2
+        case NFS_V4_2:
+#endif
         case NFS_V4:
                 return nfs4_fsync_async(nfs, nfsfh, cb, private_data);
         default:
@@ -1590,10 +2096,17 @@ int
 nfs_ftruncate_async(struct nfs_context *nfs, struct nfsfh *nfsfh,
                     uint64_t length, nfs_cb cb, void *private_data)
 {
+        if (nfsfh->is_readonly) {
+                nfs_set_error(nfs, "Trying to truncate to read-only file");
+                return -1;
+        }
 	switch (nfs->nfsi->version) {
         case NFS_V3:
                 return nfs3_ftruncate_async(nfs, nfsfh, length,
                                             cb, private_data);
+#ifdef HAVE_NFS4_2
+        case NFS_V4_2:
+#endif
         case NFS_V4:
                 return nfs4_ftruncate_async(nfs, nfsfh, length,
                                             cb, private_data);
@@ -1608,9 +2121,18 @@ int
 nfs_truncate_async(struct nfs_context *nfs, const char *path, uint64_t length,
                    nfs_cb cb, void *private_data)
 {
+        if (nfs->nfsi->readonly) {
+                nfs_set_error(nfs, "EROFS. Readonly mount");
+                cb(-EROFS, nfs, NULL, private_data);
+                return 0;
+        }
+
 	switch (nfs->nfsi->version) {
         case NFS_V3:
                 return nfs3_truncate_async(nfs, path, length, cb, private_data);
+#ifdef HAVE_NFS4_2
+        case NFS_V4_2:
+#endif
         case NFS_V4:
                 return nfs4_truncate_async(nfs, path, length, cb, private_data);
         default:
@@ -1624,9 +2146,18 @@ int
 nfs_mkdir2_async(struct nfs_context *nfs, const char *path, int mode,
                  nfs_cb cb, void *private_data)
 {
+        if (nfs->nfsi->readonly) {
+                nfs_set_error(nfs, "EROFS. Readonly mount");
+                cb(-EROFS, nfs, NULL, private_data);
+                return 0;
+        }
+
 	switch (nfs->nfsi->version) {
         case NFS_V3:
                 return nfs3_mkdir2_async(nfs, path, mode, cb, private_data);
+#ifdef HAVE_NFS4_2
+        case NFS_V4_2:
+#endif
         case NFS_V4:
                 return nfs4_mkdir2_async(nfs, path, mode, cb, private_data);
         default:
@@ -1647,9 +2178,18 @@ int
 nfs_rmdir_async(struct nfs_context *nfs, const char *path, nfs_cb cb,
                  void *private_data)
 {
+        if (nfs->nfsi->readonly) {
+                nfs_set_error(nfs, "EROFS. Readonly mount");
+                cb(-EROFS, nfs, NULL, private_data);
+                return 0;
+        }
+
 	switch (nfs->nfsi->version) {
         case NFS_V3:
                 return nfs3_rmdir_async(nfs, path, cb, private_data);
+#ifdef HAVE_NFS4_2
+        case NFS_V4_2:
+#endif
         case NFS_V4:
                 return nfs4_rmdir_async(nfs, path, cb, private_data);
         default:
@@ -1663,10 +2203,19 @@ int
 nfs_creat_async(struct nfs_context *nfs, const char *path,
                 int mode, nfs_cb cb, void *private_data)
 {
+        if (nfs->nfsi->readonly) {
+                nfs_set_error(nfs, "EROFS. Readonly mount");
+                cb(-EROFS, nfs, NULL, private_data);
+                return 0;
+        }
+
 	switch (nfs->nfsi->version) {
         case NFS_V3:
                 return nfs3_creat_async(nfs, path, mode,
                                          cb, private_data);
+#ifdef HAVE_NFS4_2
+        case NFS_V4_2:
+#endif
         case NFS_V4:
                 return nfs4_creat_async(nfs, path, mode,
                                          cb, private_data);
@@ -1681,9 +2230,18 @@ int
 nfs_unlink_async(struct nfs_context *nfs, const char *path, nfs_cb cb,
                   void *private_data)
 {
+        if (nfs->nfsi->readonly) {
+                nfs_set_error(nfs, "EROFS. Readonly mount");
+                cb(-EROFS, nfs, NULL, private_data);
+                return 0;
+        }
+
 	switch (nfs->nfsi->version) {
         case NFS_V3:
                 return nfs3_unlink_async(nfs, path, cb, private_data);
+#ifdef HAVE_NFS4_2
+        case NFS_V4_2:
+#endif
         case NFS_V4:
                 return nfs4_unlink_async(nfs, path, cb, private_data);
         default:
@@ -1697,9 +2255,18 @@ int
 nfs_mknod_async(struct nfs_context *nfs, const char *path, int mode, int dev,
                  nfs_cb cb, void *private_data)
 {
+        if (nfs->nfsi->readonly) {
+                nfs_set_error(nfs, "EROFS. Readonly mount");
+                cb(-EROFS, nfs, NULL, private_data);
+                return 0;
+        }
+
 	switch (nfs->nfsi->version) {
         case NFS_V3:
                 return nfs3_mknod_async(nfs, path, mode, dev, cb, private_data);
+#ifdef HAVE_NFS4_2
+        case NFS_V4_2:
+#endif
         case NFS_V4:
                 return nfs4_mknod_async(nfs, path, mode, dev, cb, private_data);
         default:
@@ -1716,6 +2283,9 @@ nfs_opendir_async(struct nfs_context *nfs, const char *path, nfs_cb cb,
 	switch (nfs->nfsi->version) {
         case NFS_V3:
                 return nfs3_opendir_async(nfs, path, cb, private_data);
+#ifdef HAVE_NFS4_2
+        case NFS_V4_2:
+#endif
         case NFS_V4:
                 return nfs4_opendir_async(nfs, path, cb, private_data);
         default:
@@ -1786,14 +2356,66 @@ nfs_getcwd(struct nfs_context *nfs, const char **cwd)
 	}
 }
 
+#ifdef HAVE_NFS4_2
+int
+nfs_fallocate_async(struct nfs_context *nfs, struct nfsfh *nfsfh, int mode,
+                    uint64_t offset, uint64_t length,
+                    nfs_cb cb, void *private_data)
+{
+        if (nfs->nfsi->version != NFS_V4_2) {
+                nfs_set_error(nfs, "%s requires NFSv4.2", __FUNCTION__);
+                return -ENOTSUP;
+        }
+        return nfs42_fallocate_async(nfs, nfsfh, mode, offset, length,
+                                     cb, private_data);
+}
+#else
+int
+nfs_fallocate_async(struct nfs_context *nfs, struct nfsfh *nfsfh _U_,
+                    int mode _U_, uint64_t offset _U_, uint64_t length _U_,
+                    nfs_cb cb _U_, void *private_data _U_)
+{
+        nfs_set_error(nfs, "NFSv4.2 support was not built into this library");
+        return -ENOTSUP;
+}
+#endif /* HAVE_NFS4_2 */
+
 int
 nfs_lseek_async(struct nfs_context *nfs, struct nfsfh *nfsfh, int64_t offset,
                  int whence, nfs_cb cb, void *private_data)
 {
+        /*
+         * SEEK_HOLE and SEEK_DATA are answered by the server, which only
+         * NFSv4.2 can ask. Check here rather than in each version's
+         * implementation, where an unknown whence would otherwise be taken
+         * for SEEK_END.
+         */
+        if (whence == SEEK_HOLE || whence == SEEK_DATA) {
+                /*
+                 * NFS_V4_2 does not exist on the platforms that compile the
+                 * dialect out entirely, so the version can not be compared
+                 * against it there.
+                 */
+#ifdef LIBNFS_FEATURE_NFS4_2
+                const int is_v4_2 = (nfs->nfsi->version == NFS_V4_2);
+#else
+                const int is_v4_2 = 0;
+#endif
+
+                if (!is_v4_2) {
+                        nfs_set_error(nfs, "lseek(SEEK_%s) requires NFSv4.2",
+                                      whence == SEEK_HOLE ? "HOLE" : "DATA");
+                        return -ENOTSUP;
+                }
+        }
+
 	switch (nfs->nfsi->version) {
         case NFS_V3:
                 return nfs3_lseek_async(nfs, nfsfh, offset, whence,
                                         cb, private_data);
+#ifdef HAVE_NFS4_2
+        case NFS_V4_2:
+#endif
         case NFS_V4:
                 return nfs4_lseek_async(nfs, nfsfh, offset, whence,
                                         cb, private_data);
@@ -1810,6 +2432,9 @@ nfs_lockf_async(struct nfs_context *nfs, struct nfsfh *nfsfh,
                 nfs_cb cb, void *private_data)
 {
 	switch (nfs->nfsi->version) {
+#ifdef HAVE_NFS4_2
+        case NFS_V4_2:
+#endif
         case NFS_V4:
                 return nfs4_lockf_async(nfs, nfsfh, op, count,
                                         cb, private_data);
@@ -1826,6 +2451,9 @@ nfs_fcntl_async(struct nfs_context *nfs, struct nfsfh *nfsfh,
                 nfs_cb cb, void *private_data)
 {
 	switch (nfs->nfsi->version) {
+#ifdef HAVE_NFS4_2
+        case NFS_V4_2:
+#endif
         case NFS_V4:
                 return nfs4_fcntl_async(nfs, nfsfh, cmd, arg,
                                         cb, private_data);
@@ -1843,6 +2471,9 @@ nfs_statvfs_async(struct nfs_context *nfs, const char *path, nfs_cb cb,
 	switch (nfs->nfsi->version) {
         case NFS_V3:
                 return nfs3_statvfs_async(nfs, path, cb, private_data);
+#ifdef HAVE_NFS4_2
+        case NFS_V4_2:
+#endif
         case NFS_V4:
                 return nfs4_statvfs_async(nfs, path, cb, private_data);
         default:
@@ -1859,6 +2490,9 @@ nfs_statvfs64_async(struct nfs_context *nfs, const char *path, nfs_cb cb,
 	switch (nfs->nfsi->version) {
         case NFS_V3:
                 return nfs3_statvfs64_async(nfs, path, cb, private_data);
+#ifdef HAVE_NFS4_2
+        case NFS_V4_2:
+#endif
         case NFS_V4:
                 return nfs4_statvfs64_async(nfs, path, cb, private_data);
         default:
@@ -1875,6 +2509,9 @@ nfs_readlink_async(struct nfs_context *nfs, const char *path, nfs_cb cb,
 	switch (nfs->nfsi->version) {
         case NFS_V3:
                 return nfs3_readlink_async(nfs, path, cb, private_data);
+#ifdef HAVE_NFS4_2
+        case NFS_V4_2:
+#endif
         case NFS_V4:
                 return nfs4_readlink_async(nfs, path, cb, private_data);
         default:
@@ -1888,10 +2525,19 @@ int
 nfs_chmod_async(struct nfs_context *nfs, const char *path, int mode,
                 nfs_cb cb, void *private_data)
 {
+        if (nfs->nfsi->readonly) {
+                nfs_set_error(nfs, "EROFS. Readonly mount");
+                cb(-EROFS, nfs, NULL, private_data);
+                return 0;
+        }
+
 	switch (nfs->nfsi->version) {
         case NFS_V3:
                 return nfs3_chmod_async_internal(nfs, path, 0, mode,
                                                  cb, private_data);
+#ifdef HAVE_NFS4_2
+        case NFS_V4_2:
+#endif
         case NFS_V4:
                 return nfs4_chmod_async_internal(nfs, path, 0, mode,
                                                  cb, private_data);
@@ -1906,10 +2552,19 @@ int
 nfs_lchmod_async(struct nfs_context *nfs, const char *path, int mode,
                  nfs_cb cb, void *private_data)
 {
+        if (nfs->nfsi->readonly) {
+                nfs_set_error(nfs, "EROFS. Readonly mount");
+                cb(-EROFS, nfs, NULL, private_data);
+                return 0;
+        }
+
 	switch (nfs->nfsi->version) {
         case NFS_V3:
                 return nfs3_chmod_async_internal(nfs, path, 1, mode,
                                                  cb, private_data);
+#ifdef HAVE_NFS4_2
+        case NFS_V4_2:
+#endif
         case NFS_V4:
                 return nfs4_chmod_async_internal(nfs, path, 1, mode,
                                                  cb, private_data);
@@ -1924,9 +2579,18 @@ int
 nfs_fchmod_async(struct nfs_context *nfs, struct nfsfh *nfsfh, int mode,
                   nfs_cb cb, void *private_data)
 {
+        if (nfs->nfsi->readonly) {
+                nfs_set_error(nfs, "EROFS. Readonly mount");
+                cb(-EROFS, nfs, NULL, private_data);
+                return 0;
+        }
+
 	switch (nfs->nfsi->version) {
         case NFS_V3:
                 return nfs3_fchmod_async(nfs, nfsfh, mode, cb, private_data);
+#ifdef HAVE_NFS4_2
+        case NFS_V4_2:
+#endif
         case NFS_V4:
                 return nfs4_fchmod_async(nfs, nfsfh, mode, cb, private_data);
         default:
@@ -1940,10 +2604,19 @@ int
 nfs_chown_async(struct nfs_context *nfs, const char *path, int uid, int gid,
                 nfs_cb cb, void *private_data)
 {
+        if (nfs->nfsi->readonly) {
+                nfs_set_error(nfs, "EROFS. Readonly mount");
+                cb(-EROFS, nfs, NULL, private_data);
+                return 0;
+        }
+
 	switch (nfs->nfsi->version) {
         case NFS_V3:
                 return nfs3_chown_async_internal(nfs, path, 0, uid, gid,
                                                  cb, private_data);
+#ifdef HAVE_NFS4_2
+        case NFS_V4_2:
+#endif
         case NFS_V4:
                 return nfs4_chown_async_internal(nfs, path, 0, uid, gid,
                                                  cb, private_data);
@@ -1958,10 +2631,19 @@ int
 nfs_lchown_async(struct nfs_context *nfs, const char *path, int uid, int gid,
                  nfs_cb cb, void *private_data)
 {
+        if (nfs->nfsi->readonly) {
+                nfs_set_error(nfs, "EROFS. Readonly mount");
+                cb(-EROFS, nfs, NULL, private_data);
+                return 0;
+        }
+
 	switch (nfs->nfsi->version) {
         case NFS_V3:
                 return nfs3_chown_async_internal(nfs, path, 1, uid, gid,
                                                  cb, private_data);
+#ifdef HAVE_NFS4_2
+        case NFS_V4_2:
+#endif
         case NFS_V4:
                 return nfs4_chown_async_internal(nfs, path, 1, uid, gid,
                                                  cb, private_data);
@@ -1976,10 +2658,19 @@ int
 nfs_fchown_async(struct nfs_context *nfs, struct nfsfh *nfsfh, int uid,
                  int gid, nfs_cb cb, void *private_data)
 {
+        if (nfs->nfsi->readonly) {
+                nfs_set_error(nfs, "EROFS. Readonly mount");
+                cb(-EROFS, nfs, NULL, private_data);
+                return 0;
+        }
+
 	switch (nfs->nfsi->version) {
         case NFS_V3:
                 return nfs3_fchown_async(nfs, nfsfh, uid, gid,
                                          cb, private_data);
+#ifdef HAVE_NFS4_2
+        case NFS_V4_2:
+#endif
         case NFS_V4:
                 return nfs4_fchown_async(nfs, nfsfh, uid, gid,
                                          cb, private_data);
@@ -1994,10 +2685,19 @@ int
 nfs_utimes_async(struct nfs_context *nfs, const char *path,
                  struct timeval *times, nfs_cb cb, void *private_data)
 {
+        if (nfs->nfsi->readonly) {
+                nfs_set_error(nfs, "EROFS. Readonly mount");
+                cb(-EROFS, nfs, NULL, private_data);
+                return 0;
+        }
+
 	switch (nfs->nfsi->version) {
         case NFS_V3:
                 return nfs3_utimes_async_internal(nfs, path, 0, times,
                                                   cb, private_data);
+#ifdef HAVE_NFS4_2
+        case NFS_V4_2:
+#endif
         case NFS_V4:
                 return nfs4_utimes_async_internal(nfs, path, 0, times,
                                                   cb, private_data);
@@ -2012,10 +2712,19 @@ int
 nfs_lutimes_async(struct nfs_context *nfs, const char *path,
                   struct timeval *times, nfs_cb cb, void *private_data)
 {
+        if (nfs->nfsi->readonly) {
+                nfs_set_error(nfs, "EROFS. Readonly mount");
+                cb(-EROFS, nfs, NULL, private_data);
+                return 0;
+        }
+
 	switch (nfs->nfsi->version) {
         case NFS_V3:
                 return nfs3_utimes_async_internal(nfs, path, 1, times,
                                                   cb, private_data);
+#ifdef HAVE_NFS4_2
+        case NFS_V4_2:
+#endif
         case NFS_V4:
                 return nfs4_utimes_async_internal(nfs, path, 1, times,
                                                   cb, private_data);
@@ -2030,9 +2739,18 @@ int
 nfs_utime_async(struct nfs_context *nfs, const char *path,
                 struct utimbuf *times, nfs_cb cb, void *private_data)
 {
+        if (nfs->nfsi->readonly) {
+                nfs_set_error(nfs, "EROFS. Readonly mount");
+                cb(-EROFS, nfs, NULL, private_data);
+                return 0;
+        }
+
 	switch (nfs->nfsi->version) {
         case NFS_V3:
                 return nfs3_utime_async(nfs, path, times, cb, private_data);
+#ifdef HAVE_NFS4_2
+        case NFS_V4_2:
+#endif
         case NFS_V4:
                 return nfs4_utime_async(nfs, path, times, cb, private_data);
         default:
@@ -2049,6 +2767,9 @@ nfs_access_async(struct nfs_context *nfs, const char *path, int mode,
 	switch (nfs->nfsi->version) {
         case NFS_V3:
                 return nfs3_access_async(nfs, path, mode, cb, private_data);
+#ifdef HAVE_NFS4_2
+        case NFS_V4_2:
+#endif
         case NFS_V4:
                 return nfs4_access_async(nfs, path, mode, cb, private_data);
         default:
@@ -2065,6 +2786,9 @@ nfs_access2_async(struct nfs_context *nfs, const char *path, nfs_cb cb,
 	switch (nfs->nfsi->version) {
         case NFS_V3:
                 return nfs3_access2_async(nfs, path, cb, private_data);
+#ifdef HAVE_NFS4_2
+        case NFS_V4_2:
+#endif
         case NFS_V4:
                 return nfs4_access2_async(nfs, path, cb, private_data);
         default:
@@ -2082,6 +2806,9 @@ nfs_symlink_async(struct nfs_context *nfs, const char *target,
         case NFS_V3:
                 return nfs3_symlink_async(nfs, target, newpath,
                                           cb, private_data);
+#ifdef HAVE_NFS4_2
+        case NFS_V4_2:
+#endif
         case NFS_V4:
                 return nfs4_symlink_async(nfs, target, newpath,
                                           cb, private_data);
@@ -2096,10 +2823,19 @@ int
 nfs_rename_async(struct nfs_context *nfs, const char *oldpath,
                   const char *newpath, nfs_cb cb, void *private_data)
 {
+        if (nfs->nfsi->readonly) {
+                nfs_set_error(nfs, "EROFS. Readonly mount");
+                cb(-EROFS, nfs, NULL, private_data);
+                return 0;
+        }
+
 	switch (nfs->nfsi->version) {
         case NFS_V3:
                 return nfs3_rename_async(nfs, oldpath, newpath,
                                          cb, private_data);
+#ifdef HAVE_NFS4_2
+        case NFS_V4_2:
+#endif
         case NFS_V4:
                 return nfs4_rename_async(nfs, oldpath, newpath,
                                          cb, private_data);
@@ -2114,10 +2850,19 @@ int
 nfs_link_async(struct nfs_context *nfs, const char *oldpath,
                const char *newpath, nfs_cb cb, void *private_data)
 {
+        if (nfs->nfsi->readonly) {
+                nfs_set_error(nfs, "EROFS. Readonly mount");
+                cb(-EROFS, nfs, NULL, private_data);
+                return 0;
+        }
+
 	switch (nfs->nfsi->version) {
         case NFS_V3:
                 return nfs3_link_async(nfs, oldpath, newpath,
                                        cb, private_data);
+#ifdef HAVE_NFS4_2
+        case NFS_V4_2:
+#endif
         case NFS_V4:
                 return nfs4_link_async(nfs, oldpath, newpath,
                                        cb, private_data);
@@ -2141,7 +2886,7 @@ nfs_set_readmax(struct nfs_context *nfs, size_t readmax)
 {
         size_t readmax_adjusted = readmax;
 
-        readmax_adjusted = MIN(readmax_adjusted, NFS_MAX_XFER_SIZE);
+        readmax_adjusted = MIN(readmax_adjusted, NFS_MAX_RECV_XFER_SIZE);
         readmax_adjusted = MAX(readmax_adjusted, NFS_MIN_XFER_SIZE);
         readmax_adjusted = (readmax_adjusted / 4096) * 4096;
 
@@ -2199,6 +2944,11 @@ nfs_set_auto_traverse_mounts(struct nfs_context *nfs, int enabled) {
 }
 
 void
+nfs_set_readonly(struct nfs_context *nfs, int readonly) {
+	nfs->nfsi->readonly = readonly;
+}
+
+void
 nfs_set_dircache(struct nfs_context *nfs, int enabled) {
 	nfs->nfsi->dircache_enabled = enabled;
 }
@@ -2234,7 +2984,31 @@ nfs_set_version(struct nfs_context *nfs, int version) {
 #endif
 		nfs->nfsi->version = version;
 		nfs->nfsi->default_version = 0;
+#ifdef HAVE_NFS4_2
+		nfs->rpc->nfs4_minorversion = 0;
+#endif
 		break;
+#ifdef LIBNFS_FEATURE_NFS4_2
+	case NFS_V4_2:
+#ifdef HAVE_NFS4_2
+		/*
+		 * NFS_V4_2 selects a libnfs dialect, not an RPC program
+		 * version. Every NFSv4 minor version is RPC version 4; the
+		 * minor version travels inside the COMPOUND.
+		 */
+#ifdef HAVE_TLS
+		nfs->rpc->nfs_version = NFS_V4;
+#endif
+		nfs->nfsi->version = NFS_V4_2;
+		nfs->nfsi->default_version = 0;
+		nfs->rpc->nfs4_minorversion = 2;
+		break;
+#else
+		nfs_set_error(nfs, "NFSv4.2 support was not built into this "
+			      "library");
+		return -1;
+#endif /* HAVE_NFS4_2 */
+#endif /* LIBNFS_FEATURE_NFS4_2 */
 	default:
 		nfs_set_error(nfs, "NFS version %d is not supported", version);
 		return -1;
@@ -2255,6 +3029,7 @@ nfs_set_nfsport(struct nfs_context *nfs, int port) {
 void
 nfs_set_mountport(struct nfs_context *nfs, int port) {
 	nfs->nfsi->mountport = port;
+	rpc_set_mountport(nfs->rpc, port);
 }
 
 size_t
@@ -2270,11 +3045,11 @@ nfs_set_readdir_max_buffer_size(struct nfs_context *nfs,
         size_t dircount_adjusted = dircount;
         size_t maxcount_adjusted = maxcount;
 
-        dircount_adjusted = MIN(dircount_adjusted, NFS_MAX_XFER_SIZE);
+        dircount_adjusted = MIN(dircount_adjusted, NFS_MAX_RECV_XFER_SIZE);
         dircount_adjusted = MAX(dircount_adjusted, NFS_MIN_XFER_SIZE);
         dircount_adjusted = (dircount_adjusted / 4096) * 4096;
 
-        maxcount_adjusted = MIN(maxcount_adjusted, NFS_MAX_XFER_SIZE);
+        maxcount_adjusted = MIN(maxcount_adjusted, NFS_MAX_RECV_XFER_SIZE);
         maxcount_adjusted = MAX(maxcount_adjusted, NFS_MIN_XFER_SIZE);
         maxcount_adjusted = (maxcount_adjusted / 4096) * 4096;
 
@@ -2300,6 +3075,7 @@ nfs_set_error(struct nfs_context *nfs, char *error_string, ...)
         va_start(ap, error_string);
 	nfs->error_string = malloc(1024);
         if (nfs->error_string == NULL) {
+                va_end(ap);
                 nfs->error_string = discard_const(oom);
                 goto finished;
         }
@@ -2422,6 +3198,16 @@ mount_getexports_async(struct rpc_context *rpc, const char *server, rpc_cb cb,
 	if (data->server == NULL) {
 		free_mount_cb_data(data);
 		return -1;
+	}
+	if (rpc->mountport) {
+		if (rpc_connect_port_async(rpc, data->server, rpc->mountport, MOUNT_PROGRAM,
+		                                              MOUNT_V3, mount_export_4_cb, data) != 0) {
+				rpc_set_error(rpc, "Failed to start connection. %s",
+				              rpc_get_error(rpc));
+				free_mount_cb_data(data);
+			return -1;
+		}
+		return 0;
 	}
 	if (rpc_connect_program_async(rpc, data->server, MOUNT_PROGRAM,
                                       MOUNT_V3, mount_export_4_cb, data) != 0) {

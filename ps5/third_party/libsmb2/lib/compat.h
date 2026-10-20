@@ -43,7 +43,10 @@ typedef SOCKET t_socket;
 #define SMB2_INVALID_SOCKET INVALID_SOCKET
 #define SMB2_VALID_SOCKET(sock)	((sock) != SMB2_INVALID_SOCKET)
 #else
+#ifndef T_SOCKET_DEFINED
+#define T_SOCKET_DEFINED
 typedef int t_socket;
+#endif
 #define SMB2_VALID_SOCKET(sock)	((sock) >= 0)
 #define SMB2_INVALID_SOCKET		-1
 #endif
@@ -61,7 +64,7 @@ typedef int t_socket;
 #define WIN32_LEAN_AND_MEAN
 #endif /* !WIN32_LEAN_AND_MEAN */
 
-#ifdef XBOX_PLATFORM /* MSVC 2003 and Xbox XDK Doesn´t have stdint.h header */
+#ifdef XBOX_PLATFORM /* Xbox XDK Doesn´t have stdint.h header */
 typedef char int8_t;
 typedef short int16_t;
 typedef short int_least16_t;
@@ -75,6 +78,8 @@ typedef unsigned int uint32_t;
 typedef unsigned long long uint64_t;
 typedef unsigned int uint_t;
 typedef unsigned int uintptr_t;
+#else
+#include <stdint.h>	
 #endif
 
 #ifndef ENETRESET
@@ -113,7 +118,7 @@ typedef unsigned int uintptr_t;
 #define EBADF WSAENOTSOCK
 #endif
 
-#if defined(_XBOX) || defined(__MINGW32__)
+#if defined(_XBOX)
 #define snprintf _snprintf
 int gethostname(char* name, size_t len);
 #endif
@@ -199,7 +204,10 @@ struct pollfd {
 
 #endif
 
+#ifndef _SSIZE_T_DEFINED
+#define _SSIZE_T_DEFINED
 typedef SSIZE_T ssize_t;
+#endif
 
 struct iovec
 {
@@ -451,10 +459,10 @@ typedef size_t ssize_t;
 #endif
 
 long long int be64toh(long long int x);
+int gethostname(char *name, size_t len);
 #ifdef _IOP
 char *strdup(const char *s);
 
-int gethostname(char *name, size_t len);
 int random(void);
 void srandom(unsigned int seed);
 time_t time(time_t *tloc);
@@ -512,11 +520,14 @@ int iop_connect(int sockfd, struct sockaddr *addr, socklen_t addrlen);
 #endif
 
 #ifdef __ps2sdk_iop__
+/* PS2 IRX has no stdlib.h; allocators are provided by smb2man. */
 void *malloc(int size);
 
 void free(void *ptr);
 
 void *calloc(size_t nmemb, size_t size);
+
+void *realloc(void *ptr, size_t size);
 #endif
 
 ssize_t writev(t_socket fd, const struct iovec *iov, int iovcnt);
@@ -604,7 +615,21 @@ struct sockaddr_storage {
 #define ENODATA ENOATTR
 #endif
 
+#ifndef ENOLINK
+#define ENOLINK ENOATTR
+#endif
+
+#include <stdint.h>
+
 #endif /* PS4_PLATFORM */
+
+#ifdef __linux__
+#include <stdint.h>
+#endif
+
+#ifdef __APPLE__
+#include <stdint.h>
+#endif
 
 #ifdef __vita__
 
@@ -621,29 +646,29 @@ ssize_t readv(t_socket fd, const struct iovec *iov, int iovcnt);
 
 #endif
 
-#if defined(__SWITCH__) || defined(__3DS__) || defined(__WII__) || defined(__GC__) || defined(__WIIU__) || defined(__NDS__)
+#if defined(__SWITCH__) || defined(__3DS__) || defined(__wii__) || defined(__gamecube__) || defined(__WIIU__) || defined(__NDS__)
 
 #include <sys/types.h>
 
-#if defined(__3DS__) || defined(__WII__) || defined(__GC__) || defined(__WIIU__) || defined(__NDS__)
+#if defined(__wii__) || defined(__gamecube__)
+#ifdef HAVE_CONFIG_H
+#include "config.h"
+#endif
+#endif
+
+#if defined(__3DS__) || defined(__wii__) || defined(__gamecube__) || defined(__WIIU__) || defined(__NDS__)
+#if !defined(HAVE_STRUCT_IOVEC)
 struct iovec {
   void  *iov_base;
   size_t iov_len;
-};	
-#if defined(__WII__) || defined(__GC__) || defined(__NDS__)
+};
+#endif
+#if defined(__wii__) || defined(__gamecube__) || defined(__NDS__)
 #ifndef __NDS__
 #include <network.h>
 #endif
-#if !defined(HAVE_SOCKADDR_STORAGE)
-struct sockaddr_storage {
-#ifdef HAVE_SOCKADDR_SA_LEN
-	unsigned char ss_len;
-#endif /* HAVE_SOCKADDR_SA_LEN */
-	unsigned char ss_family;
-	unsigned char fill[127];
-};
-#endif
 
+#if !defined(HAVE_STRUCT_ADDRINFO)
 struct addrinfo {
 	int	ai_flags;	/* AI_PASSIVE, AI_CANONNAME */
 	int	ai_family;	/* PF_xxx */
@@ -654,6 +679,29 @@ struct addrinfo {
 	struct sockaddr *ai_addr;	/* binary address */
 	struct addrinfo *ai_next;	/* next structure in linked list */
 };
+#endif
+
+#if defined(__wii__) || defined(__gamecube__)
+#if !defined(HAVE_SOCKADDR_STORAGE)
+/*
+ * RFC 2553: protocol-independent placeholder for socket addresses.
+ * libogc's <network.h> has no sockaddr_storage of its own.
+ */
+#define _SS_MAXSIZE     128
+#define _SS_ALIGNSIZE   (sizeof(double))
+#define _SS_PAD1SIZE    (_SS_ALIGNSIZE - sizeof(unsigned short))
+#define _SS_PAD2SIZE    (_SS_MAXSIZE - sizeof(unsigned short) - \
+                            _SS_PAD1SIZE - _SS_ALIGNSIZE)
+
+struct sockaddr_storage {
+    unsigned char  ss_len;
+    unsigned char  ss_family;
+    char    __ss_pad1[_SS_PAD1SIZE];
+    double  __ss_align;
+    char    __ss_pad2[_SS_PAD2SIZE];
+};
+#endif
+#endif
 
 #endif
 #define sockaddr_in6 sockaddr_in
@@ -715,7 +763,7 @@ ssize_t writev(int fd, const struct iovec *iov, int iovcnt);
 ssize_t readv(int fd, const struct iovec *iov, int iovcnt);
 int getlogin_r(char *buf, size_t size);
 
-#if defined(__WII__) || defined(__GC__) || defined(__NDS__)
+#if defined(__wii__) || defined(__gamecube__) || defined(__NDS__)
 int smb2_getaddrinfo(const char *node, const char*service,
                 const struct addrinfo *hints,
                 struct addrinfo **res);
@@ -725,16 +773,41 @@ void smb2_freeaddrinfo(struct addrinfo *res);
 #define freeaddrinfo smb2_freeaddrinfo
 
 #ifndef __NDS__
-#define connect net_connect
-#define socket net_socket 
-#define setsockopt net_setsockopt
-s32 getsockopt(int sockfd, int level, int optname, void *optval, socklen_t *optlen);
-#define select net_select
-#define accept net_accept
-#define listen net_listen
-#define bind net_bind
+int smb2_net_connect(int fd, struct sockaddr *addr, socklen_t addrlen);
+int smb2_net_close(int fd);
+int smb2_net_fcntl(int fd, int cmd, ...);
+ssize_t smb2_net_write(int fd, const void *buf, size_t count);
+ssize_t smb2_net_read(int fd, void *buf, size_t count);
+int smb2_net_socket(int domain, int type, int protocol);
+int smb2_net_getsockopt(int fd, int level, int optname, void *optval, socklen_t *optlen);
+int smb2_net_setsockopt(int fd, int level, int optname, const void *optval, socklen_t optlen);
+int smb2_net_bind(int fd, struct sockaddr *addr, socklen_t addrlen);
+int smb2_net_listen(int fd, int backlog);
+int smb2_net_accept(int fd, struct sockaddr *addr, socklen_t *addrlen);
+int smb2_net_select(int nfds, fd_set *readfds, fd_set *writefds, fd_set *exceptfds, struct timeval *timeout);
+
+#define socket smb2_net_socket
+#define getsockopt smb2_net_getsockopt
+#define setsockopt smb2_net_setsockopt
+#define select smb2_net_select
+#define accept smb2_net_accept
+#define listen smb2_net_listen
+#define bind smb2_net_bind
+#define connect smb2_net_connect
+#define close smb2_net_close
+#define fcntl smb2_net_fcntl
+#define write smb2_net_write
+#define read  smb2_net_read
 #endif
 
+#if defined(__has_include)
+#if __has_include(<poll.h>)
+#include <poll.h>
+#define SMB2_HAVE_OGC_POLL_H 1
+#endif
+#endif
+
+#ifndef SMB2_HAVE_OGC_POLL_H
 struct pollfd {
         int fd;
         short events;
@@ -742,6 +815,7 @@ struct pollfd {
 };
 
 int poll(struct pollfd *fds, unsigned int nfds, int timo);
+#endif
 
 #endif
 
@@ -803,6 +877,14 @@ int getlogin_r(char *buf, size_t size);
 
 #ifndef EINVAL
 #define EINVAL 22
+#endif
+
+#ifndef ECANCELED
+#define ECANCELED 125
+#endif
+
+#ifndef typeof
+#define typeof __typeof__
 #endif
 
 #ifdef __cplusplus

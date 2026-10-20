@@ -55,19 +55,69 @@
 #include "libsmb2.h"
 #include "libsmb2-private.h"
 
+/*
+ * FILE_RENAME_INFORMATION and FILE_LINK_INFORMATION share the same wire
+ * format: ReplaceIfExists, Reserved, RootDirectory, FileNameLength, FileName.
+ */
+static int
+smb2_encode_new_name(struct smb2_context *smb2, struct smb2_pdu *pdu,
+                     struct smb2_iovec *iov, uint8_t replace_if_exist,
+                     const uint8_t *file_name)
+{
+        int i, len;
+        uint8_t *buf;
+        struct smb2_utf16 *name;
+
+        name = smb2_utf8_to_utf16((char *)file_name);
+        if (name == NULL) {
+                smb2_set_error(smb2, "Could not convert name into UTF-16");
+                return -1;
+        }
+        /* Convert '/' to '\' in-place before copying into the iovec */
+        for (i = 0; i < name->len; i++) {
+                if (name->val[i] == 0x002f) {
+                        name->val[i] = 0x005c;
+                }
+        }
+
+        len = 28 + name->len * 2;
+        smb2_set_uint32(iov, 4, len); /* buffer length */
+
+        buf = calloc(len, sizeof(uint8_t));
+        if (buf == NULL) {
+                smb2_set_error(smb2, "Failed to allocate set info data buffer");
+                free(name);
+                return -1;
+        }
+        iov = smb2_add_iovector(smb2, &pdu->out, buf, len, free);
+        if (iov == NULL) {
+                smb2_set_error(smb2, "Failed to add iovector for set-info new-name data");
+                free(name);
+                return -1;
+        }
+
+        smb2_set_uint8(iov, 0, replace_if_exist);
+        smb2_set_uint64(iov, 8, 0u);
+        smb2_set_uint32(iov, 16, name->len * 2);
+        memcpy(iov->buf + 20, name->val, name->len * 2);
+        free(name);
+
+        return 0;
+}
+
 static int
 smb2_encode_set_info_request(struct smb2_context *smb2,
                              struct smb2_pdu *pdu,
                              struct smb2_set_info_request *req)
 {
-        int i, len;
-        uint16_t ch;
+        int len;
         uint8_t *buf;
         struct smb2_iovec *iov;
         struct smb2_file_end_of_file_info *eofi;
         struct smb2_file_disposition_info *fdi;
         struct smb2_file_rename_info *rni;
-        struct smb2_utf16 *name;
+        struct smb2_file_link_info *lni;
+        struct smb2_security_descriptor *sd;
 
         len = SMB2_SET_INFO_REQUEST_SIZE & 0xfffffffe;
         buf = calloc(len, sizeof(uint8_t));
@@ -77,6 +127,10 @@ smb2_encode_set_info_request(struct smb2_context *smb2,
         }
 
         iov = smb2_add_iovector(smb2, &pdu->out, buf, len, free);
+        if (iov == NULL) {
+                smb2_set_error(smb2, "Failed to add iovector for set-info request header");
+                return -1;
+        }
 
         smb2_set_uint16(iov, 0, SMB2_SET_INFO_REQUEST_SIZE);
         smb2_set_uint8(iov, 2, req->info_type);
@@ -94,7 +148,11 @@ smb2_encode_set_info_request(struct smb2_context *smb2,
                                 return -1;
                         }
                         memcpy(buf, req->input_data, req->buffer_length);
-                        smb2_add_iovector(smb2, &pdu->out, buf, req->buffer_length, free);
+                        iov = smb2_add_iovector(smb2, &pdu->out, buf, req->buffer_length, free);
+                        if (iov == NULL) {
+                                smb2_set_error(smb2, "Failed to add iovector for set-info passthrough buffer");
+                                return -1;
+                        }
                 }
                 smb2_set_uint32(iov, 4, req->buffer_length);
                 smb2_set_uint16(iov, 8, req->buffer_offset);
@@ -116,6 +174,10 @@ smb2_encode_set_info_request(struct smb2_context *smb2,
                         }
                         iov = smb2_add_iovector(smb2, &pdu->out, buf, len,
                                                 free);
+                        if (iov == NULL) {
+                                smb2_set_error(smb2, "Failed to add iovector for set-info basic data");
+                                return -1;
+                        }
                         smb2_encode_file_basic_info(smb2, req->input_data, iov);
                         break;
                 case SMB2_FILE_END_OF_FILE_INFORMATION:
@@ -130,45 +192,29 @@ smb2_encode_set_info_request(struct smb2_context *smb2,
                         }
                         iov = smb2_add_iovector(smb2, &pdu->out, buf, len,
                                                 free);
+                        if (iov == NULL) {
+                                smb2_set_error(smb2, "Failed to add iovector for set-info EOF data");
+                                return -1;
+                        }
 
                         eofi = req->input_data;
                         smb2_set_uint64(iov, 0, eofi->end_of_file);
                         break;
                 case SMB2_FILE_RENAME_INFORMATION:
                         rni = req->input_data;
-
-                        name = smb2_utf8_to_utf16((char *)(rni->file_name));
-                        if (name == NULL) {
-                                smb2_set_error(smb2, "Could not convert name into UTF-16");
+                        if (smb2_encode_new_name(smb2, pdu, iov,
+                                                 rni->replace_if_exist,
+                                                 rni->file_name) < 0) {
                                 return -1;
                         }
-                        /* Convert '/' to '\' */
-                        for (i = 0; i < name->len; i++) {
-                                smb2_get_uint16(iov, i * 2, &ch);
-                                if (ch == 0x002f) {
-                                        smb2_set_uint16(iov, i * 2, 0x005c);
-                                }
-                        }
-
-                        len = 20 + name->len * 2;
-                        smb2_set_uint32(iov, 4, len); /* buffer length */
-
-                        buf = calloc(len, sizeof(uint8_t));
-                        if (buf == NULL) {
-                                smb2_set_error(smb2, "Failed to allocate set "
-                                               "info data buffer");
-                                free(name);
+                        break;
+                case SMB2_FILE_LINK_INFORMATION:
+                        lni = req->input_data;
+                        if (smb2_encode_new_name(smb2, pdu, iov,
+                                                 lni->replace_if_exist,
+                                                 lni->file_name) < 0) {
                                 return -1;
                         }
-                        iov = smb2_add_iovector(smb2, &pdu->out, buf, len,
-                                                free);
-
-                        smb2_set_uint8(iov, 0, rni->replace_if_exist);
-                        smb2_set_uint64(iov, 8, 0u);
-                        smb2_set_uint32(iov, 16, name->len * 2);
-                        memcpy(iov->buf + 20, name->val, name->len * 2);
-                        free(name);
-
                         break;
                 case SMB2_FILE_DISPOSITION_INFORMATION:
                         len = 1;
@@ -182,6 +228,10 @@ smb2_encode_set_info_request(struct smb2_context *smb2,
                         }
                         iov = smb2_add_iovector(smb2, &pdu->out, buf, len,
                                                 free);
+                        if (iov == NULL) {
+                                smb2_set_error(smb2, "Failed to add iovector for set-info disposition data");
+                                return -1;
+                        }
 
                         fdi = req->input_data;
                         smb2_set_uint8(iov, 0, fdi->delete_pending);
@@ -191,6 +241,29 @@ smb2_encode_set_info_request(struct smb2_context *smb2,
                                        "info_class %d/%d yet",
                                        req->info_type,
                                        req->file_info_class);
+                        return -1;
+                }
+                break;
+
+        case SMB2_0_INFO_SECURITY:
+                sd = req->input_data;
+
+                len = smb2_security_descriptor_size(sd);
+                smb2_set_uint32(iov, 4, len); /* buffer length */
+
+                buf = calloc(len, sizeof(uint8_t));
+                if (buf == NULL) {
+                        smb2_set_error(smb2, "Failed to allocate set "
+                                       "info data buffer");
+                        return -1;
+                }
+                iov = smb2_add_iovector(smb2, &pdu->out, buf, len, free);
+                if (iov == NULL) {
+                        smb2_set_error(smb2, "Failed to add iovector for set-info security data");
+                        return -1;
+                }
+
+                if (smb2_encode_security_descriptor(smb2, sd, iov)) {
                         return -1;
                 }
                 break;
@@ -246,6 +319,10 @@ smb2_encode_set_info_reply(struct smb2_context *smb2,
         }
 
         iov = smb2_add_iovector(smb2, &pdu->out, buf, len, free);
+        if (iov == NULL) {
+                smb2_set_error(smb2, "Failed to add iovector for set-info reply header");
+                return -1;
+        }
         smb2_set_uint16(iov, 0, SMB2_SET_INFO_REPLY_SIZE);
         return 0;
 }
@@ -324,8 +401,19 @@ smb2_process_set_info_request_variable(struct smb2_context *smb2,
         struct smb2_set_info_request *req = (struct smb2_set_info_request*)pdu->payload;
         struct smb2_iovec *iov = &smb2->in.iov[smb2->in.niov - 1];
 
-        if (!smb2->passthrough) {
-                smb2_set_error(smb2, "can not interpret set-info buffers yet");
+        /*
+         * We have no decoders for the set-info payloads, but a server still
+         * has to answer them and windows clients send them all the time, so
+         * refusing everything unless the application asked for passthrough
+         * made libsmb2 unusable as a server for those clients.
+         *
+         * Hand the raw buffer over instead. The application knows which
+         * structure it is from info_type and file_info_class, and how much
+         * of it there is from buffer_length.
+         */
+        if (iov->len < req->buffer_length) {
+                smb2_set_error(smb2, "Set-info buffer is shorter than the "
+                               "advertised length");
                 return -1;
         }
         req->input_data = iov->buf;

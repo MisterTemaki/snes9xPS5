@@ -39,9 +39,10 @@ constexpr int kConnectTimeoutMs = 4500; // the whole Connect(), every mount atte
 constexpr int kExportsTimeoutMs = 2000; // asking the server which exports it has (blocking, error path only)
 constexpr size_t kMaxRead = 1u << 20;   // the Backend contract's limit for one Pread
 // One READ request is at most this long, and a Pread keeps up to kMaxRead / kReadChunk of them in flight.
-// libnfs 6.0.2 sends a single request per call (it clamps to the negotiated size) and cannot reassemble an
-// RPC reply the server split into fragments, which servers on libtirpc (unfs3) do above 256 KiB: a smaller
-// request keeps those servers working and the pipelining keeps the wire busy.
+// libnfs 6.0.2, when this was written, sent a single request per call (it clamps to the negotiated size) and
+// could not reassemble an RPC reply the server split into fragments, which servers on libtirpc (unfs3) do above
+// 256 KiB: a smaller request keeps those servers working and the pipelining keeps the wire busy. Kept as it is
+// on later libnfs (not rechecked against unfs3 here).
 constexpr size_t kReadChunk = 128u << 10;
 constexpr int kMaxMountTries = 8;       // export, then one folder higher each time
 

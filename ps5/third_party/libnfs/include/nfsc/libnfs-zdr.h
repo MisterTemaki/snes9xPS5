@@ -127,7 +127,7 @@ struct opaque_verf {
         /* GSS */
         struct gss_ctx_id_struct *gss_context;
 };
-extern struct opaque_verf _null_auth;
+extern struct opaque_verf libnfs_null_auth;
 
 struct AUTH {
 	struct opaque_cred	ah_cred;
@@ -281,6 +281,9 @@ bool_t libnfs_zdr_string(ZDR *zdrs, char **strp, uint32_t maxsize);
 #define zdr_array libnfs_zdr_array
 bool_t libnfs_zdr_array(ZDR *zdrs, char **arrp, uint32_t *size, uint32_t maxsize, uint32_t elsize, zdrproc_t proc);
 
+#define zdr_vector libnfs_zdr_vector
+bool_t libnfs_zdr_vector(ZDR *zdrs, char *arrp, uint32_t size, uint32_t elsize, zdrproc_t proc);
+
 #define zdr_setpos libnfs_zdr_setpos
 bool_t libnfs_zdr_setpos(ZDR *zdrs, uint32_t pos);
 
@@ -295,6 +298,12 @@ char *libnfs_zdr_getptr(ZDR *zdrs);
         
 #define zdr_free libnfs_zdr_free
 void libnfs_zdr_free(zdrproc_t proc, char *objp);
+
+/*
+ * Allocate memory owned by the ZDR, released by zdr_destroy(). Used by the
+ * decoders that have to build linked structures.
+ */
+void *zdr_malloc(ZDR *zdrs, uint32_t size);
 
 struct rpc_context;
 

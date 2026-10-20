@@ -70,6 +70,7 @@ void rpc_reset_queue(struct rpc_queue *q)
 {
 	q->head = NULL;
 	q->tail = NULL;
+	q->tailp = NULL;
 }
 
 /*
@@ -90,34 +91,140 @@ void rpc_enqueue(struct rpc_queue *q, struct rpc_pdu *pdu)
 }
 
 /*
+ * Add pdu to the head of outqueue.
+ * If the pdu currently at the head has been partially written to the socket
+ * we cannot displace it, as that would interleave bytes from two different
+ * PDUs on the wire, so in that case we add pdu right after the head.
+ */
+void rpc_add_to_outqueue_head(struct rpc_context *rpc, struct rpc_pdu *pdu)
+{
+        if (rpc->outqueue.head == NULL) {
+                assert(rpc->outqueue.tail == NULL);
+                assert(rpc->outqueue.tailp == NULL);
+                assert(rpc->stats.outqueue_len == 0);
+
+                rpc->outqueue.head = rpc->outqueue.tail = pdu;
+                pdu->next = NULL;
+                if (pdu->is_high_prio) {
+                        rpc->outqueue.tailp = pdu;
+                }
+        } else {
+                assert(rpc->stats.outqueue_len > 0);
+                assert(rpc->outqueue.tail->next == NULL);
+                assert(pdu != rpc->outqueue.head);
+                assert(pdu != rpc->outqueue.tail);
+                assert(pdu != rpc->outqueue.tailp);
+
+                if (rpc->outqueue.head->out.num_done == 0) {
+                        /*
+                         * Head is untouched, safe to displace it. A high prio
+                         * pdu placed at the head starts the high prio run, so
+                         * it becomes tailp only if there is no high prio run
+                         * yet.
+                         */
+                        pdu->next = rpc->outqueue.head;
+                        rpc->outqueue.head = pdu;
+                        if (pdu->is_high_prio && rpc->outqueue.tailp == NULL) {
+                                rpc->outqueue.tailp = pdu;
+                        }
+                } else {
+                        /*
+                         * Head is partially sent, add right after it. If the
+                         * high prio run was empty or ended at the head, pdu
+                         * now terminates it.
+                         */
+                        if (pdu->is_high_prio &&
+                            (rpc->outqueue.tailp == NULL ||
+                             rpc->outqueue.tailp == rpc->outqueue.head)) {
+                                rpc->outqueue.tailp = pdu;
+                        }
+                        pdu->next = rpc->outqueue.head->next;
+                        rpc->outqueue.head->next = pdu;
+                }
+
+                if (pdu->next == NULL) {
+                        rpc->outqueue.tail = pdu;
+                }
+        }
+
+        assert(rpc->outqueue.tail->next == NULL);
+        assert(rpc->outqueue.tail->is_high_prio ==
+                (rpc->outqueue.tailp == rpc->outqueue.tail));
+
+        if (rpc->stats.outqueue_len++ == 0) {
+                /*
+                 * First pdu on a previously empty outqueue, so the service
+                 * thread may be sitting in poll(). Nudge it.
+                 */
+                rpc_wakeup_service_thread(rpc);
+        }
+}
+
+/*
+ * High priority pdus are added right after tailp, i.e., behind the already
+ * queued high priority pdus but ahead of every low priority pdu.
+ */
+void rpc_add_to_outqueue_highp(struct rpc_context *rpc, struct rpc_pdu *pdu)
+{
+        pdu->is_high_prio = TRUE;
+
+        if (rpc->outqueue.tailp == NULL) {
+                /* First high priority pdu, add to the head. */
+                rpc_add_to_outqueue_head(rpc, pdu);
+                assert(rpc->outqueue.tailp != NULL);
+        } else {
+                assert(rpc->outqueue.head != NULL);
+                assert(rpc->outqueue.tail != NULL);
+                assert(rpc->stats.outqueue_len > 0);
+                assert(pdu != rpc->outqueue.head);
+                assert(pdu != rpc->outqueue.tail);
+                assert(pdu != rpc->outqueue.tailp);
+
+                pdu->next = rpc->outqueue.tailp->next;
+                rpc->outqueue.tailp->next = pdu;
+                if (rpc->outqueue.tail == rpc->outqueue.tailp) {
+                        rpc->outqueue.tail = pdu;
+                }
+                rpc->outqueue.tailp = pdu;
+                rpc->stats.outqueue_len++;
+        }
+}
+
+/*
+ * Low priority pdus are added to the tail.
+ */
+void rpc_add_to_outqueue_lowp(struct rpc_context *rpc, struct rpc_pdu *pdu)
+{
+        pdu->is_high_prio = FALSE;
+        rpc_enqueue(&rpc->outqueue, pdu);
+        if (rpc->stats.outqueue_len++ == 0) {
+                /*
+                 * First pdu on a previously empty outqueue, so the service
+                 * thread may be sitting in poll(). Nudge it.
+                 */
+                rpc_wakeup_service_thread(rpc);
+        }
+
+        assert(rpc->outqueue.head != NULL);
+        assert(rpc->outqueue.tail != NULL);
+        assert(pdu->next == NULL);
+}
+
+/*
  * Return pdu to outqueue to be retransmitted.
- * If there are more than one PDUs already in outqueue, this adds it right
- * after the head, not at the head. The idea is that the PDU at the head
- * may be half-sent, so it's not safe to replace the head. Also since we
- * usually want this pdu to be sent immediately we don't want to add it to
- * the end.
- * Even when it's safe to add to head (from rpc_reconnect_requeue()), it's ok
- * to add after head.
+ * It adds the pdu to the head of outqueue, unless the head pdu is partially
+ * sent, in which case it adds it right after the head pdu.
  */
 void rpc_return_to_outqueue(struct rpc_context *rpc, struct rpc_pdu *pdu)
 {
-        if (rpc->outqueue.head == NULL) {
-                rpc->outqueue.head = rpc->outqueue.tail = pdu;
-                pdu->next = NULL;
-        } else if (rpc->outqueue.head == rpc->outqueue.tail) {
-                rpc->outqueue.head->next = pdu;
-                rpc->outqueue.tail = pdu;
-                pdu->next = NULL;
-        } else {
-                pdu->next = rpc->outqueue.head->next;
-                rpc->outqueue.head->next = pdu;
-        }
+        rpc_add_to_outqueue_head(rpc, pdu);
 
         /*
          * Only already transmitted PDUs are added back to outqueue, so sending
          * it out will entail a retransmit.
          */
         INC_STATS(rpc, num_retransmitted);
+        pdu->is_retransmitted = 1;
 
         /*
          * Reset output and input cursors as we have to re-send the whole pdu
@@ -147,9 +254,19 @@ int rpc_remove_pdu_from_queue(struct rpc_queue *q, struct rpc_pdu *remove_pdu)
                  */
                 if (q->head == remove_pdu) {
                         q->head = remove_pdu->next;
+
+                        /*
+                         * If tailp pointed at the head it was the only high
+                         * priority pdu, so the high priority run is now empty.
+                         */
+                        if (q->tailp == remove_pdu) {
+                                q->tailp = NULL;
+                        }
+
                         if (q->tail == remove_pdu) {
                                 assert(remove_pdu->next == NULL);
                                 q->tail = NULL;
+                                assert(q->tailp == NULL);
                                 assert(q->head == NULL);
                         } else {
                                 assert(q->head != NULL);
@@ -179,16 +296,47 @@ int rpc_remove_pdu_from_queue(struct rpc_queue *q, struct rpc_pdu *remove_pdu)
                         q->tail = pdu;
                 }
 
+                /*
+                 * remove_pdu terminated the high priority run, so the run now
+                 * ends at its predecessor, if that is itself high priority,
+                 * else the run is empty.
+                 */
+                if (q->tailp == remove_pdu) {
+                        assert(remove_pdu->is_high_prio);
+                        q->tailp = pdu->is_high_prio ? pdu : NULL;
+                }
+
                 remove_pdu->next = NULL;
 
                 return 1;
         } else {
                 assert(q->tail == NULL);
+                assert(q->tailp == NULL);
                 /* not found */
                 return 0;
         }
 }
 
+static int rpc_remove_pdu_from_queue_unlocked(struct rpc_context *rpc,
+                                              struct rpc_queue *q,
+                                              struct rpc_pdu *remove_pdu)
+{
+        int ret;
+
+#ifdef HAVE_MULTITHREADING
+        if (rpc->multithreading_enabled) {
+                nfs_mt_mutex_lock(&rpc->rpc_mutex);
+        }
+#endif /* HAVE_MULTITHREADING */
+        ret = rpc_remove_pdu_from_queue(q, remove_pdu);
+#ifdef HAVE_MULTITHREADING
+        if (rpc->multithreading_enabled) {
+                nfs_mt_mutex_unlock(&rpc->rpc_mutex);
+        }
+#endif /* HAVE_MULTITHREADING */
+        return ret;
+}
+        
 unsigned int rpc_hash_xid(struct rpc_context *rpc, uint32_t xid)
 {
 	return (xid * 7919) % rpc->num_hashes;
@@ -225,8 +373,12 @@ static struct rpc_pdu *rpc_allocate_reply_pdu(struct rpc_context *rpc,
         /* Add an iovector for the record marker. Ignored for UDP */
         rpc_add_iovector(rpc, &pdu->out, pdu->outdata.data, 4, NULL);
 
+        /*
+         * The buffer starts 4 bytes into the allocation, so it is 4 bytes
+         * shorter than what was asked for, as rpc_allocate_pdu2() has it.
+         */
 	zdrmem_create(&pdu->zdr, &pdu->outdata.data[4],
-                      ZDR_ENCODEBUF_MINSIZE + alloc_hint, ZDR_ENCODE);
+                      ZDR_ENCODEBUF_MINSIZE + alloc_hint - 4, ZDR_ENCODE);
 
 	if (zdr_replymsg(rpc, &pdu->zdr, res) == 0) {
 		rpc_set_error(rpc, "zdr_replymsg failed with %s",
@@ -240,10 +392,13 @@ static struct rpc_pdu *rpc_allocate_reply_pdu(struct rpc_context *rpc,
         rpc_add_iovector(rpc, &pdu->out, &pdu->outdata.data[4],
                          zdr_getpos(&pdu->zdr), NULL);
 
+        /* Freshly allocated PDU cannot be retransmitted */
+        assert(!pdu->is_retransmitted);
+
 	return pdu;
 }
 
-struct rpc_pdu *rpc_allocate_pdu2(struct rpc_context *rpc, int program, int version, int procedure, rpc_cb cb, void *private_data, zdrproc_t zdr_decode_fn, int zdr_decode_bufsize, size_t alloc_hint, int iovcnt_hint)
+struct rpc_pdu *rpc_allocate_pdu2_auth(struct rpc_context *rpc, int program, int version, int procedure, rpc_cb cb, void *private_data, zdrproc_t zdr_decode_fn, int zdr_decode_bufsize, size_t alloc_hint, int iovcnt_hint, const struct AUTH *auth)
 {
 	struct rpc_pdu *pdu;
 	int pdu_size;
@@ -264,6 +419,13 @@ struct rpc_pdu *rpc_allocate_pdu2(struct rpc_context *rpc, int program, int vers
 #endif /* HAVE_TLS */
 
 	assert(rpc->magic == RPC_CONTEXT_MAGIC);
+	if (auth == NULL) {
+		auth = rpc->auth;
+	}
+	if (auth == NULL) {
+		rpc_set_error(rpc, "No RPC authentication available for request");
+		return NULL;
+	}
 
 	/* Since we already know how much buffer we need for the decoding
 	 * we can just piggyback in the same alloc as for the pdu.
@@ -319,7 +481,7 @@ struct rpc_pdu *rpc_allocate_pdu2(struct rpc_context *rpc, int program, int vers
         rpc_add_iovector(rpc, &pdu->out, pdu->outdata.data, 4, NULL);
 
         zdrmem_create(&pdu->zdr, &pdu->outdata.data[4],
-                      ZDR_ENCODEBUF_MINSIZE + alloc_hint, ZDR_ENCODE);
+                      ZDR_ENCODEBUF_MINSIZE + alloc_hint - 4, ZDR_ENCODE);
 	memset(&pdu->msg, 0, sizeof(struct rpc_msg));
 	pdu->msg.xid                = pdu->xid;
         pdu->msg.direction          = CALL;
@@ -343,10 +505,10 @@ struct rpc_pdu *rpc_allocate_pdu2(struct rpc_context *rpc, int program, int vers
 		 */
 		pdu->do_not_retry                = TRUE;
 	} else {
-		pdu->msg.body.cbody.cred    = rpc->auth->ah_cred;
+		pdu->msg.body.cbody.cred    = auth->ah_cred;
 	}
 
-	pdu->msg.body.cbody.verf    = rpc->auth->ah_verf;
+	pdu->msg.body.cbody.verf    = auth->ah_verf;
 
 #ifdef HAVE_TLS
 	/* Should not be already set */
@@ -447,6 +609,9 @@ struct rpc_pdu *rpc_allocate_pdu2(struct rpc_context *rpc, int program, int vers
         rpc_add_iovector(rpc, &pdu->out, &pdu->outdata.data[4],
                          zdr_getpos(&pdu->zdr), NULL);
 
+        /* Freshly allocated PDU cannot be retransmitted */
+        assert(!pdu->is_retransmitted);
+
 	return pdu;
  failed:
         rpc_set_error(rpc, "zdr_callmsg failed with %s",
@@ -454,7 +619,15 @@ struct rpc_pdu *rpc_allocate_pdu2(struct rpc_context *rpc, int program, int vers
         zdr_destroy(&pdu->zdr);
  failed2:
         free(pdu);
-        return NULL;
+	return NULL;
+}
+
+struct rpc_pdu *rpc_allocate_pdu2(struct rpc_context *rpc, int program, int version, int procedure, rpc_cb cb, void *private_data, zdrproc_t zdr_decode_fn, int zdr_decode_bufsize, size_t alloc_hint, int iovcnt_hint)
+{
+	return rpc_allocate_pdu2_auth(rpc, program, version, procedure, cb,
+	                              private_data, zdr_decode_fn,
+	                              zdr_decode_bufsize, alloc_hint,
+	                              iovcnt_hint, NULL);
 }
 
 struct rpc_pdu *rpc_allocate_pdu(struct rpc_context *rpc, int program, int version, int procedure, rpc_cb cb, void *private_data, zdrproc_t zdr_decode_fn, int zdr_decode_bufsize)
@@ -469,6 +642,20 @@ void rpc_free_pdu(struct rpc_context *rpc, struct rpc_pdu *pdu)
 #endif /* HAVE_LIBKRB5 */
 
 	assert(rpc->magic == RPC_CONTEXT_MAGIC);
+
+#ifdef HAVE_NFS4_2
+        /*
+         * Hand back the NFSv4.2 session slot this COMPOUND was holding. This
+         * is the one place every pdu passes through, whether it completed,
+         * errored, timed out or was cancelled, so it is the only place the
+         * slot can be released from without leaking it on some path.
+         */
+        if (pdu->nfs4_slot_held) {
+                pdu->nfs4_slot_held = 0;
+                nfs4_session_put_slot(rpc, pdu->nfs4_slot,
+                                      !pdu->nfs4_slot_sent);
+        }
+#endif /* HAVE_NFS4_2 */
 
 	if (pdu->zdr_decode_buf != NULL) {
 		zdr_free(pdu->zdr_decode_fn, pdu->zdr_decode_buf);
@@ -545,18 +732,46 @@ void pdu_set_timeout(struct rpc_context *rpc, struct rpc_pdu *pdu, uint64_t now_
 		pdu->major_timeout += 1000;
 		pdu->timeout += 1000;
 #endif
-	}
+                /* Never less than pdu->timeout */
+                if (pdu->major_timeout < pdu->timeout) {
+                        pdu->major_timeout = pdu->timeout;
+                }
+        }
 }
 
-int rpc_queue_pdu(struct rpc_context *rpc, struct rpc_pdu *pdu)
+/*
+ * Queue pdu to rpc->outqueue.
+ * The PDU is queued at the tail of outqueue unless prio is PDU_Q_PRIO_HI, in
+ * which case it is queued ahead of all the low priority PDUs already queued
+ * (but behind the high priority ones, so high priority PDUs keep their
+ * relative order).
+ *
+ * High priority queueing is useful for non-bulk RPCs so that they can be
+ * promptly sent out instead of waiting behind a possibly large number of
+ * queued WRITE RPCs. A backlog of WRITEs can take a very long time to drain,
+ * making commands like stat/ls/find appear to hang.
+ *
+ * Note that this only reorders PDUs that have not been sent yet. Callers that
+ * depend on ordering between two RPCs must wait for the first to complete
+ * before issuing the second, exactly as before.
+ */
+int rpc_queue_pdu2(struct rpc_context *rpc, struct rpc_pdu *pdu, int prio)
 {
 	int i, size = 0, pos;
         uint32_t recordmarker;
+        /*
+         * A PDU that lands at the head of the outqueue can be sent inline
+         * from here, there is no partially sent PDU ahead of it to interleave
+         * with.
+         */
+        bool_t send_now;
 #ifdef HAVE_LIBKRB5
         uint32_t maj, min, val, len;
         gss_buffer_desc message_buffer, output_token;
         char *buf;
 #endif /* HAVE_LIBKRB5 */
+
+        assert(prio == PDU_Q_PRIO_LOW || prio == PDU_Q_PRIO_HI);
 
 	assert(rpc->magic == RPC_CONTEXT_MAGIC);
 
@@ -674,7 +889,10 @@ int rpc_queue_pdu(struct rpc_context *rpc, struct rpc_pdu *pdu)
         pdu->pdu_stats.vers = pdu->msg.body.cbody.vers;
         pdu->pdu_stats.proc = pdu->msg.body.cbody.proc;
         pdu->pdu_stats.response_time = 0;
-        
+
+        /* 4 bytes for the recordmarker */
+        pdu->req_size = size + 4;
+
 	/*
 	 * For udp we dont queue, we just send it straight away.
 	 *
@@ -687,6 +905,18 @@ int rpc_queue_pdu(struct rpc_context *rpc, struct rpc_pdu *pdu)
 	 * TLS handshake is completed and the connection is secure.
 	 * Sending inline here makes the handling simpler in rpc_service().
 	 */
+        if (rpc->is_udp && rpc->is_server_context) {
+                if (sendto(rpc->fd, pdu->zdr.buf, size, MSG_DONTWAIT,
+                           (struct sockaddr *)&rpc->udp_dest,
+                           sizeof(rpc->udp_dest)) < 0) {
+                        rpc_set_error(rpc, "Sendto failed with errno %s", strerror(errno));
+                        rpc_free_pdu(rpc, pdu);
+                        return -1;
+                }
+                rpc_free_pdu(rpc, pdu);
+                return 0;
+        }
+
 	if (rpc->is_udp != 0
 #ifdef HAVE_TLS
 	    || pdu->expect_starttls
@@ -705,17 +935,34 @@ int rpc_queue_pdu(struct rpc_context *rpc, struct rpc_pdu *pdu)
 		}
 #endif
 
+		hash = rpc_hash_xid(rpc, pdu->xid);
+
+#ifdef HAVE_MULTITHREADING
+                if (rpc->multithreading_enabled) {
+                        nfs_mt_mutex_lock(&rpc->rpc_mutex);
+                }
+#endif /* HAVE_MULTITHREADING */
+                rpc_enqueue(&rpc->waitpdu[hash], pdu);
+                rpc->waitpdu_len++;
+#ifdef HAVE_MULTITHREADING
+                if (rpc->multithreading_enabled) {
+                        nfs_mt_mutex_unlock(&rpc->rpc_mutex);
+                }
+#endif /* HAVE_MULTITHREADING */
+
                 if (rpc->is_broadcast || rpc->is_server_context) {
                         if (sendto(rpc->fd, pdu->zdr.buf, size, MSG_DONTWAIT,
                                    (struct sockaddr *)&rpc->udp_dest,
                                    sizeof(rpc->udp_dest)) < 0) {
                                 rpc_set_error(rpc, "Sendto failed with errno %s", strerror(errno));
+                                rpc_remove_pdu_from_queue_unlocked(rpc, &rpc->waitpdu[hash], pdu);
                                 rpc_free_pdu(rpc, pdu);
                                 return -1;
                         }
                         if (rpc->is_server_context) {
-                            rpc_free_pdu(rpc, pdu);
-                            return 0;
+                                rpc_remove_pdu_from_queue_unlocked(rpc, &rpc->waitpdu[hash], pdu);
+                                rpc_free_pdu(rpc, pdu);
+                                return 0;
                         }
                 } else {
                         /*
@@ -737,24 +984,12 @@ int rpc_queue_pdu(struct rpc_context *rpc, struct rpc_pdu *pdu)
                         }
                         if (writev(rpc->fd, iovp, iovn) < 0) {
                                 rpc_set_error(rpc, "Sendto failed with errno %s", strerror(errno));
+                                rpc_remove_pdu_from_queue_unlocked(rpc, &rpc->waitpdu[hash], pdu);
                                 rpc_free_pdu(rpc, pdu);
                                 return -1;
                         }
                 }
 
-		hash = rpc_hash_xid(rpc, pdu->xid);
-#ifdef HAVE_MULTITHREADING
-                if (rpc->multithreading_enabled) {
-                        nfs_mt_mutex_lock(&rpc->rpc_mutex);
-                }
-#endif /* HAVE_MULTITHREADING */
-		rpc_enqueue(&rpc->waitpdu[hash], pdu);
-		rpc->waitpdu_len++;
-#ifdef HAVE_MULTITHREADING
-                if (rpc->multithreading_enabled) {
-                        nfs_mt_mutex_unlock(&rpc->rpc_mutex);
-                }
-#endif /* HAVE_MULTITHREADING */
 		return 0;
 	}
 
@@ -766,17 +1001,33 @@ int rpc_queue_pdu(struct rpc_context *rpc, struct rpc_pdu *pdu)
 #endif /* HAVE_MULTITHREADING */
         /* Fresh PDU being queued to outqueue, num_done must be 0 */
         assert(pdu->out.num_done == 0);
-        rpc_enqueue(&rpc->outqueue, pdu);
+
+        if (prio == PDU_Q_PRIO_HI) {
+                rpc_add_to_outqueue_highp(rpc, pdu);
+        } else {
+                rpc_add_to_outqueue_lowp(rpc, pdu);
+        }
+
+        /*
+         * Sample this under the lock, another thread may queue ahead of us
+         * as soon as we drop it.
+         */
+        send_now = (rpc->outqueue.head == pdu);
 #ifdef HAVE_MULTITHREADING
         if (rpc->multithreading_enabled) {
                 nfs_mt_mutex_unlock(&rpc->rpc_mutex);
         }
 #endif /* HAVE_MULTITHREADING */
-        if (rpc->outqueue.head == pdu) {
+        if (send_now) {
                 rpc_write_to_socket(rpc);
         }
 
 	return 0;
+}
+
+int rpc_queue_pdu(struct rpc_context *rpc, struct rpc_pdu *pdu)
+{
+        return rpc_queue_pdu2(rpc, pdu, PDU_Q_PRIO_LOW);
 }
 
 static int rpc_process_reply(struct rpc_context *rpc, ZDR *zdr)
@@ -792,7 +1043,7 @@ static int rpc_process_reply(struct rpc_context *rpc, ZDR *zdr)
 	INC_STATS(rpc, num_resp_rcvd);
 
 	memset(&msg, 0, sizeof(struct rpc_msg));
-	msg.body.rbody.reply.areply.verf = _null_auth;
+	msg.body.rbody.reply.areply.verf = libnfs_null_auth;
 	if (pdu->zdr_decode_bufsize > 0) {
 		pdu->zdr_decode_buf = (char *)pdu + PAD_TO_8_BYTES(sizeof(struct rpc_pdu));
 	}
@@ -876,7 +1127,17 @@ static int rpc_process_reply(struct rpc_context *rpc, ZDR *zdr)
 #endif /* HAVE_TLS */
 
 #ifdef HAVE_LIBKRB5
-                if (msg.body.rbody.reply.areply.verf.oa_flavor == AUTH_GSS) {
+                /*
+                 * The verifier flavor is chosen by the server, so on its own
+                 * it says nothing about how this reply should be read. Only
+                 * act on it once we know the connection actually negotiated
+                 * GSS; otherwise a server could steer the reply to an
+                 * ordinary AUTH_UNIX request down the GSS path below. On a
+                 * non-GSS connection the verifier is simply not interesting,
+                 * so ignore it rather than failing the RPC.
+                 */
+                if (rpc->sec != RPC_SEC_UNDEFINED &&
+                    msg.body.rbody.reply.areply.verf.oa_flavor == AUTH_GSS) {
                         uint32_t maj, min;
                         gss_buffer_desc message_buffer, token_buffer;
                         uint32_t seqno;
@@ -885,7 +1146,27 @@ static int rpc_process_reply(struct rpc_context *rpc, ZDR *zdr)
                          * that finished authentication.
                          */
                         if (pdu->gss_seqno == 0) {
-                                struct rpc_gss_init_res *gir = (struct rpc_gss_init_res *)pdu->zdr_decode_buf;
+                                struct rpc_gss_init_res *gir;
+
+                                /*
+                                 * Only the GSS init NULL RPC decodes into an
+                                 * rpc_gss_init_res. Any other PDU reaching
+                                 * here would have us reinterpret an unrelated
+                                 * decoded result as one, and dereference
+                                 * handle_val, a pointer read out of whatever
+                                 * that result happens to contain.
+                                 */
+                                if (pdu->zdr_decode_buf == NULL ||
+                                    pdu->zdr_decode_fn !=
+                                    (zdrproc_t)zdr_rpc_gss_init_res) {
+                                        status = RPC_STATUS_ERROR;
+                                        data = "Server sent an AUTH_GSS "
+                                               "verifier for a reply that is "
+                                               "not a GSS init response";
+                                        break;
+                                }
+
+                                gir = (struct rpc_gss_init_res *)(void *)pdu->zdr_decode_buf;
 
                                 rpc->context_len = gir->handle.handle_len;
                                 free(rpc->context);
@@ -993,9 +1274,40 @@ static int rpc_process_reply(struct rpc_context *rpc, ZDR *zdr)
         }
 
         if (status != 0xffffffff) {
+#ifdef HAVE_NFS4_2
+                if (status == RPC_STATUS_SUCCESS && pdu->nfs4_delay_maxres &&
+                    nfs4_pdu_retry_delay(rpc, pdu, data)) {
+                        return 0;
+                }
+#endif
                 pdu->cb(rpc, status, data, pdu->private_data);
         }
 	return 0;
+}
+
+struct _rpc_msg {
+        struct rpc_msg call;
+        struct sockaddr_storage udp_src;
+};
+
+struct rpc_msg *rpc_copy_deferred_call(struct rpc_context *rpc,
+                                       struct rpc_msg *call)
+{
+        struct _rpc_msg *c;
+
+        c = malloc(sizeof(struct _rpc_msg));
+        if (c == NULL) {
+                return NULL;
+        }
+        memcpy(c, call, sizeof(struct _rpc_msg));
+
+        return &c->call;
+}
+
+void rpc_free_deferred_call(struct rpc_context *rpc,
+                            struct rpc_msg *call)
+{
+        free(call);
 }
 
 static int rpc_send_error_reply(struct rpc_context *rpc,
@@ -1004,6 +1316,7 @@ static int rpc_send_error_reply(struct rpc_context *rpc,
                                 int min_vers, int max_vers)
 {
         struct rpc_pdu *pdu;
+        struct _rpc_msg *c = (struct _rpc_msg *)call;
         struct rpc_msg res;
 
 	assert(rpc->magic == RPC_CONTEXT_MAGIC);
@@ -1014,12 +1327,12 @@ static int rpc_send_error_reply(struct rpc_context *rpc,
         res.body.rbody.stat                          = MSG_ACCEPTED;
         res.body.rbody.reply.areply.reply_data.mismatch_info.low  = min_vers;
         res.body.rbody.reply.areply.reply_data.mismatch_info.high = max_vers;
-	res.body.rbody.reply.areply.verf             = _null_auth;
+	res.body.rbody.reply.areply.verf             = libnfs_null_auth;
 	res.body.rbody.reply.areply.stat             = err;
 
         if (rpc->is_udp) {
                 /* send the reply back to the client */
-                memcpy(&rpc->udp_dest, &rpc->udp_src, sizeof(rpc->udp_dest));
+                memcpy(&rpc->udp_dest, &c->udp_src, sizeof(rpc->udp_dest));
         }
 
         pdu  = rpc_allocate_reply_pdu(rpc, &res, 0);
@@ -1038,6 +1351,7 @@ int rpc_send_reply(struct rpc_context *rpc,
                    int alloc_hint)
 {
         struct rpc_pdu *pdu;
+        struct _rpc_msg *c = (struct _rpc_msg *)call;
         struct rpc_msg res;
 
 	assert(rpc->magic == RPC_CONTEXT_MAGIC);
@@ -1046,7 +1360,7 @@ int rpc_send_reply(struct rpc_context *rpc,
 	res.xid                                      = call->xid;
         res.direction                                = REPLY;
         res.body.rbody.stat                          = MSG_ACCEPTED;
-	res.body.rbody.reply.areply.verf             = _null_auth;
+	res.body.rbody.reply.areply.verf             = libnfs_null_auth;
 	res.body.rbody.reply.areply.stat             = SUCCESS;
 
         res.body.rbody.reply.areply.reply_data.results.where = reply;
@@ -1054,7 +1368,7 @@ int rpc_send_reply(struct rpc_context *rpc,
 
         if (rpc->is_udp) {
                 /* send the reply back to the client */
-                memcpy(&rpc->udp_dest, &rpc->udp_src, sizeof(rpc->udp_dest));
+                memcpy(&rpc->udp_dest, &c->udp_src, sizeof(rpc->udp_dest));
         }
 
         pdu  = rpc_allocate_reply_pdu(rpc, &res, alloc_hint);
@@ -1069,20 +1383,23 @@ int rpc_send_reply(struct rpc_context *rpc,
 
 static int rpc_process_call(struct rpc_context *rpc, ZDR *zdr)
 {
-	struct rpc_msg call;
+	struct _rpc_msg c;
         struct rpc_endpoint *endpoint;
         int i, min_version = 0, max_version = 0, found_program = 0;
 
 	assert(rpc->magic == RPC_CONTEXT_MAGIC);
 
-	memset(&call, 0, sizeof(struct rpc_msg));
-	if (zdr_callmsg(rpc, zdr, &call) == 0) {
+        memset(&c.call, 0, sizeof(struct rpc_msg));
+        if (rpc->is_udp) {
+                memcpy(&c.udp_src, &rpc->udp_src, sizeof(rpc->udp_src));
+        }
+	if (zdr_callmsg(rpc, zdr, &c.call) == 0) {
 		rpc_set_error(rpc, "Failed to decode CALL message. %s",
                               rpc_get_error(rpc));
-                return rpc_send_error_reply(rpc, &call, GARBAGE_ARGS, 0, 0);
+                return rpc_send_error_reply(rpc, &c.call, GARBAGE_ARGS, 0, 0);
         }
         for (endpoint = rpc->endpoints; endpoint; endpoint = endpoint->next) {
-                if (call.body.cbody.prog == endpoint->program) {
+                if (c.call.body.cbody.prog == endpoint->program) {
                         if (!found_program) {
                                 min_version = max_version = endpoint->version;
                         }
@@ -1093,7 +1410,7 @@ static int rpc_process_call(struct rpc_context *rpc, ZDR *zdr)
                                 max_version = endpoint->version;
                         }
                         found_program = 1;
-                        if (call.body.cbody.vers == endpoint->version) {
+                        if (c.call.body.cbody.vers == endpoint->version) {
                                 break;
                         }
                 }
@@ -1101,34 +1418,35 @@ static int rpc_process_call(struct rpc_context *rpc, ZDR *zdr)
         if (endpoint == NULL) {
 		rpc_set_error(rpc, "No endpoint found for CALL "
                               "program:0x%08x version:%d\n",
-                              (int)call.body.cbody.prog,
-                              (int)call.body.cbody.vers);
+                              (int)c.call.body.cbody.prog,
+                              (int)c.call.body.cbody.vers);
                 if (!found_program) {
-                        return rpc_send_error_reply(rpc, &call, PROG_UNAVAIL,
+                        return rpc_send_error_reply(rpc, &c.call, PROG_UNAVAIL,
                                                     0, 0);
                 }
-                return rpc_send_error_reply(rpc, &call, PROG_MISMATCH,
+                return rpc_send_error_reply(rpc, &c.call, PROG_MISMATCH,
                                             min_version, max_version);
         }
         for (i = 0; i < endpoint->num_procs; i++) {
-                if (endpoint->procs[i].proc == call.body.cbody.proc) {
+                if (endpoint->procs[i].proc == c.call.body.cbody.proc) {
                         if (endpoint->procs[i].decode_buf_size) {
-                                call.body.cbody.args = zdr_malloc(zdr, endpoint->procs[i].decode_buf_size);
-                                memset(call.body.cbody.args, 0, endpoint->procs[i].decode_buf_size);
+                                c.call.body.cbody.args = zdr_malloc(zdr, endpoint->procs[i].decode_buf_size);
+                                memset(c.call.body.cbody.args, 0, endpoint->procs[i].decode_buf_size);
                         }
-                        if (!endpoint->procs[i].decode_fn(zdr, call.body.cbody.args)) {
+                        if (!endpoint->procs[i].decode_fn(zdr, c.call.body.cbody.args)) {
                                 rpc_set_error(rpc, "Failed to unmarshall "
                                               "call payload");
-                                return rpc_send_error_reply(rpc, &call, GARBAGE_ARGS, 0 ,0);
+                                return rpc_send_error_reply(rpc, &c.call, GARBAGE_ARGS, 0 ,0);
                         }
-                        return endpoint->procs[i].func(rpc, &call, endpoint->procs[i].opaque);
+                        return endpoint->procs[i].func(rpc, &c.call, endpoint->procs[i].opaque);
                 }
         }
 
-        return rpc_send_error_reply(rpc, &call, PROC_UNAVAIL, 0 ,0);
+        return rpc_send_error_reply(rpc, &c.call, PROC_UNAVAIL, 0 ,0);
 }
 
-struct rpc_pdu *rpc_find_pdu(struct rpc_context *rpc, uint32_t xid)
+static struct rpc_pdu *rpc_find_pdu_in(struct rpc_context *rpc, uint32_t xid,
+                                       int sent_only)
 {
 	struct rpc_pdu *pdu, *prev_pdu;
 	struct rpc_queue *q;
@@ -1140,35 +1458,23 @@ struct rpc_pdu *rpc_find_pdu(struct rpc_context *rpc, uint32_t xid)
         }
 #endif /* HAVE_MULTITHREADING */
 
-        /* First check outqueue */
-	q = &rpc->outqueue;
-	prev_pdu = NULL;
-	for (pdu=q->head; pdu; pdu=pdu->next) {
-		if (pdu->xid != xid) {
-			prev_pdu = pdu;
-			continue;
-		}
-		if (rpc->is_udp == 0 || rpc->is_broadcast == 0) {
-			/* Singly-linked but we track head and tail */
-			if (pdu == q->head)
-				q->head = pdu->next;
-			if (pdu == q->tail)
-				q->tail = prev_pdu;
-			if (prev_pdu != NULL)
-				prev_pdu->next = pdu->next;
-		}
-                break;
-        }
-        if (pdu) {
-                goto finished;
-        }
-
-	/* Look up the transaction in a hash table of our requests */
-	hash = rpc_hash_xid(rpc, rpc->rm_xid[1]);
+        /*
+         * A pdu is on exactly one of these two queues, so which is searched
+         * first only decides how much work a lookup costs, never what it
+         * finds.
+         *
+         * The pdus we are waiting for replies to are the hashed ones, and
+         * that is what a reply almost always matches, so look there first.
+         * The outqueue is a flat list and can be long, since an NFSv4.2
+         * session lets an application queue far more requests than the
+         * session has slots to carry at once; scanning it for every reply
+         * would make replies cost O(queue length).
+         *
+         * Follow the hash chain. Linear traverse of a singly-linked list, but
+         * track the previous entry for optimised removal.
+         */
+	hash = rpc_hash_xid(rpc, xid);
 	q = &rpc->waitpdu[hash];
-
-	/* Follow the hash chain.  Linear traverse singly-linked list,
-	 * but track previous entry for optimised removal */
 	prev_pdu = NULL;
 	for (pdu=q->head; pdu; pdu=pdu->next) {
 		if (pdu->xid != xid) {
@@ -1187,8 +1493,55 @@ struct rpc_pdu *rpc_find_pdu(struct rpc_context *rpc, uint32_t xid)
 		}
                 break;
         }
+        if (pdu || sent_only) {
+                goto finished;
+        }
+
+        /*
+         * Not one we are waiting on. It may still be queued but unsent, or
+         * sent and then requeued for retransmit after a reconnect.
+         */
+	q = &rpc->outqueue;
+	prev_pdu = NULL;
+	for (pdu=q->head; pdu; pdu=pdu->next) {
+		if (pdu->xid != xid) {
+			prev_pdu = pdu;
+			continue;
+		}
+		if (rpc->is_udp == 0 || rpc->is_broadcast == 0) {
+			/* Singly-linked but we track head and tail */
+			if (pdu == q->head)
+				q->head = pdu->next;
+			if (pdu == q->tail)
+				q->tail = prev_pdu;
+			/*
+			 * tailp terminates the high priority run, so once it
+			 * goes the run ends at its predecessor, if that is
+			 * itself high priority.
+			 */
+			if (pdu == q->tailp)
+				q->tailp = (prev_pdu && prev_pdu->is_high_prio) ?
+					prev_pdu : NULL;
+			if (prev_pdu != NULL)
+				prev_pdu->next = pdu->next;
+			assert(rpc->stats.outqueue_len > 0);
+			rpc->stats.outqueue_len--;
+		}
+                break;
+        }
         
  finished:
+#ifdef HAVE_NFS4_2
+        if (!pdu && !sent_only) {
+                for (pdu = rpc->nfs4_delay_queue.head; pdu; pdu = pdu->next) {
+                        if (pdu->xid == xid) {
+                                rpc_remove_pdu_from_queue(&rpc->nfs4_delay_queue, pdu);
+                                rpc->nfs4_delay_queue_len--;
+                                break;
+                        }
+                }
+        }
+#endif
         if (pdu) {
                 pdu->next = NULL;
         }
@@ -1200,6 +1553,25 @@ struct rpc_pdu *rpc_find_pdu(struct rpc_context *rpc, uint32_t xid)
 #endif /* HAVE_MULTITHREADING */
 
         return pdu;
+}
+
+struct rpc_pdu *rpc_find_pdu(struct rpc_context *rpc, uint32_t xid)
+{
+        return rpc_find_pdu_in(rpc, xid, 0);
+}
+
+/* Unsent pdus are left alone: the outqueue head may be half written. */
+int rpc_cancel_sent_pdu(struct rpc_context *rpc, uint32_t xid)
+{
+        struct rpc_pdu *pdu;
+
+        pdu = rpc_find_pdu_in(rpc, xid, 1);
+        if (pdu) {
+                rpc_free_pdu(rpc, pdu);
+                return 0;
+        }
+
+        return -ENOENT;
 }
 
 int rpc_cancel_pdu(struct rpc_context *rpc, struct rpc_pdu *pdu)
@@ -1253,7 +1625,17 @@ int rpc_process_pdu(struct rpc_context *rpc, char *buf, int size)
                         rpc_set_error(rpc, "rpc_procdess_reply failed");
                 }
 
-        if (rpc->fragments == NULL && rpc->pdu && rpc->pdu->in.base) {
+        /*
+         * A zero-copy READ still has to hand its payload to the caller, so the
+         * ZDR has to survive this function for the copy in READ_PAYLOAD. That
+         * is true whether the reply arrived as one record or was reassembled
+         * from fragments: in the latter case the ZDR points into the
+         * reassembly buffer, which is live until payload_finished frees it.
+         * Excluding the reassembled case here left free_zdr clear, the copy
+         * skipped, and the caller's buffer untouched while the callback still
+         * reported success.
+         */
+        if (rpc->pdu && rpc->pdu->in.base) {
                 memcpy(&rpc->pdu->zdr, &zdr, sizeof(zdr));
                 rpc->pdu->free_zdr = 1;
         } else {
@@ -1262,3 +1644,26 @@ int rpc_process_pdu(struct rpc_context *rpc, char *buf, int size)
         return 0;
 }
 
+bool_t rpc_pdu_is_retransmitted(struct rpc_pdu *pdu)
+{
+        return pdu->is_retransmitted;
+}
+
+uint32_t rpc_pdu_get_req_size(struct rpc_pdu *pdu)
+{
+        return pdu->req_size;
+}
+
+uint32_t rpc_pdu_get_resp_size(struct rpc_pdu *pdu)
+{
+        return pdu->resp_size;
+}
+
+uint64_t rpc_pdu_get_dispatch_usecs(struct rpc_pdu *pdu)
+{
+#ifdef HAVE_CLOCK_GETTIME
+        return pdu->dispatch_usecs;
+#else
+        return 0;
+#endif
+}
