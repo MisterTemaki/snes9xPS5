@@ -39,10 +39,6 @@
 #include "ps3_compat.h"
 #endif
 
-#ifdef WIN32
-#include <win32/win32_compat.h>
-#endif
-
 #include <stdint.h>
 
 #if defined(HAVE_SYS_UIO_H) || (defined(__APPLE__) && defined(__MACH__))
@@ -119,6 +115,37 @@ struct rpc_stats {
          * - Major timeout was observed.
          */
         uint64_t num_reconnects;
+
+        /*
+         * Current length of rpc->outqueue, i.e. the number of PDUs queued
+         * for sending but not yet fully written to the socket.
+         */
+        uint32_t outqueue_len;
+
+        /*
+         * Current value of rpc->waitpdu_len, i.e. the number of PDUs sent
+         * to the server and awaiting a response.
+         */
+        uint32_t waitpdu_len;
+
+        /*
+         * How many bytes we managed to write to the socket since the last
+         * time writev() returned EAGAIN. This is an indication of the receive
+         * window advertised by the peer, and hence of how much TCP
+         * back-pressure we are under.
+         *
+         * last_ is the run in progress, tot_ is the sum of all completed runs
+         * and num_write_eagain the number of runs, so tot_ / num_ is the
+         * average number of bytes written before blocking.
+         *
+         * Only runs that wrote at least one byte are counted. A connection
+         * that never fills the socket send buffer produces no samples at all,
+         * so callers must guard against num_write_eagain being zero before
+         * dividing by it.
+         */
+        uint64_t last_write_bytes_before_eagain;
+        uint64_t tot_write_bytes_before_eagain;
+        uint64_t num_write_eagain;
 };
 
 struct rpc_context;
@@ -229,9 +256,59 @@ EXTERN void rpc_set_auth(struct rpc_context *rpc, struct AUTH *auth);
  * want to ensure that libnfs will never do i/o to the socket.
  */
 EXTERN int rpc_get_fd(struct rpc_context *rpc);
+/*
+ * Returns a file descriptor that becomes readable when libnfs has queued work
+ * for its service thread, or -1 when the build or the context has none (for
+ * example every server context). -1 is not an error.
+ */
+EXTERN int rpc_get_evfd(struct rpc_context *rpc);
 EXTERN int rpc_which_events(struct rpc_context *rpc);
 EXTERN int rpc_service(struct rpc_context *rpc, int revents);
 EXTERN void rpc_disable_socket(struct rpc_context *rpc, int val);
+
+/*
+ * Returns the request PDU (rpc->pdu) inside a rpc_cb callback called after
+ * receiving the response from the server for a RPC request sent by us.
+ * User can pass this to rpc_pdu_get_resp_size() to find the total response
+ * size in bytes, which includes the RPC header, the NFS header and data bytes
+ * if any.
+ *
+ * Note: This can be legitimately called *only* inside the callback function
+ *       where we are certain that the response was received, and hence
+ *       rpc->pdu would be valid. Once the callback returns, rpc->pdu would
+ *       be freed by libnfs so don't access the returned pdu outside the
+ *       callback
+ */
+EXTERN struct rpc_pdu *rpc_get_pdu(struct rpc_context *rpc);
+
+/*
+ * Was this PDU retransmitted? i.e., did we send it to the server more than
+ * once? User can use this info to relax some errors, f.e., a REMOVE request
+ * that fails with NFS3ERR_NOENT can be treated as success if it was a
+ * retransmited request.
+ */
+EXTERN bool_t rpc_pdu_is_retransmitted(struct rpc_pdu *pdu);
+
+/*
+ * Get the size in bytes of the RPC request that libnfs will send out for
+ * this PDU. The size includes the RPC header, the NFS header and any data
+ * bytes sent (only WRITE RPC request will send data bytes).
+ */
+EXTERN uint32_t rpc_pdu_get_req_size(struct rpc_pdu *pdu);
+
+/*
+ * Get the size in bytes of the RPC response that libnfs received for this
+ * request PDU. Only valid inside a completion callback (see rpc_get_pdu()).
+ */
+EXTERN uint32_t rpc_pdu_get_resp_size(struct rpc_pdu *pdu);
+
+/*
+ * Wallclock microseconds since epoch when this request PDU was fully written
+ * to the socket. Only valid inside a completion callback. Returns 0 if
+ * clock_gettime is unavailable.
+ */
+EXTERN uint64_t rpc_pdu_get_dispatch_usecs(struct rpc_pdu *pdu);
+
 
 
 /*
@@ -242,6 +319,15 @@ EXTERN void rpc_disable_socket(struct rpc_context *rpc, int val);
  * commands waiting from a response from the server.
  */
 EXTERN int rpc_queue_length(struct rpc_context *rpc);
+
+/*
+ * Enable or disable resolving the server name afresh before every reconnect.
+ * The default is disabled, i.e. reconnect to the address that was resolved on
+ * the initial connect.
+ * Enable this when the server may move to a different address, for example
+ * when it sits behind a load balancer or a floating address.
+ */
+EXTERN void rpc_set_resolve_on_reconnect(struct rpc_context *rpc, int enabled);
 
 /*
  * Returns the number of commands awaiting from the server.
@@ -274,6 +360,28 @@ EXTERN void rpc_set_auxiliary_gids(struct rpc_context *rpc, uint32_t len, uint32
  */
 EXTERN int rpc_set_username(struct rpc_context *rpc, const char *username);
 
+
+/*
+ * sync rpc_set_timeout()
+ * This function sets the timeout used for this rpc context.
+ *
+ * Function returns nothing.
+ *
+ * int milliseconds : timeout to be applied in milliseconds (-1 no timeout)
+ *                    timeouts must currently be set in whole seconds,
+ *                    i.e. units of 1000
+ */
+EXTERN void rpc_set_timeout(struct rpc_context *rpc, int timeout);
+/*
+ * sync rpc_get_timeout()
+ * This function gets the timeout used for rpc context.
+ *
+ * Function returns
+ *    -1 : No timeout applied
+ *   > 0 : Timeout in milliseconds
+ */
+EXTERN int rpc_get_timeout(struct rpc_context *rpc);
+        
 /*
  * Create a server context.
  */
@@ -296,6 +404,14 @@ EXTERN struct rpc_context *rpc_init_server_context(int s);
  *           (zdrproc_t)zdr_pmap2_mapping, sizeof(pmap2_mapping)},
  *  ...
  *
+ *
+ * The call argument is only valid for the duration of the callback.
+ * If your application needs to call rpc_send_reply() not from the callback
+ * but from a different context at a later time you will need to make a temporary
+ * copy of the call structure using rpc_copy_deferred_call()/rpc_free_deferred_call().
+ * See for example examples/rpcbind.c where during the callit processing
+ * we create a copy so that we can send the reply at a later point in time
+ * when the rpc created in callit has completed.
  *
  * The return value is:
  *  0:  Procedure was completed normally.
@@ -323,6 +439,12 @@ EXTERN int rpc_register_service(struct rpc_context *rpc, int program,
 EXTERN int rpc_send_reply(struct rpc_context *rpc, struct rpc_msg *call,
                           void *reply, zdrproc_t encode_fn,
                           int alloc_hint);
+
+EXTERN struct rpc_msg *rpc_copy_deferred_call(struct rpc_context *rpc,
+                                              struct rpc_msg *call);
+
+EXTERN void rpc_free_deferred_call(struct rpc_context *rpc,
+                                   struct rpc_msg *call);
 
 /*
  * When an operation failed, this function can extract a detailed error string.
@@ -804,6 +926,292 @@ EXTERN struct rpc_pdu *
 rpc_pmap3_taddr2uaddr_task(struct rpc_context *rpc,
                             struct pmap3_netbuf *netbuf,
                             rpc_cb cb, void *private_data);
+
+/*
+ * PORTMAP v4 FUNCTIONS
+ */
+
+/*
+ * Call PORTMAPPER4/NULL
+ *
+ * Function returns
+ *  pdu : The command was queued successfully. The callback will be invoked once
+ *        the command completes.
+ * NULL : An error occured when trying to queue the command.
+ *        The callback will not be invoked.
+ *
+ * When the callback is invoked, status indicates the result:
+ * RPC_STATUS_SUCCESS : We got a successful response from the server.
+ *                      data is NULL.
+ * RPC_STATUS_ERROR   : The command failed with an error.
+ *                      data is the error string.
+ * RPC_STATUS_CANCEL  : The command was cancelled.
+ *                      data is NULL.
+ */
+EXTERN struct rpc_pdu *
+rpc_pmap4_null_task(struct rpc_context *rpc,
+                     rpc_cb cb, void *private_data);
+
+/*
+ * Call PORTMAPPER4/SET.
+ *
+ * Function returns
+ *  pdu : The command was queued successfully. The callback will be invoked once
+ *        the command completes.
+ * NULL : An error occured when trying to queue the command.
+ *        The callback will not be invoked.
+ *
+ * When the callback is invoked, status indicates the result:
+ * RPC_STATUS_SUCCESS : We got a successful response from the server.
+ *                      data is uint32_t * containing status.
+ * RPC_STATUS_ERROR   : The command failed with an error.
+ *                      data is the error string.
+ * RPC_STATUS_CANCEL  : The command was cancelled.
+ *                      data is NULL.
+ */
+struct pmap4_mapping;
+EXTERN struct rpc_pdu *
+rpc_pmap4_set_task(struct rpc_context *rpc,
+                    struct pmap4_mapping *map,
+                    rpc_cb cb, void *private_data);
+
+/*
+ * Call PORTMAPPER4/UNSET.
+ *
+ * Function returns
+ *  pdu : The command was queued successfully. The callback will be invoked once
+ *        the command completes.
+ * NULL : An error occured when trying to queue the command.
+ *        The callback will not be invoked.
+ *
+ * When the callback is invoked, status indicates the result:
+ * RPC_STATUS_SUCCESS : We got a successful response from the server.
+ *                      data is uint32_t * containing status.
+ * RPC_STATUS_ERROR   : The command failed with an error.
+ *                      data is the error string.
+ * RPC_STATUS_CANCEL  : The command was cancelled.
+ *                      data is NULL.
+ */
+EXTERN struct rpc_pdu *
+rpc_pmap4_unset_task(struct rpc_context *rpc,
+                      struct pmap4_mapping *map,
+                      rpc_cb cb, void *private_data);
+
+/*
+ * Call PORTMAPPER4/GETADDR.
+ *
+ * Function returns
+ *  pdu : The command was queued successfully. The callback will be invoked once
+ *        the command completes.
+ * NULL : An error occured when trying to queue the command.
+ *        The callback will not be invoked.
+ *
+ * When the callback is invoked, status indicates the result:
+ * RPC_STATUS_SUCCESS : We got a successful response from the server.
+ *                      data is struct pmap4_string_result.
+ * RPC_STATUS_ERROR   : The command failed with an error.
+ *                      data is the error string.
+ * RPC_STATUS_CANCEL  : The command was cancelled.
+ *                      data is NULL.
+ */
+EXTERN struct rpc_pdu *
+rpc_pmap4_getaddr_task(struct rpc_context *rpc,
+                        struct pmap4_mapping *map,
+                        rpc_cb cb, void *private_data);
+
+/*
+ * Call PORTMAPPER4/DUMP.
+ *
+ * Function returns
+ *  pdu : The command was queued successfully. The callback will be invoked once
+ *        the command completes.
+ * NULL : An error occured when trying to queue the command.
+ *        The callback will not be invoked.
+ *
+ * When the callback is invoked, status indicates the result:
+ * RPC_STATUS_SUCCESS : We got a successful response from the server.
+ *                      data is struct pmap4_dump_result.
+ * RPC_STATUS_ERROR   : The command failed with an error.
+ *                      data is the error string.
+ * RPC_STATUS_CANCEL  : The command was cancelled.
+ *                      data is NULL.
+ */
+EXTERN struct rpc_pdu *
+rpc_pmap4_dump_task(struct rpc_context *rpc,
+                     rpc_cb cb, void *private_data);
+
+/*
+ * Call PORTMAPPER4/BCAST.
+ *
+ * Function returns
+ *  pdu : The command was queued successfully. The callback will be invoked once
+ *        the command completes.
+ * NULL : An error occured when trying to queue the command.
+ *        The callback will not be invoked.
+ *
+ * When the callback is invoked, status indicates the result:
+ * RPC_STATUS_SUCCESS : We got a successful response from the server.
+ *                      data is a 'pmap4_bcast_result' pointer.
+ * RPC_STATUS_ERROR   : The command failed with an error.
+ *                      data is the error string.
+ * RPC_STATUS_CANCEL  : The command was cancelled.
+ *                      data is NULL.
+ */
+EXTERN struct rpc_pdu *
+rpc_pmap4_bcast_task(struct rpc_context *rpc, int program,
+                     int version, int procedure,
+                     char *data, int datalen,
+                     rpc_cb cb, void *private_data);
+
+/*
+ * Call PORTMAPPER4/GETTIME.
+ *
+ * Function returns
+ *  pdu : The command was queued successfully. The callback will be invoked once
+ *        the command completes.
+ * NULL : An error occured when trying to queue the command.
+ *        The callback will not be invoked.
+ *
+ * When the callback is invoked, status indicates the result:
+ * RPC_STATUS_SUCCESS : We got a successful response from the server.
+ *                      data is a uint32_t * containing status.
+ * RPC_STATUS_ERROR   : The command failed with an error.
+ *                      data is the error string.
+ * RPC_STATUS_CANCEL  : The command was cancelled.
+ *                      data is NULL.
+ */
+EXTERN struct rpc_pdu *
+rpc_pmap4_gettime_task(struct rpc_context *rpc,
+                        rpc_cb cb, void *private_data);
+
+/*
+ * Call PORTMAPPER4/UADDR2TADDR.
+ *
+ * Function returns
+ *  pdu : The command was queued successfully. The callback will be invoked once
+ *        the command completes.
+ * NULL : An error occured when trying to queue the command.
+ *        The callback will not be invoked.
+ *
+ * When the callback is invoked, status indicates the result:
+ * RPC_STATUS_SUCCESS : We got a successful response from the server.
+ *                      data is a struct pmap4_netbuf *.
+ * RPC_STATUS_ERROR   : The command failed with an error.
+ *                      data is the error string.
+ * RPC_STATUS_CANCEL  : The command was cancelled.
+ *                      data is NULL.
+ */
+EXTERN struct rpc_pdu *
+rpc_pmap4_uaddr2taddr_task(struct rpc_context *rpc, char *uaddr,
+                            rpc_cb cb, void *private_data);
+
+/*
+ * Call PORTMAPPER4/TADDR2UADDR.
+ *
+ * Function returns
+ *  pdu : The command was queued successfully. The callback will be invoked once
+ *        the command completes.
+ * NULL : An error occured when trying to queue the command.
+ *        The callback will not be invoked.
+ *
+ * When the callback is invoked, status indicates the result:
+ * RPC_STATUS_SUCCESS : We got a successful response from the server.
+ *                      data is a struct pmap4_string_result *.
+ * RPC_STATUS_ERROR   : The command failed with an error.
+ *                      data is the error string.
+ * RPC_STATUS_CANCEL  : The command was cancelled.
+ *                      data is NULL.
+ */
+struct pmap4_netbuf;
+EXTERN struct rpc_pdu *
+rpc_pmap4_taddr2uaddr_task(struct rpc_context *rpc,
+                            struct pmap4_netbuf *netbuf,
+                            rpc_cb cb, void *private_data);
+
+/*
+ * Call PORTMAPPER4/GETVERSADDR.
+ *
+ * Function returns
+ *  pdu : The command was queued successfully. The callback will be invoked once
+ *        the command completes.
+ * NULL : An error occured when trying to queue the command.
+ *        The callback will not be invoked.
+ *
+ * When the callback is invoked, status indicates the result:
+ * RPC_STATUS_SUCCESS : We got a successful response from the server.
+ *                      data is a struct pmap4_string_result *.
+ * RPC_STATUS_ERROR   : The command failed with an error.
+ *                      data is the error string.
+ * RPC_STATUS_CANCEL  : The command was cancelled.
+ *                      data is NULL.
+ */
+EXTERN struct rpc_pdu *
+rpc_pmap4_getversaddr_task(struct rpc_context *rpc, struct pmap4_mapping *map, rpc_cb cb, void *private_data);
+
+/*
+ * Call PORTMAPPER4/INDIRECT.
+ *
+ * Function returns
+ *  pdu : The command was queued successfully. The callback will be invoked once
+ *        the command completes.
+ * NULL : An error occured when trying to queue the command.
+ *        The callback will not be invoked.
+ *
+ * When the callback is invoked, status indicates the result:
+ * RPC_STATUS_SUCCESS : We got a successful response from the server.
+ *                      data is a 'pmap4_indirect_result' pointer.
+ * RPC_STATUS_ERROR   : The command failed with an error.
+ *                      data is the error string.
+ * RPC_STATUS_CANCEL  : The command was cancelled.
+ *                      data is NULL.
+ */
+EXTERN struct rpc_pdu *
+rpc_pmap4_indirect_task(struct rpc_context *rpc, int program,
+                        int version, int procedure,
+                        char *data, int datalen,
+                        rpc_cb cb, void *private_data);
+
+/*
+ * Call PORTMAPPER4/GETADDRLIST.
+ *
+ * Function returns
+ *  pdu : The command was queued successfully. The callback will be invoked once
+ *        the command completes.
+ * NULL : An error occured when trying to queue the command.
+ *        The callback will not be invoked.
+ *
+ * When the callback is invoked, status indicates the result:
+ * RPC_STATUS_SUCCESS : We got a successful response from the server.
+ *                      data is a 'pmap4_entry_list_ptr' pointer.
+ * RPC_STATUS_ERROR   : The command failed with an error.
+ *                      data is the error string.
+ * RPC_STATUS_CANCEL  : The command was cancelled.
+ *                      data is NULL.
+ */
+EXTERN struct rpc_pdu *
+rpc_pmap4_getaddrlist_task(struct rpc_context *rpc, struct pmap4_mapping *map, rpc_cb cb, void *private_data);
+
+/*
+ * Call PORTMAPPER4/GETSTAT.
+ *
+ * Function returns
+ *  pdu : The command was queued successfully. The callback will be invoked once
+ *        the command completes.
+ * NULL : An error occured when trying to queue the command.
+ *        The callback will not be invoked.
+ *
+ * When the callback is invoked, status indicates the result:
+ * RPC_STATUS_SUCCESS : We got a successful response from the server.
+ *                      data is a 'pmap4_stat_byvers' pointer.
+ * RPC_STATUS_ERROR   : The command failed with an error.
+ *                      data is the error string.
+ * RPC_STATUS_CANCEL  : The command was cancelled.
+ *                      data is NULL.
+ */
+EXTERN struct rpc_pdu *
+rpc_pmap4_getstat_task(struct rpc_context *rpc, rpc_cb cb, void *private_data);
+
+
 
 /*
  * MOUNT v3 FUNCTIONS

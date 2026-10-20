@@ -1,9 +1,16 @@
 # libnfs in snes9xPS5
 
-libnfs 6.0.2 (`18c5c73ee88bb7dc8da0d55dc95164bb77e49dc6`, https://github.com/sahlberg/libnfs), LGPL-2.1-or-later,
+libnfs from upstream master after 8.0.0 (`2d368ade3e30c4782d54a63efc4d029c6fc75dff`, 2026-10-14,
+https://github.com/sahlberg/libnfs), LGPL-2.1-or-later,
 by Ronnie Sahlberg and contributors. Licence texts: `COPYING`, `LICENCE-LGPL-2.1.txt`, `LICENCE-BSD.txt`
 (the `.x` protocol files and what is generated from them), `LICENCE-GPL-3.txt` (as shipped upstream, for
 the utilities we do not include).
+
+Why master and not the 8.0.0 tag: 8.0.0 has the ZDR/NFSv4 bounds fixes that 6.0.2 lacked (91de6ec, 7b3c72a,
+55c18ea, c0ad6bc, all in 7.0.0 and later), but the fix that makes the ZDR decoders honour their maxsize
+(7613236, "ZDR: enforce the maxsize bound") only landed on master after 8.0.0. The few master commits on top
+of 8.0.0 besides it are NFSv4.0 lease renewal (e0d26a0, f83f4a4), a ZDR assert (57adf64), an nfs3 errno fix
+(27d0cd0), nfs-stat (a utility we leave out) and CMake Kerberos options.
 
 Only the client library is vendored: `lib mount nfs nfs4 nlm nsm portmap rquota` and `include`. Left out:
 examples, utils, tests, documentation, the Windows/AROS/PS2/PS3 ports, TLS and Kerberos support.
@@ -31,5 +38,5 @@ on sockets (`set_nonblocking` and `is_nonblocking`).
 
 ## Updating
 
-Replace the folders from a new upstream tag, then reapply the table above (`grep -rn __PROSPERO__ .`
+Replace the folders from a new upstream tag or commit (only `*.c` and `*.h`, without `include/win32`), then reapply the table above (`grep -rn __PROSPERO__ .`
 lists every change) and run `make -C ps5 test-nfs`.

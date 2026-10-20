@@ -19,6 +19,7 @@
  * It was generated using rpcgen.
  */
 
+#include <string.h>
 #include "libnfs-zdr.h"
 #include "libnfs-raw-nfs4.h"
 
@@ -1919,18 +1920,49 @@ zdr_READDIR4args (ZDR *zdrs, READDIR4args *objp)
 	return TRUE;
 }
 
+/*
+ * Hand written rather than generated. rpcgen walks the entry list by
+ * recursing through zdr_pointer once per entry, which lets a server with a
+ * long directory exhaust the stack, so this iterates instead.
+ */
 uint32_t
 zdr_entry4 (ZDR *zdrs, entry4 *objp)
 {
-	 if (!zdr_nfs_cookie4 (zdrs, &objp->cookie))
-		 return FALSE;
-	 if (!zdr_component4 (zdrs, &objp->name))
-		 return FALSE;
-	 if (!zdr_fattr4 (zdrs, &objp->attrs))
-		 return FALSE;
-	 if (!zdr_pointer (zdrs, (char **)&objp->nextentry, sizeof (entry4), (zdrproc_t) zdr_entry4))
-		 return FALSE;
-	return TRUE;
+	bool_t more_data;
+
+	while (1) {
+		if (!zdr_nfs_cookie4 (zdrs, &objp->cookie))
+			return FALSE;
+		if (!zdr_component4 (zdrs, &objp->name))
+			return FALSE;
+		if (!zdr_fattr4 (zdrs, &objp->attrs))
+			return FALSE;
+
+		/*
+		 * On encode this says whether we have another entry to write.
+		 * On decode libnfs_zdr_bool overwrites it with what the server
+		 * sent.
+		 */
+		more_data = (objp->nextentry != NULL);
+		if (!libnfs_zdr_bool(zdrs, &more_data)) {
+			return FALSE;
+		}
+		if (!more_data) {
+			if (zdrs->x_op == ZDR_DECODE) {
+				objp->nextentry = NULL;
+			}
+			return TRUE;
+		}
+
+		if (zdrs->x_op == ZDR_DECODE) {
+			objp->nextentry = zdr_malloc(zdrs, sizeof(entry4));
+			if (objp->nextentry == NULL) {
+				return FALSE;
+			}
+			memset(objp->nextentry, 0, sizeof(entry4));
+		}
+		objp = objp->nextentry;
+	}
 }
 
 uint32_t
@@ -3330,6 +3362,234 @@ zdr_nfs_opnum4 (ZDR *zdrs, nfs_opnum4 *objp)
 }
 
 uint32_t
+zdr_data_content4 (ZDR *zdrs, data_content4 *objp)
+{
+	 if (!zdr_enum (zdrs, (enum_t *) objp))
+		 return FALSE;
+	return TRUE;
+}
+
+uint32_t
+zdr_ALLOCATE4args (ZDR *zdrs, ALLOCATE4args *objp)
+{
+	 if (!zdr_stateid4 (zdrs, &objp->aa_stateid))
+		 return FALSE;
+	 if (!zdr_offset4 (zdrs, &objp->aa_offset))
+		 return FALSE;
+	 if (!zdr_length4 (zdrs, &objp->aa_length))
+		 return FALSE;
+	return TRUE;
+}
+
+uint32_t
+zdr_ALLOCATE4res (ZDR *zdrs, ALLOCATE4res *objp)
+{
+	 if (!zdr_nfsstat4 (zdrs, &objp->ar_status))
+		 return FALSE;
+	return TRUE;
+}
+
+uint32_t
+zdr_DEALLOCATE4args (ZDR *zdrs, DEALLOCATE4args *objp)
+{
+	 if (!zdr_stateid4 (zdrs, &objp->da_stateid))
+		 return FALSE;
+	 if (!zdr_offset4 (zdrs, &objp->da_offset))
+		 return FALSE;
+	 if (!zdr_length4 (zdrs, &objp->da_length))
+		 return FALSE;
+	return TRUE;
+}
+
+uint32_t
+zdr_DEALLOCATE4res (ZDR *zdrs, DEALLOCATE4res *objp)
+{
+	 if (!zdr_nfsstat4 (zdrs, &objp->dr_status))
+		 return FALSE;
+	return TRUE;
+}
+
+uint32_t
+zdr_data_info4 (ZDR *zdrs, data_info4 *objp)
+{
+	 if (!zdr_offset4 (zdrs, &objp->di_offset))
+		 return FALSE;
+	 if (!zdr_length4 (zdrs, &objp->di_length))
+		 return FALSE;
+	return TRUE;
+}
+
+uint32_t
+zdr_data4 (ZDR *zdrs, data4 *objp)
+{
+	 if (!zdr_offset4 (zdrs, &objp->d_offset))
+		 return FALSE;
+	 if (!zdr_bytes (zdrs, (char **)&objp->d_data.d_data_val, &objp->d_data.d_data_len, ~0))
+		 return FALSE;
+	return TRUE;
+}
+
+uint32_t
+zdr_read_plus_content (ZDR *zdrs, read_plus_content *objp)
+{
+	 if (!zdr_data_content4 (zdrs, &objp->rpc_content))
+		 return FALSE;
+	switch (objp->rpc_content) {
+	case NFS4_CONTENT_DATA:
+		 if (!zdr_data4 (zdrs, &objp->read_plus_content_u.rpc_data))
+			 return FALSE;
+		break;
+	case NFS4_CONTENT_HOLE:
+		 if (!zdr_data_info4 (zdrs, &objp->read_plus_content_u.rpc_hole))
+			 return FALSE;
+		break;
+	default:
+		break;
+	}
+	return TRUE;
+}
+
+uint32_t
+zdr_READ_PLUS4args (ZDR *zdrs, READ_PLUS4args *objp)
+{
+	 if (!zdr_stateid4 (zdrs, &objp->rpa_stateid))
+		 return FALSE;
+	 if (!zdr_offset4 (zdrs, &objp->rpa_offset))
+		 return FALSE;
+	 if (!zdr_count4 (zdrs, &objp->rpa_count))
+		 return FALSE;
+	return TRUE;
+}
+
+uint32_t
+zdr_READ_PLUS4resok (ZDR *zdrs, READ_PLUS4resok *objp)
+{
+	 if (!zdr_bool (zdrs, &objp->rpr_eof))
+		 return FALSE;
+	 if (!zdr_array (zdrs, (char **)&objp->rpr_contents.rpr_contents_val, &objp->rpr_contents.rpr_contents_len, ~0,
+		sizeof (read_plus_content), (zdrproc_t) zdr_read_plus_content))
+		 return FALSE;
+	return TRUE;
+}
+
+uint32_t
+zdr_READ_PLUS4res (ZDR *zdrs, READ_PLUS4res *objp)
+{
+	 if (!zdr_nfsstat4 (zdrs, &objp->rp_status))
+		 return FALSE;
+	switch (objp->rp_status) {
+	case NFS4_OK:
+		 if (!zdr_READ_PLUS4resok (zdrs, &objp->READ_PLUS4res_u.rp_resok4))
+			 return FALSE;
+		break;
+	default:
+		break;
+	}
+	return TRUE;
+}
+
+uint32_t
+zdr_app_data_block4 (ZDR *zdrs, app_data_block4 *objp)
+{
+	 if (!zdr_offset4 (zdrs, &objp->adb_offset))
+		 return FALSE;
+	 if (!zdr_length4 (zdrs, &objp->adb_block_size))
+		 return FALSE;
+	 if (!zdr_length4 (zdrs, &objp->adb_block_count))
+		 return FALSE;
+	 if (!zdr_length4 (zdrs, &objp->adb_reloff_blocknum))
+		 return FALSE;
+	 if (!zdr_count4 (zdrs, &objp->adb_block_num))
+		 return FALSE;
+	 if (!zdr_length4 (zdrs, &objp->adb_reloff_pattern))
+		 return FALSE;
+	 if (!zdr_bytes (zdrs, (char **)&objp->adb_pattern.adb_pattern_val, &objp->adb_pattern.adb_pattern_len, ~0))
+		 return FALSE;
+	return TRUE;
+}
+
+uint32_t
+zdr_write_response4 (ZDR *zdrs, write_response4 *objp)
+{
+	 if (!zdr_array (zdrs, (char **)&objp->wr_callback_id.wr_callback_id_val, &objp->wr_callback_id.wr_callback_id_len, 1,
+		sizeof (stateid4), (zdrproc_t) zdr_stateid4))
+		 return FALSE;
+	 if (!zdr_length4 (zdrs, &objp->wr_count))
+		 return FALSE;
+	 if (!zdr_stable_how4 (zdrs, &objp->wr_committed))
+		 return FALSE;
+	 if (!zdr_verifier4 (zdrs, objp->wr_writeverf))
+		 return FALSE;
+	return TRUE;
+}
+
+uint32_t
+zdr_WRITE_SAME4args (ZDR *zdrs, WRITE_SAME4args *objp)
+{
+	 if (!zdr_stateid4 (zdrs, &objp->wsa_stateid))
+		 return FALSE;
+	 if (!zdr_stable_how4 (zdrs, &objp->wsa_stable))
+		 return FALSE;
+	 if (!zdr_app_data_block4 (zdrs, &objp->wsa_adb))
+		 return FALSE;
+	return TRUE;
+}
+
+uint32_t
+zdr_WRITE_SAME4res (ZDR *zdrs, WRITE_SAME4res *objp)
+{
+	 if (!zdr_nfsstat4 (zdrs, &objp->wsr_status))
+		 return FALSE;
+	switch (objp->wsr_status) {
+	case NFS4_OK:
+		 if (!zdr_write_response4 (zdrs, &objp->WRITE_SAME4res_u.wsr_resok4))
+			 return FALSE;
+		break;
+	default:
+		break;
+	}
+	return TRUE;
+}
+
+uint32_t
+zdr_SEEK4args (ZDR *zdrs, SEEK4args *objp)
+{
+	 if (!zdr_stateid4 (zdrs, &objp->sa_stateid))
+		 return FALSE;
+	 if (!zdr_offset4 (zdrs, &objp->sa_offset))
+		 return FALSE;
+	 if (!zdr_data_content4 (zdrs, &objp->sa_what))
+		 return FALSE;
+	return TRUE;
+}
+
+uint32_t
+zdr_SEEK4resok (ZDR *zdrs, SEEK4resok *objp)
+{
+	 if (!zdr_bool (zdrs, &objp->sr_eof))
+		 return FALSE;
+	 if (!zdr_offset4 (zdrs, &objp->sr_offset))
+		 return FALSE;
+	return TRUE;
+}
+
+uint32_t
+zdr_SEEK4res (ZDR *zdrs, SEEK4res *objp)
+{
+	 if (!zdr_nfsstat4 (zdrs, &objp->sa_status))
+		 return FALSE;
+	switch (objp->sa_status) {
+	case NFS4_OK:
+		 if (!zdr_SEEK4resok (zdrs, &objp->SEEK4res_u.resok4))
+			 return FALSE;
+		break;
+	default:
+		break;
+	}
+	return TRUE;
+}
+
+uint32_t
 zdr_nfs_argop4 (ZDR *zdrs, nfs_argop4 *objp)
 {
 	 if (!zdr_nfs_opnum4 (zdrs, &objp->argop))
@@ -3539,6 +3799,26 @@ zdr_nfs_argop4 (ZDR *zdrs, nfs_argop4 *objp)
 		break;
 	case OP_RECLAIM_COMPLETE:
 		 if (!zdr_RECLAIM_COMPLETE4args (zdrs, &objp->nfs_argop4_u.opreclaimcomplete))
+			 return FALSE;
+		break;
+	case OP_ALLOCATE:
+		 if (!zdr_ALLOCATE4args (zdrs, &objp->nfs_argop4_u.opallocate))
+			 return FALSE;
+		break;
+	case OP_DEALLOCATE:
+		 if (!zdr_DEALLOCATE4args (zdrs, &objp->nfs_argop4_u.opdeallocate))
+			 return FALSE;
+		break;
+	case OP_READ_PLUS:
+		 if (!zdr_READ_PLUS4args (zdrs, &objp->nfs_argop4_u.opreadplus))
+			 return FALSE;
+		break;
+	case OP_SEEK:
+		 if (!zdr_SEEK4args (zdrs, &objp->nfs_argop4_u.opseek))
+			 return FALSE;
+		break;
+	case OP_WRITE_SAME:
+		 if (!zdr_WRITE_SAME4args (zdrs, &objp->nfs_argop4_u.opwritesame))
 			 return FALSE;
 		break;
 	case OP_ILLEGAL:
@@ -3773,6 +4053,26 @@ zdr_nfs_resop4 (ZDR *zdrs, nfs_resop4 *objp)
 		break;
 	case OP_RECLAIM_COMPLETE:
 		 if (!zdr_RECLAIM_COMPLETE4res (zdrs, &objp->nfs_resop4_u.opreclaimcomplete))
+			 return FALSE;
+		break;
+	case OP_ALLOCATE:
+		 if (!zdr_ALLOCATE4res (zdrs, &objp->nfs_resop4_u.opallocate))
+			 return FALSE;
+		break;
+	case OP_DEALLOCATE:
+		 if (!zdr_DEALLOCATE4res (zdrs, &objp->nfs_resop4_u.opdeallocate))
+			 return FALSE;
+		break;
+	case OP_READ_PLUS:
+		 if (!zdr_READ_PLUS4res (zdrs, &objp->nfs_resop4_u.opreadplus))
+			 return FALSE;
+		break;
+	case OP_SEEK:
+		 if (!zdr_SEEK4res (zdrs, &objp->nfs_resop4_u.opseek))
+			 return FALSE;
+		break;
+	case OP_WRITE_SAME:
+		 if (!zdr_WRITE_SAME4res (zdrs, &objp->nfs_resop4_u.opwritesame))
 			 return FALSE;
 		break;
 	case OP_ILLEGAL:

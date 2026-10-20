@@ -347,6 +347,25 @@ typedef uint8_t smb2_file_id[SMB2_FD_SIZE];
 #define SMB2_LEASE_KEY_SIZE 16
 typedef uint8_t smb2_lease_key[SMB2_LEASE_KEY_SIZE];
 
+#define SMB2_SRV_COPYCHUNK_RESUME_KEY_SIZE 24
+
+struct smb2_srv_copychunk_resume_key {
+        uint8_t resume_key[SMB2_SRV_COPYCHUNK_RESUME_KEY_SIZE];
+};
+
+struct smb2_srv_copychunk {
+        uint64_t source_offset;
+        uint64_t target_offset;
+        uint32_t length;
+        uint32_t reserved;
+};
+
+struct smb2_srv_copychunk_reply {
+        uint32_t chunks_written;
+        uint32_t chunk_bytes_written;
+        uint32_t total_bytes_written;
+};
+
 struct smb2fh;
 smb2_file_id *smb2_get_file_id(struct smb2fh *fh);
 
@@ -558,10 +577,12 @@ struct smb2_read_reply {
 #define SMB2_FILE_MODE_INFORMATION              0x10
 #define SMB2_FILE_ALIGNMENT_INFORMATION         0x11
 #define SMB2_FILE_ALL_INFORMATION               0x12
+#define SMB2_FILE_ALLOCATION_INFORMATION        0x13
 #define SMB2_FILE_END_OF_FILE_INFORMATION       0x14
 #define SMB2_FILE_ALTERNATE_NAME_INFORMATION    0x15
 #define SMB2_FILE_OBJECT_ID_INFORMATION         0x1D
 #define SMB2_FILE_ATTRIBUTE_TAG_INFORMATION     0x23
+#define SMB2_FILE_VALID_DATA_LENGTH_INFORMATION 0x27
 #define SMB2_FILE_NORMALIZED_NAME_INFORMATION   0x30
 #define SMB2_FILE_ID_INFORMATION                0x3B
 
@@ -613,6 +634,28 @@ struct smb2_file_basic_info {
         struct smb2_timeval last_write_time;
         struct smb2_timeval change_time;
         uint32_t file_attributes;
+
+        /* Raw, unconverted 100ns-resolution Windows FILETIME values,
+         * preserved alongside the lossy (whole-microsecond) timeval
+         * fields above -- smb2_win_to_timeval() only has microsecond
+         * resolution, so any caller needing bit-exact precision must
+         * read these instead.
+         */
+        uint64_t creation_time_raw;
+        uint64_t last_access_time_raw;
+        uint64_t last_write_time_raw;
+        uint64_t change_time_raw;
+};
+
+/*
+ * FILE_ATTRIBUTE_TAG_INFORMATION
+ * This is the only way to learn the reparse tag of a file we have open.
+ * reparse_tag is only valid if file_attributes has
+ * SMB2_FILE_ATTRIBUTE_REPARSE_POINT set.
+ */
+struct smb2_file_attribute_tag_info {
+        uint32_t file_attributes;
+        uint32_t reparse_tag;
 };
 
 /*
@@ -627,10 +670,29 @@ struct smb2_file_standard_info {
 };
 
 /*
+ * FILE_STREAM_INFORMATION
+ */
+struct smb2_file_stream_info {
+        uint32_t next_entry_offset;
+        uint32_t stream_name_length;
+        uint64_t stream_size;
+        uint64_t stream_allocation_size;
+        const char *stream_name;
+};
+
+/*
  * FILE_POSITION_INFORMATION
  */
 struct smb2_file_position_info {
         uint64_t current_byte_offset;
+};
+
+/*
+ * FILE_NAME_INFORMATION
+ */
+struct smb2_file_name_info {
+        uint32_t file_name_length;
+        const uint8_t *name;
 };
 
 /*
@@ -679,6 +741,14 @@ struct smb2_file_disposition_info {
  * SMB2_FILE_RENAME_INFORMATION.
  */
 struct smb2_file_rename_info {
+        uint8_t replace_if_exist;
+        const uint8_t* file_name;
+};
+
+/*
+ * SMB2_FILE_LINK_INFORMATION.
+ */
+struct smb2_file_link_info {
         uint8_t replace_if_exist;
         const uint8_t* file_name;
 };
@@ -961,13 +1031,109 @@ struct smb2_query_info_reply {
 #define SMB2_0_IOCTL_IS_FSCTL                   0x00000001
 
 #define SMB2_SYMLINK_FLAG_RELATIVE 0x00000001
+/*
+ * Used for both IO_REPARSE_TAG_SYMLINK and IO_REPARSE_TAG_MOUNT_POINT.
+ * The two buffers are identical except that the mount point has no
+ * flags field, in which case flags is reported as 0.
+ * [MS-FSCC] 2.1.2.4 and 2.1.2.5
+ */
 struct smb2_symlink_reparse_buffer {
         uint32_t flags;
         char *subname;
         char *printname;
 };
 
+/*
+ * IO_REPARSE_TAG_LX_SYMLINK, the symlinks that WSL creates.
+ * [MS-FSCC] 2.1.2.7
+ */
+struct smb2_lx_symlink_reparse_buffer {
+        uint32_t version;
+        char *target;
+};
+
+/*
+ * Reparse point tags. [MS-FSCC] 2.1.2.1
+ *
+ * The top four bits of a tag describe the tag itself :
+ *   M  Microsoft owned tag.
+ *   R  Reserved.
+ *   N  Name surrogate. The object names some other entity in the system,
+ *      i.e. it is a link of some sort.
+ *   D  A directory with this tag can have children.
+ *
+ * Only a handful of tags actually redirect to another name and thus
+ * behave like a posix symlink. Most of them are just private data for a
+ * filter driver (deduplication, compression, cloud storage, hsm, ...)
+ * where the file is still an ordinary file that reads and writes as
+ * usual. For tags we do not know about, the name surrogate bit is
+ * microsofts generic way of telling us which of the two it is.
+ */
+#define SMB2_REPARSE_TAG_MICROSOFT_BIT          0x80000000
+#define SMB2_REPARSE_TAG_RESERVED_BIT           0x40000000
+#define SMB2_REPARSE_TAG_NAME_SURROGATE_BIT     0x20000000
+#define SMB2_REPARSE_TAG_DIRECTORY_BIT          0x10000000
+
+#define SMB2_REPARSE_TAG_IS_NAME_SURROGATE(t) \
+        (((t) & SMB2_REPARSE_TAG_NAME_SURROGATE_BIT) != 0)
+
+#define SMB2_REPARSE_TAG_MOUNT_POINT            0xa0000003
+#define SMB2_REPARSE_TAG_HSM                    0xc0000004
+#define SMB2_REPARSE_TAG_DRIVE_EXTENDER         0x80000005
+#define SMB2_REPARSE_TAG_HSM2                   0x80000006
+#define SMB2_REPARSE_TAG_SIS                    0x80000007
+#define SMB2_REPARSE_TAG_WIM                    0x80000008
+#define SMB2_REPARSE_TAG_CSV                    0x80000009
+#define SMB2_REPARSE_TAG_DFS                    0x8000000a
+#define SMB2_REPARSE_TAG_FILTER_MANAGER         0x8000000b
 #define SMB2_REPARSE_TAG_SYMLINK                0xa000000c
+#define SMB2_REPARSE_TAG_IIS_CACHE              0xa0000010
+#define SMB2_REPARSE_TAG_DFSR                   0x80000012
+#define SMB2_REPARSE_TAG_DEDUP                  0x80000013
+#define SMB2_REPARSE_TAG_NFS                    0x80000014
+#define SMB2_REPARSE_TAG_FILE_PLACEHOLDER       0x80000015
+#define SMB2_REPARSE_TAG_DFM                    0x80000016
+#define SMB2_REPARSE_TAG_WOF                    0x80000017
+#define SMB2_REPARSE_TAG_WCI                    0x80000018
+#define SMB2_REPARSE_TAG_WCI_1                  0x90001018
+#define SMB2_REPARSE_TAG_GLOBAL_REPARSE         0xa0000019
+#define SMB2_REPARSE_TAG_CLOUD                  0x9000001a
+#define SMB2_REPARSE_TAG_APPEXECLINK            0x8000001b
+#define SMB2_REPARSE_TAG_PROJFS                 0x9000001c
+#define SMB2_REPARSE_TAG_LX_SYMLINK             0xa000001d
+#define SMB2_REPARSE_TAG_STORAGE_SYNC           0x8000001e
+#define SMB2_REPARSE_TAG_WCI_TOMBSTONE          0xa000001f
+#define SMB2_REPARSE_TAG_UNHANDLED              0x80000020
+#define SMB2_REPARSE_TAG_ONEDRIVE               0x80000021
+#define SMB2_REPARSE_TAG_PROJFS_TOMBSTONE       0xa0000022
+#define SMB2_REPARSE_TAG_AF_UNIX                0x80000023
+#define SMB2_REPARSE_TAG_LX_FIFO                0x80000024
+#define SMB2_REPARSE_TAG_LX_CHR                 0x80000025
+#define SMB2_REPARSE_TAG_LX_BLK                 0x80000026
+#define SMB2_REPARSE_TAG_WCI_LINK               0xa0000027
+#define SMB2_REPARSE_TAG_STORAGE_SYNC_FOLDER    0x90000027
+#define SMB2_REPARSE_TAG_WCI_LINK_1             0xa0001027
+
+/*
+ * Symbolic link error response. [MS-SMB2] 2.2.2.2.1
+ *
+ * A server that walks into a symlink while resolving a path fails the
+ * request with STATUS_STOPPED_ON_SYMLINK and returns this, so that the
+ * client can work out what the link pointed at and try again.
+ *
+ * unparsed_path_length is the number of bytes at the end of the path we
+ * asked for that the server never got to look at, because it stopped at
+ * the link.
+ */
+#define SMB2_SYMLINK_ERROR_TAG 0x4c4d5953
+
+struct smb2_symlink_error_response {
+        uint32_t unparsed_path_length;
+        uint32_t flags;
+        char *subname;
+        char *printname;
+};
+
 /*
  * Reparse_data_buffer
  */
@@ -976,6 +1142,7 @@ struct smb2_reparse_data_buffer {
         uint16_t reparse_data_length;
         union {
                 struct smb2_symlink_reparse_buffer symlink;
+                struct smb2_lx_symlink_reparse_buffer lx_symlink;
         };
 };
 
@@ -1014,22 +1181,31 @@ struct  smb2_ioctl_validate_negotiate_info {
         uint16_t dialect;
 };
 
-#define SMB2_CHANGE_NOTIIFY_FILE_NOTIFY_CHANGE_FILE_NAME    0x00000001
-#define SMB2_CHANGE_NOTIIFY_FILE_NOTIFY_CHANGE_DIR_NAME     0x00000002
-#define SMB2_CHANGE_NOTIIFY_FILE_NOTIFY_CHANGE_ATTRIBUTES   0x00000004
-#define SMB2_CHANGE_NOTIIFY_FILE_NOTIFY_CHANGE_SIZE         0x00000008
-#define SMB2_CHANGE_NOTIIFY_FILE_NOTIFY_CHANGE_LAST_WRITE   0x00000010
-#define SMB2_CHANGE_NOTIIFY_FILE_NOTIFY_CHANGE_LAST_ACCESS  0x00000020
-#define SMB2_CHANGE_NOTIIFY_FILE_NOTIFY_CHANGE_CREATION     0x00000040
-#define SMB2_CHANGE_NOTIIFY_FILE_NOTIFY_CHANGE_EA           0x00000080
-#define SMB2_CHANGE_NOTIIFY_FILE_NOTIFY_CHANGE_SECURITY     0x00000100
-#define SMB2_CHANGE_NOTIIFY_FILE_NOTIFY_CHANGE_STREAM_NAME  0x00000200
-#define SMB2_CHANGE_NOTIIFY_FILE_NOTIFY_CHANGE_STREAM_SIZE  0x00000400
-#define SMB2_CHANGE_NOTIIFY_FILE_NOTIFY_CHANGE_STREAM_WRITE 0x00000800
+#define SMB2_CHANGE_NOTIFY_FILE_NOTIFY_CHANGE_FILE_NAME    0x00000001
+#define SMB2_CHANGE_NOTIFY_FILE_NOTIFY_CHANGE_DIR_NAME     0x00000002
+#define SMB2_CHANGE_NOTIFY_FILE_NOTIFY_CHANGE_ATTRIBUTES   0x00000004
+#define SMB2_CHANGE_NOTIFY_FILE_NOTIFY_CHANGE_SIZE         0x00000008
+#define SMB2_CHANGE_NOTIFY_FILE_NOTIFY_CHANGE_LAST_WRITE   0x00000010
+#define SMB2_CHANGE_NOTIFY_FILE_NOTIFY_CHANGE_LAST_ACCESS  0x00000020
+#define SMB2_CHANGE_NOTIFY_FILE_NOTIFY_CHANGE_CREATION     0x00000040
+#define SMB2_CHANGE_NOTIFY_FILE_NOTIFY_CHANGE_EA           0x00000080
+#define SMB2_CHANGE_NOTIFY_FILE_NOTIFY_CHANGE_SECURITY     0x00000100
+#define SMB2_CHANGE_NOTIFY_FILE_NOTIFY_CHANGE_STREAM_NAME  0x00000200
+#define SMB2_CHANGE_NOTIFY_FILE_NOTIFY_CHANGE_STREAM_SIZE  0x00000400
+#define SMB2_CHANGE_NOTIFY_FILE_NOTIFY_CHANGE_STREAM_WRITE 0x00000800
 
 #define SMB2_CHANGE_NOTIFY_WATCH_TREE    0x0001
 
 #define SMB2_CHANGE_NOTIFY_REQUEST_SIZE 32
+
+#define SMB2_NOTIFY_CHANGE_FILE_ACTION_ADDED                0x0001
+#define SMB2_NOTIFY_CHANGE_FILE_ACTION_REMOVED              0x0002
+#define SMB2_NOTIFY_CHANGE_FILE_ACTION_MODIFIED             0x0003
+#define SMB2_NOTIFY_CHANGE_FILE_ACTION_RENAMED_OLD_NAME     0x0004
+#define SMB2_NOTIFY_CHANGE_FILE_ACTION_RENAMED_NEW_NAME     0x0005
+#define SMB2_NOTIFY_CHANGE_FILE_ACTION_ADDED_STREAM         0x0006
+#define SMB2_NOTIFY_CHANGE_FILE_ACTION_REMOVED_STREAM       0x0007
+#define SMB2_NOTIFY_CHANGE_FILE_ACTION_MODIFIED_STREAM      0x0008
 
 struct smb2_change_notify_request {
         uint16_t flags;
@@ -1045,6 +1221,19 @@ struct smb2_change_notify_reply {
         uint32_t output_buffer_length;
         uint8_t *output;
 };
+
+struct smb2_file_notify_change_information {
+        uint32_t action;
+        const char *name;
+        struct smb2_file_notify_change_information *next;
+};
+
+int
+smb2_decode_filenotifychangeinformation(
+    struct smb2_context *smb2,
+    struct smb2_file_notify_change_information *fnc,
+    struct smb2_iovec *vec,
+    uint32_t next_entry_offset);
 
 #define SMB2_OPLOCK_LEVEL_NONE        0x00
 #define SMB2_OPLOCK_LEVEL_II          0x01

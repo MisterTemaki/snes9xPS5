@@ -127,7 +127,7 @@ struct rpc_pdu *rpc_nfs3_null_task(struct rpc_context *rpc, rpc_cb cb,
 		return NULL;
 	}
 
-	if (rpc_queue_pdu(rpc, pdu) != 0) {
+	if (rpc_queue_pdu2(rpc, pdu, PDU_Q_PRIO_HI) != 0) {
 		rpc_set_error(rpc, "Out of memory. Failed to queue pdu for NFS3/NULL call");
 		return NULL;
 	}
@@ -153,7 +153,7 @@ struct rpc_pdu *rpc_nfs3_getattr_task(struct rpc_context *rpc, rpc_cb cb,
 		return NULL;
 	}
 
-	if (rpc_queue_pdu(rpc, pdu) != 0) {
+	if (rpc_queue_pdu2(rpc, pdu, PDU_Q_PRIO_HI) != 0) {
 		rpc_set_error(rpc, "Out of memory. Failed to queue pdu for NFS3/GETATTR call");
 		return NULL;
 	}
@@ -179,7 +179,7 @@ struct rpc_pdu *rpc_nfs3_pathconf_task(struct rpc_context *rpc, rpc_cb cb,
 		return NULL;
 	}
 
-	if (rpc_queue_pdu(rpc, pdu) != 0) {
+	if (rpc_queue_pdu2(rpc, pdu, PDU_Q_PRIO_HI) != 0) {
 		rpc_set_error(rpc, "Out of memory. Failed to queue pdu for NFS3/PATHCONF call");
 		return NULL;
 	}
@@ -205,7 +205,7 @@ struct rpc_pdu *rpc_nfs3_lookup_task(struct rpc_context *rpc, rpc_cb cb,
 		return NULL;
 	}
 
-	if (rpc_queue_pdu(rpc, pdu) != 0) {
+	if (rpc_queue_pdu2(rpc, pdu, PDU_Q_PRIO_HI) != 0) {
 		rpc_set_error(rpc, "Out of memory. Failed to queue pdu for NFS3/LOOKUP call");
 		return NULL;
 	}
@@ -231,7 +231,7 @@ struct rpc_pdu *rpc_nfs3_access_task(struct rpc_context *rpc, rpc_cb cb,
 		return NULL;
 	}
 
-	if (rpc_queue_pdu(rpc, pdu) != 0) {
+	if (rpc_queue_pdu2(rpc, pdu, PDU_Q_PRIO_HI) != 0) {
 		rpc_set_error(rpc, "Out of memory. Failed to queue pdu for NFS3/ACCESS call");
 		return NULL;
 	}
@@ -336,7 +336,17 @@ rpc_nfs3_readv_task(struct rpc_context *rpc, rpc_cb cb,
         pdu->requested_read_count = pdu->in.remaining_size;
         pdu->zero_copy_iov = 1;
 
-	if (rpc_queue_pdu(rpc, pdu) != 0) {
+        /*
+         * Queue READs as high priority so they can be dispatched ahead of
+         * WRITEs. WRITEs carry a full data payload and a deep backlog of them
+         * can delay a READ for a long time even though the READ itself is
+         * cheap to put on the wire. Getting READs to the server sooner lets
+         * the server start work on them earlier.
+         *
+         * Note that WRITE and COMMIT both stay low priority, so their relative
+         * order, and therefore write-then-commit semantics, is unchanged.
+         */
+        if (rpc_queue_pdu2(rpc, pdu, PDU_Q_PRIO_HI) != 0) {
 		rpc_set_error(rpc, "Out of memory. Failed to queue pdu for NFS3/READ call");
 		return NULL;
 	}
@@ -410,14 +420,15 @@ struct rpc_pdu *rpc_nfs3_writev_task(struct rpc_context *rpc, rpc_cb cb,
         }
 
         /*
-         * We add 4 to the user provided iovcnt to account for one each for
+         * We add 5 to the user provided iovcnt to account for one each for
          * the following:
          * - Record marker
          * - RPC header
          * - NFS header
+         * - Write length
          * - Padding (optional)
          */
-	pdu = rpc_allocate_pdu2(rpc, NFS_PROGRAM, NFS_V3, NFS3_WRITE, cb, private_data, (zdrproc_t)zdr_WRITE3res, sizeof(WRITE3res), 0, iovcnt + 4);
+	pdu = rpc_allocate_pdu2(rpc, NFS_PROGRAM, NFS_V3, NFS3_WRITE, cb, private_data, (zdrproc_t)zdr_WRITE3res, sizeof(WRITE3res), 0, iovcnt + 5);
 	if (pdu == NULL) {
 		rpc_set_error(rpc, "Out of memory. Failed to allocate pdu for NFS3/WRITE call");
 		return NULL;
@@ -545,7 +556,7 @@ rpc_nfs3_setattr_task(struct rpc_context *rpc, rpc_cb cb, SETATTR3args *args,
 		return NULL;
 	}
 
-	if (rpc_queue_pdu(rpc, pdu) != 0) {
+	if (rpc_queue_pdu2(rpc, pdu, PDU_Q_PRIO_HI) != 0) {
 		rpc_set_error(rpc, "Out of memory. Failed to queue pdu for NFS3/SETATTR call");
 		return NULL;
 	}
@@ -570,7 +581,7 @@ struct rpc_pdu *rpc_nfs3_mkdir_task(struct rpc_context *rpc, rpc_cb cb,
 		return NULL;
 	}
 
-	if (rpc_queue_pdu(rpc, pdu) != 0) {
+	if (rpc_queue_pdu2(rpc, pdu, PDU_Q_PRIO_HI) != 0) {
 		rpc_set_error(rpc, "Out of memory. Failed to queue pdu for NFS3/MKDIR call");
 		return NULL;
 	}
@@ -596,7 +607,7 @@ struct rpc_pdu *rpc_nfs3_rmdir_task(struct rpc_context *rpc, rpc_cb cb,
 		return NULL;
 	}
 
-	if (rpc_queue_pdu(rpc, pdu) != 0) {
+	if (rpc_queue_pdu2(rpc, pdu, PDU_Q_PRIO_HI) != 0) {
 		rpc_set_error(rpc, "Out of memory. Failed to queue pdu for NFS3/RMDIR call");
 		return NULL;
 	}
@@ -621,7 +632,7 @@ struct rpc_pdu *rpc_nfs3_create_task(struct rpc_context *rpc, rpc_cb cb,
 		return NULL;
 	}
 
-	if (rpc_queue_pdu(rpc, pdu) != 0) {
+	if (rpc_queue_pdu2(rpc, pdu, PDU_Q_PRIO_HI) != 0) {
 		rpc_set_error(rpc, "Out of memory. Failed to queue pdu for NFS3/CREATE call");
 		return NULL;
 	}
@@ -647,7 +658,7 @@ struct rpc_pdu *rpc_nfs3_mknod_task(struct rpc_context *rpc, rpc_cb cb,
 		return NULL;
 	}
 
-	if (rpc_queue_pdu(rpc, pdu) != 0) {
+	if (rpc_queue_pdu2(rpc, pdu, PDU_Q_PRIO_HI) != 0) {
 		rpc_set_error(rpc, "Out of memory. Failed to queue pdu for NFS3/MKNOD call");
 		return NULL;
 	}
@@ -673,7 +684,7 @@ struct rpc_pdu *rpc_nfs3_remove_task(struct rpc_context *rpc, rpc_cb cb,
 		return NULL;
 	}
 
-	if (rpc_queue_pdu(rpc, pdu) != 0) {
+	if (rpc_queue_pdu2(rpc, pdu, PDU_Q_PRIO_HI) != 0) {
 		rpc_set_error(rpc, "Out of memory. Failed to queue pdu for NFS3/REMOVE call");
 		return NULL;
 	}
@@ -699,7 +710,7 @@ struct rpc_pdu *rpc_nfs3_readdir_task(struct rpc_context *rpc, rpc_cb cb,
 		return NULL;
 	}
 
-	if (rpc_queue_pdu(rpc, pdu) != 0) {
+	if (rpc_queue_pdu2(rpc, pdu, PDU_Q_PRIO_HI) != 0) {
 		rpc_set_error(rpc, "Out of memory. Failed to queue pdu for NFS3/READDIR call");
 		return NULL;
 	}
@@ -725,7 +736,7 @@ struct rpc_pdu *rpc_nfs3_readdirplus_task(struct rpc_context *rpc, rpc_cb cb,
 		return NULL;
 	}
 
-	if (rpc_queue_pdu(rpc, pdu) != 0) {
+	if (rpc_queue_pdu2(rpc, pdu, PDU_Q_PRIO_HI) != 0) {
 		rpc_set_error(rpc, "Out of memory. Failed to queue pdu for NFS3/READDIRPLUS call");
 		return NULL;
 	}
@@ -751,7 +762,7 @@ struct rpc_pdu *rpc_nfs3_fsstat_task(struct rpc_context *rpc, rpc_cb cb,
 		return NULL;
 	}
 
-	if (rpc_queue_pdu(rpc, pdu) != 0) {
+	if (rpc_queue_pdu2(rpc, pdu, PDU_Q_PRIO_HI) != 0) {
 		rpc_set_error(rpc, "Out of memory. Failed to queue pdu for NFS3/FSSTAT call");
 		return NULL;
 	}
@@ -777,7 +788,7 @@ struct rpc_pdu *rpc_nfs3_fsinfo_task(struct rpc_context *rpc, rpc_cb cb,
 		return NULL;
 	}
 
-	if (rpc_queue_pdu(rpc, pdu) != 0) {
+	if (rpc_queue_pdu2(rpc, pdu, PDU_Q_PRIO_HI) != 0) {
 		rpc_set_error(rpc, "Out of memory. Failed to queue pdu for NFS3/FSINFO call");
 		return NULL;
 	}
@@ -803,7 +814,7 @@ rpc_nfs3_readlink_task(struct rpc_context *rpc, rpc_cb cb,
 		return NULL;
 	}
 
-	if (rpc_queue_pdu(rpc, pdu) != 0) {
+	if (rpc_queue_pdu2(rpc, pdu, PDU_Q_PRIO_HI) != 0) {
 		rpc_set_error(rpc, "Out of memory. Failed to queue pdu for NFS3/READLINK call");
 		return NULL;
 	}
@@ -816,7 +827,12 @@ struct rpc_pdu *rpc_nfs3_symlink_task(struct rpc_context *rpc, rpc_cb cb,
 {
 	struct rpc_pdu *pdu;
 
-	pdu = rpc_allocate_pdu(rpc, NFS_PROGRAM, NFS_V3, NFS3_SYMLINK, cb, private_data, (zdrproc_t)zdr_SYMLINK3res, sizeof(SYMLINK3res));
+	/*
+	 * symlink target max length is 4096 bytes and we need space to encode
+	 * symlink attributes too, so we use additional 512 bytes for request
+	 * encoding.
+	 */
+	pdu = rpc_allocate_pdu2(rpc, NFS_PROGRAM, NFS_V3, NFS3_SYMLINK, cb, private_data, (zdrproc_t)zdr_SYMLINK3res, sizeof(SYMLINK3res), 512, 0);
 	if (pdu == NULL) {
 		rpc_set_error(rpc, "Out of memory. Failed to allocate pdu for NFS3/SYMLINK call");
 		return NULL;
@@ -828,7 +844,7 @@ struct rpc_pdu *rpc_nfs3_symlink_task(struct rpc_context *rpc, rpc_cb cb,
 		return NULL;
 	}
 
-	if (rpc_queue_pdu(rpc, pdu) != 0) {
+	if (rpc_queue_pdu2(rpc, pdu, PDU_Q_PRIO_HI) != 0) {
 		rpc_set_error(rpc, "Out of memory. Failed to queue pdu for NFS3/SYMLINK call");
 		return NULL;
 	}
@@ -854,7 +870,7 @@ struct rpc_pdu *rpc_nfs3_rename_task(struct rpc_context *rpc, rpc_cb cb,
 		return NULL;
 	}
 
-	if (rpc_queue_pdu(rpc, pdu) != 0) {
+	if (rpc_queue_pdu2(rpc, pdu, PDU_Q_PRIO_HI) != 0) {
 		rpc_set_error(rpc, "Out of memory. Failed to queue pdu for NFS3/RENAME call");
 		return NULL;
 	}
@@ -879,7 +895,7 @@ struct rpc_pdu *rpc_nfs3_link_task(struct rpc_context *rpc, rpc_cb cb,
 		return NULL;
 	}
 
-	if (rpc_queue_pdu(rpc, pdu) != 0) {
+	if (rpc_queue_pdu2(rpc, pdu, PDU_Q_PRIO_HI) != 0) {
 		rpc_set_error(rpc, "Out of memory. Failed to queue pdu for NFS3/LINK call");
 		return NULL;
 	}

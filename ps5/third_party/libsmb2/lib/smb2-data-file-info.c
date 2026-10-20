@@ -63,15 +63,19 @@ smb2_decode_file_basic_info(struct smb2_context *smb2,
 
         smb2_get_uint64(vec, 0, &t);
         smb2_win_to_timeval(t, &fs->creation_time);
+        fs->creation_time_raw = t;
 
         smb2_get_uint64(vec, 8, &t);
         smb2_win_to_timeval(t, &fs->last_access_time);
+        fs->last_access_time_raw = t;
 
         smb2_get_uint64(vec, 16, &t);
         smb2_win_to_timeval(t, &fs->last_write_time);
+        fs->last_write_time_raw = t;
 
         smb2_get_uint64(vec, 24, &t);
         smb2_win_to_timeval(t, &fs->change_time);
+        fs->change_time_raw = t;
 
         smb2_get_uint32(vec, 32, &fs->file_attributes);
 
@@ -88,6 +92,37 @@ smb2_tv_timeval_to_win(struct smb2_timeval *tv){
                return 0xffffffffffffffffULL;
         }
         return smb2_timeval_to_win(tv);
+}
+
+int
+smb2_decode_file_attribute_tag_info(struct smb2_context *smb2 _U_,
+                                    void *memctx _U_,
+                                    struct smb2_file_attribute_tag_info *fs,
+                                    struct smb2_iovec *vec)
+{
+        if (vec->len < 8) {
+                return -1;
+        }
+
+        smb2_get_uint32(vec, 0, &fs->file_attributes);
+        smb2_get_uint32(vec, 4, &fs->reparse_tag);
+
+        return 0;
+}
+
+int
+smb2_encode_file_attribute_tag_info(struct smb2_context *smb2 _U_,
+                                    struct smb2_file_attribute_tag_info *fs,
+                                    struct smb2_iovec *vec)
+{
+        if (vec->len < 8) {
+                return -1;
+        }
+
+        smb2_set_uint32(vec, 0, fs->file_attributes);
+        smb2_set_uint32(vec, 4, fs->reparse_tag);
+
+        return 8;
 }
 
 int
@@ -145,6 +180,190 @@ smb2_encode_file_standard_info(struct smb2_context *smb2,
         return 24;
 }
 
+#include <stdio.h>
+
+int
+smb2_decode_file_stream_info(struct smb2_context *smb2,
+                               void *memctx,
+                               struct smb2_file_stream_info *fs,
+                               struct smb2_iovec *vec)
+{
+        size_t offset = 0;
+        uint32_t our_offset = 0;
+        uint32_t next_offset;
+        int name_len;
+        const char *name;
+
+        do {
+                size_t avail;
+
+                /* The 24 byte fixed part of the entry must be present. */
+                if (offset + 24 > vec->len) {
+                        smb2_set_error(smb2, "Not enough data for stream "
+                                       "info entry");
+                        return -1;
+                }
+                next_offset = 0;
+                smb2_get_uint32(vec, (int)offset + 0, &next_offset);
+                smb2_get_uint32(vec, (int)offset + 4, &fs->stream_name_length);
+                smb2_get_uint64(vec, (int)offset + 8, &fs->stream_size);
+                smb2_get_uint64(vec, (int)offset + 16,
+                                &fs->stream_allocation_size);
+
+                if (fs->stream_name_length > 0) {
+                        /* The name follows the fixed part of the entry. */
+                        avail = vec->len - offset - 24;
+                        name_len = (fs->stream_name_length > avail) ?
+                                (int)avail : (int)fs->stream_name_length;
+                        if (name_len > 0) {
+                                name = smb2_utf16_to_utf8(
+                                        (uint16_t *)(void *)&vec->buf[offset + 24],
+                                        name_len / 2);
+                                if (!name) {
+                                        return -1;
+                                }
+                                fs->stream_name_length = strlen(name);
+                                fs->stream_name = smb2_alloc_data(smb2, memctx, fs->stream_name_length + 1);
+                                if (fs->stream_name == NULL) {
+                                        free(discard_const(name));
+                                        return -1;
+                                }
+                                strcpy(discard_const(fs->stream_name), name);
+                                free(discard_const(name));
+                        } else {
+                                fs->stream_name = NULL;
+                        }
+                } else {
+                        fs->stream_name = NULL;
+                }
+
+                if (next_offset) {
+                        /*
+                         * NextEntryOffset has to skip at least the 24 byte
+                         * fixed part of the entry we just decoded, and must
+                         * stay inside the buffer. Callers size the output
+                         * array as 1 + vec->len / 24 entries, so a smaller
+                         * NextEntryOffset would let a malicious server drive
+                         * many more iterations than there are entries and
+                         * walk 'fs' off the end of that allocation.
+                         */
+                        if (next_offset < 24 ||
+                            next_offset > vec->len - offset) {
+                                smb2_set_error(smb2, "Invalid NextEntryOffset "
+                                               "%u in stream info",
+                                               next_offset);
+                                return -1;
+                        }
+                        offset += next_offset;
+                }
+
+                /*
+                 * Only advertise a next entry if we are actually going to
+                 * decode one. NextEntryOffset may point exactly at the end
+                 * of the buffer, in which case the loop terminates here and
+                 * whoever walks the chain would otherwise follow
+                 * next_entry_offset into an entry we never filled in.
+                 */
+                if (!next_offset || (offset + 24) > vec->len) {
+                        fs->next_entry_offset = 0;
+                        break;
+                }
+
+                /* note - since name is now a separate alloc, our offset is just
+                 * sizeof struct alone, so update our struct
+                 */
+                our_offset += sizeof(struct smb2_file_stream_info);
+                fs->next_entry_offset = our_offset;
+                fs++;
+        } while (1);
+
+        return 0;
+}
+
+int
+smb2_encode_file_stream_info(struct smb2_context *smb2,
+                             struct smb2_file_stream_info *fs,
+                             struct smb2_iovec *vec)
+{
+        uint32_t offset = 0;
+
+        do {
+                struct smb2_utf16 *name = NULL;
+                uint32_t name_len = 0;
+                uint32_t entry_len, padded_len, i;
+                size_t avail;
+
+                /* The 24 byte fixed part of the entry must fit in the buffer
+                 * we were handed.
+                 */
+                if ((size_t)offset + 24 > vec->len) {
+                        smb2_set_error(smb2, "Not enough space for stream "
+                                       "info entry");
+                        return -1;
+                }
+                avail = vec->len - offset - 24;
+
+                if (fs->stream_name) {
+                        name = smb2_utf8_to_utf16((const char*)fs->stream_name);
+                        if (name == NULL) {
+                                smb2_set_error(smb2, "Could not convert "
+                                               "stream name to UTF-16");
+                                return -1;
+                        }
+                        name_len = 2 * name->len;
+                        if (name_len > avail) {
+                                free(name);
+                                smb2_set_error(smb2, "Not enough space for "
+                                               "stream name");
+                                return -1;
+                        }
+                }
+
+                /* StreamNameLength is the length of the name we are about to
+                 * write, in bytes. Derive it from the converted name rather
+                 * than from fs->stream_name_length, which the caller sets in
+                 * whatever units it likes and which the decoder fills in with
+                 * the length of the UTF-8 name.
+                 */
+                smb2_set_uint32(vec, offset + 4, name_len);
+                smb2_set_uint64(vec, offset + 8, fs->stream_size);
+                smb2_set_uint64(vec, offset + 16, fs->stream_allocation_size);
+                if (name) {
+                        memcpy((uint16_t *)(void *)&vec->buf[offset + 24],
+                               name->val, name_len);
+                        free(name);
+                }
+
+                entry_len = 24 + name_len;
+
+                if (!fs->next_entry_offset) {
+                        smb2_set_uint32(vec, offset + 0, 0);
+                        offset += entry_len;
+                        break;
+                }
+
+                /* NextEntryOffset is relative to the start of this entry, not
+                 * an absolute offset into the buffer, and the next entry has
+                 * to start on an 8 byte boundary. offset stays 8 byte aligned
+                 * because every entry but the last advances by padded_len.
+                 */
+                padded_len = PAD_TO_64BIT(entry_len);
+                if ((size_t)offset + padded_len > vec->len) {
+                        smb2_set_error(smb2, "Not enough space for stream "
+                                       "info padding");
+                        return -1;
+                }
+                smb2_set_uint32(vec, offset + 0, padded_len);
+                for (i = entry_len; i < padded_len; i++) {
+                        smb2_set_uint8(vec, offset + i, 0);
+                }
+                offset += padded_len;
+                fs++;
+        } while (1);
+
+        return (int)offset;
+}
+
 int
 smb2_decode_file_position_info(struct smb2_context *smb2,
                                void *memctx,
@@ -196,10 +415,19 @@ smb2_decode_file_all_info(struct smb2_context *smb2,
         smb2_get_uint64(vec, 80, &fs->current_byte_offset);
         smb2_get_uint32(vec, 88, &fs->mode);
         smb2_get_uint32(vec, 92, &fs->alignment_requirement);
-        smb2_get_uint32(vec, 96, &name_len);
+        if (smb2_get_uint32(vec, 96, &name_len)) {
+                return -1;
+        }
 
         if (name_len > 0) {
-                name = smb2_utf16_to_utf8((uint16_t *)&vec->buf[100], name_len / 2);
+                if (name_len > vec->len - 100) {
+                        /* truncate if the server supplied a short reply */
+                        name_len = (uint32_t)(vec->len - 100);
+                }
+                name = smb2_utf16_to_utf8((uint16_t *)(void *)&vec->buf[100], name_len / 2);
+                if (!name) {
+                        return -1;
+                }
                 fs->name = smb2_alloc_data(smb2, memctx, strlen(name) + 1);
                 if (fs->name == NULL) {
                         free(discard_const(name));
@@ -230,7 +458,7 @@ smb2_encode_file_all_info(struct smb2_context *smb2,
         v.len = 40;
         smb2_encode_file_basic_info(smb2, &fs->basic, &v);
 
-        if (vec->len < 64) {
+        if (vec->len < 100) {
                 return -1;
         }
 
@@ -248,8 +476,14 @@ smb2_encode_file_all_info(struct smb2_context *smb2,
                 name = smb2_utf8_to_utf16((const char*)fs->name);
                 if (name) {
                         name_len = 2 * name->len;
+                        if (vec->len - 100 < (size_t)name_len) {
+                                free(name);
+                                smb2_set_error(smb2, "Not enough space for "
+                                               "file name");
+                                return -1;
+                        }
                         smb2_set_uint32(vec, 96, name_len);
-                        memcpy((uint16_t *)&vec->buf[100], name->val, name_len);
+                        memcpy((uint16_t *)(void *)&vec->buf[100], name->val, name_len);
                         free(name);
                         return 100 + name_len;
                 } else {
@@ -269,7 +503,7 @@ smb2_decode_file_network_open_info(struct smb2_context *smb2,
 {
         uint64_t t;
 
-	if (vec->len < 56) {
+        if (vec->len < 56) {
                 return -1;
         }
 
@@ -296,11 +530,11 @@ smb2_encode_file_network_open_info(struct smb2_context *smb2,
                                    struct smb2_file_network_open_info *fs,
                                    struct smb2_iovec *vec)
 {
-		uint64_t t;
+        uint64_t t;
+
         if (vec->len < 56) {
                 return -1;
         }
-
 
         t = smb2_tv_timeval_to_win(&fs->creation_time);
         smb2_set_uint64(vec, 0, t);
@@ -317,6 +551,111 @@ smb2_encode_file_network_open_info(struct smb2_context *smb2,
         smb2_set_uint64(vec, 32, fs->allocation_size);
         smb2_set_uint64(vec, 40, fs->end_of_file);
         smb2_set_uint32(vec, 48, fs->file_attributes);
-        return 52;
+        smb2_set_uint32(vec, 52, 0);
+        return 56;
+}
+
+
+int
+smb2_decode_file_normalized_name_info(struct smb2_context *smb2,
+                          void *memctx,
+                          struct smb2_file_name_info *fs,
+                          struct smb2_iovec *vec)
+{
+        struct smb2_iovec v _U_;
+        uint32_t name_len;
+        const char *name;
+
+        if (vec->len < 4) {
+                return -1;
+        }
+
+        v.buf = &vec->buf[0];
+        v.len = 4;
+
+        smb2_get_uint32(vec, 0, &fs->file_name_length);
+
+        if (fs->file_name_length > 0) {
+                name_len = fs->file_name_length;
+                /* Compare against what is left of the buffer rather than
+                 * adding to name_len: the addition is done in uint32 and a
+                 * FileNameLength of 0xfffffffc..0xffffffff wraps it to
+                 * 0..3, so the clamp below would never fire and we would
+                 * read ~2GB past the end of vec. vec->len >= 4 above.
+                 */
+                if (name_len > vec->len - 4) {
+                        /* name can be truncated if client supplied small buffer */
+                        name_len = (uint32_t)(vec->len - 4);
+                }
+                if (name_len > 0) {
+                        name = smb2_utf16_to_utf8((uint16_t *)(void *)&vec->buf[4], name_len / 2);
+                        if (!name) {
+                                return -1;
+                        }
+                        name_len = strlen(name);
+                        fs->name = smb2_alloc_data(smb2, memctx, name_len + 1);
+                        if (fs->name == NULL) {
+                                free(discard_const(name));
+                                return -1;
+                        }
+                        strcpy(discard_const(fs->name), name);
+                        free(discard_const(name));
+                } else {
+                        fs->name = NULL;
+                }
+        } else {
+                fs->name = NULL;
+        }
+        return 0;
+}
+
+#include <stdio.h>
+
+int
+smb2_encode_file_normalized_name_info(struct smb2_context *smb2,
+                          struct smb2_file_name_info *fs,
+                          struct smb2_iovec *vec)
+{
+        struct smb2_utf16 *name = NULL;
+        uint32_t name_len;
+
+        /* Compare against what is left of the buffer rather than adding to
+         * file_name_length: the addition is done in uint32 and a caller
+         * supplied length of 0xfffffffc..0xffffffff wraps it to 0..3, so the
+         * check would pass and the memset below would run off the end.
+         */
+        if (vec->len < 4 || fs->file_name_length > vec->len - 4) {
+                return -1;
+        }
+
+        if (fs->name) {
+                name = smb2_utf8_to_utf16((const char*)fs->name);
+                if (name) {
+                        name_len = 2 * name->len;
+                        if (name_len > vec->len - 4) {
+                                free(name);
+                                smb2_set_error(smb2, "Not enough space for "
+                                               "file name");
+                                return -1;
+                        }
+                        if (fs->file_name_length < name_len) {
+                                /* should be set already */
+                                fs->file_name_length = name_len;
+                        }
+                        memcpy((uint16_t *)(void *)&vec->buf[4], name->val, name_len);
+                        if (name_len < fs->file_name_length) {
+                                memset(&vec->buf[4 + name_len], 0,
+                                        fs->file_name_length - name_len);
+                        }
+                        free(name);
+                } else {
+                        return -1;
+                }
+        } else {
+                fs->file_name_length = 0;
+        }
+
+        smb2_set_uint32(vec, 0, fs->file_name_length);
+        return (int)(4 + fs->file_name_length);
 }
 

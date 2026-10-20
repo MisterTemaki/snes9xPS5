@@ -1,7 +1,7 @@
 #!/bin/bash
 # Runs the NFS backend against a real NFSv3 server (unfs3) on this machine: bash nfs_server_test.sh <nfs-server-test>
 # Needs root (rpcbind listens on port 111), rpcbind, rpcinfo and unfsd (UNFSD=/path/to/unfsd if it is not in PATH).
-# Stock unfs3 splits every reply above a few KB into RPC fragments, which libnfs 6.0.2 cannot join; build it with
+# Stock unfs3 splits every reply above a few KB into RPC fragments, which libnfs 6.0.2 could not join (not rechecked with the current libnfs); build it with
 #   transp = svc_vc_create(sock, 1 << 22, 1 << 22);   (daemon.c, instead of 0, 0)
 # so the replies of the backend's 128 KiB reads stay in one piece. Skips (and passes) when something is missing.
 set -u

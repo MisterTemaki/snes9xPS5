@@ -36,8 +36,7 @@
 #include "smb2/smb2.h"
 #include "smb2/libsmb2.h"
 #include "smb2/libsmb2-raw.h"
-#include "smb2/libsmb2-dcerpc.h"
-#include "smb2/libsmb2-dcerpc-srvsvc.h"
+#include "smb2/libsmb2-share-enum.h"
 #include "smb2/smb2-errors.h"
 
 namespace netfs
@@ -84,6 +83,8 @@ void OnDone(smb2_context*, int status, void* command_data, void* private_data)
 	r->status = status;
 	r->data = command_data;
 }
+
+void Ignore(smb2_context*, int, void*, void*) {}
 
 int Errno(int status) // libsmb2 reports -errno; a few paths report +errno
 {
@@ -282,7 +283,11 @@ public:
 				if (q == 0 && Pump([&] { return r->done; }, 500) != 0)
 					m_graveyard.push_back(std::move(r));
 			}
-			smb2_destroy_context(m_ctx); // also frees the handles and directories still open
+			// libsmb2 no longer frees the handles still open when the context goes (upstream daa92d9): a close
+			// queued now is never sent, and smb2_destroy_context fails it, which frees its handle
+			for (File* f : m_files)
+				Forget(f);
+			smb2_destroy_context(m_ctx);
 			m_ctx = nullptr;
 		}
 		for (File* f : m_files)
@@ -476,13 +481,15 @@ public:
 		File* f = static_cast<File*>(h);
 		if (!f || !m_files.erase(f))
 			return;
-		if (Usable()) // a dead connection frees its handles when it is destroyed
+		if (Usable())
 		{
 			std::unique_ptr<Req> r(new Req);
 			const int q = smb2_close_async(m_ctx, f->fh, OnDone, r.get());
 			if (q == 0 && Pump([&] { return r->done; }, 1000) != 0)
 				m_graveyard.push_back(std::move(r));
 		}
+		else if (m_ctx)
+			Forget(f); // a dead connection: the handle is freed when the context is destroyed
 		delete f;
 	}
 
@@ -505,21 +512,26 @@ public:
 		if (!st.ok())
 			return Status::Errno(EACCES);
 		std::unique_ptr<Req> r(new Req);
-		const int rc = ipc.Await(r, smb2_share_enum_async(ipc.m_ctx, SHARE_INFO_1, OnDone, r.get()));
+		const int rc = ipc.Await(r, smb2_share_enum_async(ipc.m_ctx, SMB2_SHARE_INFO_1, OnDone, r.get()));
+		// a server-side error (a positive WERROR) still hands over a reply to free
+		auto* rep = r ? static_cast<smb2_share_enum_reply*>(r->data) : nullptr;
 		if (rc < 0)
+		{
+			if (rep)
+				smb2_free_data(ipc.m_ctx, rep);
 			return Status::Errno(-rc);
-		auto* rep = static_cast<srvsvc_NetrShareEnum_rep*>(r->data);
+		}
 		if (!rep)
 			return Status::Errno(EIO);
 		out.clear();
-		const auto& l1 = rep->ses.ShareInfo.Level1;
-		for (uint32_t i = 0; l1.Buffer && i < l1.EntriesRead; i++)
+		const smb2_share_info_1* l1 = rep->level == SMB2_SHARE_INFO_1 ? rep->share_info.info_1 : nullptr;
+		for (uint32_t i = 0; l1 && i < rep->entries_read; i++)
 		{
-			const auto& si = l1.Buffer->share_info_1[i];
-			const bool disk = (si.type & 3) == SHARE_TYPE_DISKTREE;
-			const bool hidden = (si.type & SHARE_TYPE_HIDDEN) != 0;
-			if (disk && !hidden && si.netname.utf8)
-				out.push_back(si.netname.utf8);
+			const smb2_share_info_1& si = l1[i];
+			const bool disk = (si.type & 3) == SMB2_SHARE_TYPE_DISKTREE;
+			const bool hidden = (si.type & SMB2_SHARE_TYPE_HIDDEN) != 0;
+			if (disk && !hidden && si.netname)
+				out.push_back(si.netname);
 		}
 		smb2_free_data(ipc.m_ctx, rep);
 		return Status::Ok();
@@ -559,6 +571,15 @@ private:
 			}
 		}
 		return 0;
+	}
+
+	// Queues a close of the handle that is never waited for. Whether the server gets it or not, libsmb2 frees the
+	// handle when the close completes, which smb2_destroy_context makes happen at the latest.
+	void Forget(File* f)
+	{
+		if (f->fh)
+			smb2_close_async(m_ctx, f->fh, Ignore, nullptr);
+		f->fh = nullptr;
 	}
 
 	int Die()

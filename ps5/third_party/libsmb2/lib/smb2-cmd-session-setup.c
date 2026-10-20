@@ -73,6 +73,10 @@ smb2_encode_session_setup_request(struct smb2_context *smb2,
         }
 
         iov = smb2_add_iovector(smb2, &pdu->out, buf, len, free);
+        if (iov == NULL) {
+                smb2_set_error(smb2, "Failed to add iovector for session setup request");
+                return -1;
+        }
 
         smb2_set_uint16(iov, 0, SMB2_SESSION_SETUP_REQUEST_SIZE);
         smb2_set_uint8(iov, 2, req->flags);
@@ -95,6 +99,10 @@ smb2_encode_session_setup_request(struct smb2_context *smb2,
                                 buf,
                                 req->security_buffer_length,
                                 free);
+        if (iov == NULL) {
+                smb2_set_error(smb2, "Failed to add iovector for session setup security buffer");
+                return -1;
+        }
         return 0;
 }
 
@@ -142,6 +150,10 @@ smb2_encode_session_setup_reply(struct smb2_context *smb2,
         }
 
         iov = smb2_add_iovector(smb2, &pdu->out, buf, len, free);
+        if (iov == NULL) {
+                smb2_set_error(smb2, "Failed to add iovector for session setup reply");
+                return -1;
+        }
 
         smb2_set_uint16(iov, 0, SMB2_SESSION_SETUP_REPLY_SIZE);
         smb2_set_uint16(iov, 2, rep->session_flags);
@@ -164,6 +176,10 @@ smb2_encode_session_setup_reply(struct smb2_context *smb2,
                                         buf,
                                         len,
                                         free);
+                if (iov == NULL) {
+                        smb2_set_error(smb2, "Failed to add iovector for session setup reply buffer");
+                        return -1;
+                }
         }
         /* TODO append neg contexts? */
         return 0;
@@ -194,7 +210,7 @@ smb2_cmd_session_setup_reply_async(struct smb2_context *smb2,
         return pdu;
 }
 
-#define IOV_OFFSET (rep->security_buffer_offset - SMB2_HEADER_SIZE - \
+#define IOV_OFFSET_SESSION (rep->security_buffer_offset - SMB2_HEADER_SIZE - \
                     (SMB2_SESSION_SETUP_REPLY_SIZE & 0xfffe))
 
 int
@@ -226,7 +242,8 @@ smb2_process_session_setup_fixed(struct smb2_context *smb2,
         smb2_get_uint16(iov, 4, &rep->security_buffer_offset);
         smb2_get_uint16(iov, 6, &rep->security_buffer_length);
         if (rep->security_buffer_length &&
-            (rep->security_buffer_offset + rep->security_buffer_length > (uint16_t)smb2->spl)) {
+            ((uint32_t)rep->security_buffer_offset +
+             rep->security_buffer_length > smb2->spl)) {
                 smb2_set_error(smb2, "Security buffer extends beyond end of "
                                "PDU");
                 pdu->payload = NULL;
@@ -251,7 +268,7 @@ smb2_process_session_setup_fixed(struct smb2_context *smb2,
         /* Return the amount of data that the security buffer will take up.
          * Including any padding before the security buffer itself.
          */
-        return IOV_OFFSET + rep->security_buffer_length;
+        return IOV_OFFSET_SESSION + rep->security_buffer_length;
 }
 
 int
@@ -261,7 +278,7 @@ smb2_process_session_setup_variable(struct smb2_context *smb2,
         struct smb2_session_setup_reply *rep = pdu->payload;
         struct smb2_iovec *iov = &smb2->in.iov[smb2->in.niov - 1];
 
-        rep->security_buffer = &iov->buf[IOV_OFFSET];
+        rep->security_buffer = &iov->buf[IOV_OFFSET_SESSION];
 
         return 0;
 }
@@ -297,7 +314,11 @@ smb2_process_session_setup_request_fixed(struct smb2_context *smb2,
         smb2_get_uint32(iov, 8, &req->channel);
 /*        smb2_get_uint16(iov, 12, &req->security_buffer_offset); */
         smb2_get_uint16(iov, 14, &req->security_buffer_length);
-        smb2_get_uint64(iov, 18, &req->previous_session_id);
+        /* PreviousSessionId is at offset 16, which is also where
+         * smb2_encode_session_setup_request() writes it. Reading it at 18
+         * ran off the end of the 24 byte structure and left it unset.
+         */
+        smb2_get_uint64(iov, 16, &req->previous_session_id);
 
         return req->security_buffer_length;
 }

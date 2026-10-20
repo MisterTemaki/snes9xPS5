@@ -50,10 +50,15 @@
 #include <stdio.h>
 #include <stdarg.h>
 #include <string.h>
+#include <errno.h>
 #include <stdlib.h>
 #include <assert.h>
 #include <fcntl.h>
 #include <time.h>
+#ifdef HAVE_SYS_EVENTFD_H
+#include <sys/eventfd.h>
+#endif
+
 #include "slist.h"
 #include "libnfs-zdr.h"
 #include "libnfs.h"
@@ -93,6 +98,18 @@ uint64_t rpc_current_time_us(void)
 	return (uint64_t)time(NULL) * 1000000;
 #endif
 }
+#ifdef HAVE_CLOCK_GETTIME
+/*
+ * This returns time in microseconds since epoch.
+ */
+uint64_t rpc_wallclock_time(void)
+{
+	struct timespec tp;
+
+	clock_gettime(CLOCK_REALTIME, &tp);
+	return (uint64_t)tp.tv_sec * 1000000 + tp.tv_nsec / 1000;
+}
+#endif
 
 int rpc_set_hash_size(struct rpc_context *rpc, int hashes)
 {
@@ -145,13 +162,37 @@ struct rpc_context *rpc_init_context(void)
 
 #ifdef HAVE_MULTITHREADING
 	nfs_mt_mutex_init(&rpc->rpc_mutex);
+	nfs_mt_mutex_init(&rpc->nfs40_renew_mutex);
+#ifdef HAVE_NFS4_2
+	nfs4_session_mutex_init(rpc);
+#endif /* HAVE_NFS4_2 */
 #ifndef HAVE_STDATOMIC_H
 	nfs_mt_mutex_init(&rpc->atomic_int_mutex);
 #endif
 #endif /* HAVE_MULTITHREADING */
 
+        /*
+         * eventfd used to tell the service thread that a PDU is waiting to be
+         * sent. Only useful where we have both eventfd() and a service thread
+         * to wake; elsewhere evfd stays -1 and we rely on the poll timeout.
+         */
+        rpc->evfd = -1;
+#ifdef LIBNFS_EVENTFD_WAKEUP
+        rpc->evfd = eventfd(0, EFD_NONBLOCK);
+        if (rpc->evfd == -1) {
+                /*
+                 * Not fatal. Without it the service thread still picks work up
+                 * on its poll timeout, so degrade instead of failing the
+                 * context.
+                 */
+                LOG("eventfd() failed: %s, service thread wakeups disabled",
+                    strerror(errno));
+        }
+#endif
+
  	rpc->auth = authunix_create_default();
 	if (rpc->auth == NULL) {
+	        close(rpc->evfd);
 		free(rpc->waitpdu);
 		free(rpc);
 		return NULL;
@@ -220,6 +261,12 @@ struct rpc_context *rpc_init_server_context(int s)
 
 	rpc->is_server_context = 1;
 	rpc->fd = s;
+	/*
+	 * Server contexts have no service thread to wake. Without this the
+	 * calloc() above would leave evfd at 0, i.e. stdin, and we would both
+	 * write wakeups into it and close it in rpc_destroy_context().
+	 */
+	rpc->evfd = -1;
 	rpc->is_connected = 1;
 
 	rpc->is_nonblocking = is_nonblocking(s);
@@ -229,6 +276,10 @@ struct rpc_context *rpc_init_server_context(int s)
 
 #ifdef HAVE_MULTITHREADING
         nfs_mt_mutex_init(&rpc->rpc_mutex);
+        nfs_mt_mutex_init(&rpc->nfs40_renew_mutex);
+#ifdef HAVE_NFS4_2
+        nfs4_session_mutex_init(rpc);
+#endif /* HAVE_NFS4_2 */
 #ifndef HAVE_STDATOMIC_H
 	nfs_mt_mutex_init(&rpc->atomic_int_mutex);
 #endif
@@ -280,6 +331,11 @@ int rpc_set_username(struct rpc_context *rpc, const char *username)
 {
 #ifdef HAVE_LIBKRB5
         free(discard_const(rpc->username));
+        rpc->username = NULL;
+                
+        if (username == NULL) {
+                return 0;
+        }
         rpc->username = strdup(username);
 	if (rpc->username == NULL) {
 		rpc_set_error(rpc,
@@ -341,6 +397,7 @@ void rpc_set_error(struct rpc_context *rpc, const char *error_string, ...)
 	rpc->error_string = malloc(1024);
         if (rpc->error_string == NULL) {
                 rpc->error_string = discard_const(oom);
+                va_end(ap);
                 goto finished;
         }
 	vsnprintf(rpc->error_string, 1024, error_string, ap);
@@ -367,8 +424,15 @@ void rpc_set_error_locked(struct rpc_context *rpc, const char *error_string, ...
 	va_start(ap, error_string);
 	rpc->error_string = malloc(1024);
         if (rpc->error_string == NULL) {
-                free(old_error_string);
+                /*
+                 * old_error_string may already be the static oom string from
+                 * an earlier failure here, and that must not be freed.
+                 */
+                if (old_error_string && old_error_string != oom) {
+                        free(old_error_string);
+                }
                 rpc->error_string = discard_const(oom);
+                va_end(ap);
                 return;
         }
 	vsnprintf(rpc->error_string, 1024, error_string, ap);
@@ -388,6 +452,13 @@ char *rpc_get_error(struct rpc_context *rpc)
 	return rpc->error_string ? rpc->error_string : "";
 }
 
+struct rpc_pdu *rpc_get_pdu(struct rpc_context *rpc)
+{
+	assert(rpc->magic == RPC_CONTEXT_MAGIC);
+
+	return rpc->pdu;
+}
+
 void rpc_get_stats(struct rpc_context *rpc, struct rpc_stats *stats)
 {
 	assert(rpc->magic == RPC_CONTEXT_MAGIC);
@@ -398,6 +469,11 @@ void rpc_get_stats(struct rpc_context *rpc, struct rpc_stats *stats)
         }
 #endif /* HAVE_MULTITHREADING */
 
+        /*
+         * outqueue_len is maintained as the queue changes, waitpdu_len is
+         * only mirrored into the stats when the caller asks for them.
+         */
+        rpc->stats.waitpdu_len = rpc->waitpdu_len;
         *stats = rpc->stats;
 
 #ifdef HAVE_MULTITHREADING
@@ -431,7 +507,30 @@ static void rpc_purge_all_pdus(struct rpc_context *rpc, int status, const char *
 #endif /* HAVE_MULTITHREADING */
 	outqueue = rpc->outqueue;
 
+#ifdef HAVE_NFS4_2
+        if (outqueue.tail) {
+                outqueue.tail->next = rpc->nfs4_delay_queue.head;
+        } else {
+                outqueue.head = rpc->nfs4_delay_queue.head;
+        }
+        rpc_reset_queue(&rpc->nfs4_delay_queue);
+        rpc->nfs4_delay_queue_len = 0;
+#endif
+
 	rpc_reset_queue(&rpc->outqueue);
+	rpc->stats.outqueue_len = 0;
+#ifdef HAVE_MULTITHREADING
+        /*
+         * Drop the lock before running the callbacks. They end up in
+         * nfs_set_error(), which takes rpc_mutex itself, and relocking an
+         * error-checking mutex aborts the process. The queue was emptied
+         * above, so the snapshot is private to this thread and needs no
+         * lock. This mirrors what the waitpdu loop below already does.
+         */
+        if (rpc->multithreading_enabled) {
+                nfs_mt_mutex_unlock(&rpc->rpc_mutex);
+        }
+#endif /* HAVE_MULTITHREADING */
 	while ((pdu = outqueue.head) != NULL) {
 		outqueue.head = pdu->next;
                 pdu->next = NULL;
@@ -440,11 +539,6 @@ static void rpc_purge_all_pdus(struct rpc_context *rpc, int status, const char *
                 }
 		rpc_free_pdu(rpc, pdu);
 	}
-#ifdef HAVE_MULTITHREADING
-        if (rpc->multithreading_enabled) {
-                nfs_mt_mutex_unlock(&rpc->rpc_mutex);
-        }
-#endif /* HAVE_MULTITHREADING */
 
 	for (i = 0; i < rpc->num_hashes; i++) {
 		struct rpc_queue waitqueue;
@@ -456,6 +550,13 @@ static void rpc_purge_all_pdus(struct rpc_context *rpc, int status, const char *
 #endif /* HAVE_MULTITHREADING */
 		waitqueue = rpc->waitpdu[i];
 		rpc_reset_queue(&rpc->waitpdu[i]);
+		/*
+		 * The queues are being emptied, so the accounting has to go
+		 * with them, exactly as outqueue_len does above. Leaving it
+		 * stale stalls rpc_write_to_socket() forever once the caller
+		 * has set a max_waitpdu_len.
+		 */
+		rpc->waitpdu_len = 0;
 #ifdef HAVE_MULTITHREADING
                 if (rpc->multithreading_enabled) {
                         nfs_mt_mutex_unlock(&rpc->rpc_mutex);
@@ -497,6 +598,7 @@ void rpc_free_all_fragments(struct rpc_context *rpc)
 	      rpc->fragments = fragment->next;
 	      rpc_free_fragment(fragment);
 	}
+	rpc->fragments_size = 0;
 }
 
 int rpc_add_fragment(struct rpc_context *rpc, char *data, uint32_t size)
@@ -519,6 +621,7 @@ int rpc_add_fragment(struct rpc_context *rpc, char *data, uint32_t size)
 
 	memcpy(fragment->data, data, fragment->size);
 	LIBNFS_LIST_ADD_END(&rpc->fragments, fragment);
+	rpc->fragments_size += size;
 	return 0;
 }
 
@@ -526,7 +629,17 @@ void rpc_destroy_context(struct rpc_context *rpc)
 {
 	assert(rpc->magic == RPC_CONTEXT_MAGIC);
 
+	rpc_nfs40_stop_renew(rpc);
 	rpc_purge_all_pdus(rpc, RPC_STATUS_CANCEL, NULL);
+	if (rpc->nfs40_renew_auth) {
+		auth_destroy(rpc->nfs40_renew_auth);
+	}
+
+#ifdef HAVE_NFS4_2
+        /* The session, if any, dies with the connection it lived on. */
+        nfs4_session_destroy(rpc);
+        nfs4_session_mutex_destroy(rpc);
+#endif /* HAVE_NFS4_2 */
 
 	rpc_free_all_fragments(rpc);
 
@@ -538,6 +651,10 @@ void rpc_destroy_context(struct rpc_context *rpc)
 	if (rpc->fd != -1) {
  		close(rpc->fd);
 	}
+
+	if (rpc->evfd != -1) {
+		close(rpc->evfd);
+        }
 
 	if (rpc->error_string && rpc->error_string != oom) {
 		free(rpc->error_string);
@@ -552,6 +669,7 @@ void rpc_destroy_context(struct rpc_context *rpc)
 	rpc->magic = 0;
 #ifdef HAVE_MULTITHREADING
         nfs_mt_mutex_destroy(&rpc->rpc_mutex);
+        nfs_mt_mutex_destroy(&rpc->nfs40_renew_mutex);
 #ifndef HAVE_STDATOMIC_H
         nfs_mt_mutex_destroy(&rpc->atomic_int_mutex);
 #endif
@@ -567,6 +685,72 @@ void rpc_destroy_context(struct rpc_context *rpc)
 	free(rpc);
 }
 
+/* An AUTH_SYS snapshot survives applications changing uid/gid between calls. */
+int rpc_nfs40_save_renew_auth(struct rpc_context *rpc)
+{
+	struct AUTH *saved;
+
+#ifdef HAVE_LIBKRB5
+	/* GSS credentials are generated per PDU from the RPC context. */
+	if (rpc->sec != RPC_SEC_UNDEFINED) {
+		if (rpc->nfs40_renew_auth) {
+			auth_destroy(rpc->nfs40_renew_auth);
+			rpc->nfs40_renew_auth = NULL;
+		}
+		return 0;
+	}
+#endif
+	if (rpc->auth == NULL) {
+		rpc_set_error(rpc, "No RPC authentication for NFSv4.0 lease renewal");
+		return -EINVAL;
+	}
+	saved = calloc(1, sizeof(*saved));
+	if (saved == NULL) {
+		return -ENOMEM;
+	}
+	saved->ah_cred = rpc->auth->ah_cred;
+	saved->ah_verf = rpc->auth->ah_verf;
+	saved->ah_cred.oa_base = NULL;
+	saved->ah_verf.oa_base = NULL;
+	if (rpc->auth->ah_cred.oa_length) {
+		saved->ah_cred.oa_base = malloc(rpc->auth->ah_cred.oa_length);
+		if (saved->ah_cred.oa_base == NULL) {
+			auth_destroy(saved);
+			return -ENOMEM;
+		}
+		memcpy(saved->ah_cred.oa_base, rpc->auth->ah_cred.oa_base,
+		       rpc->auth->ah_cred.oa_length);
+	}
+	if (rpc->auth->ah_verf.oa_length) {
+		saved->ah_verf.oa_base = malloc(rpc->auth->ah_verf.oa_length);
+		if (saved->ah_verf.oa_base == NULL) {
+			auth_destroy(saved);
+			return -ENOMEM;
+		}
+		memcpy(saved->ah_verf.oa_base, rpc->auth->ah_verf.oa_base,
+		       rpc->auth->ah_verf.oa_length);
+	}
+	if (rpc->nfs40_renew_auth) {
+		auth_destroy(rpc->nfs40_renew_auth);
+	}
+	rpc->nfs40_renew_auth = saved;
+	return 0;
+}
+
+void rpc_set_mountport(struct rpc_context *rpc, int port)
+{
+	assert(rpc->magic == RPC_CONTEXT_MAGIC);
+
+	rpc->mountport = port;
+}
+
+int rpc_get_mountport(struct rpc_context *rpc)
+{
+	assert(rpc->magic == RPC_CONTEXT_MAGIC);
+
+	return rpc->mountport;
+}
+
 void rpc_set_poll_timeout(struct rpc_context *rpc, int poll_timeout)
 {
 	assert(rpc->magic == RPC_CONTEXT_MAGIC);
@@ -576,9 +760,26 @@ void rpc_set_poll_timeout(struct rpc_context *rpc, int poll_timeout)
 
 int rpc_get_poll_timeout(struct rpc_context *rpc)
 {
-	assert(rpc->magic == RPC_CONTEXT_MAGIC);
+#ifdef HAVE_NFS4_2
+	int session_delay;
+#endif
+	int delay, renew_delay;
 
-	return rpc->poll_timeout;
+	assert(rpc->magic == RPC_CONTEXT_MAGIC);
+	delay = rpc->poll_timeout;
+
+#ifdef HAVE_NFS4_2
+	session_delay = nfs4_next_delay_msecs(rpc);
+	if (session_delay >= 0 && (delay < 0 || session_delay < delay)) {
+		delay = session_delay;
+	}
+#endif /* HAVE_NFS4_2 */
+
+	renew_delay = rpc_nfs40_renew_delay(rpc);
+	if (renew_delay >= 0 && (delay < 0 || renew_delay < delay)) {
+		delay = renew_delay;
+	}
+	return delay;
 }
 
 void rpc_set_timeout(struct rpc_context *rpc, int timeout_msecs)

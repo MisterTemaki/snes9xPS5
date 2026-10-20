@@ -72,6 +72,10 @@ smb2_encode_error_reply(struct smb2_context *smb2,
         }
 
         iov = smb2_add_iovector(smb2, &pdu->out, buf, len, free);
+        if (iov == NULL) {
+                smb2_set_error(smb2, "Failed to add iovector for error reply");
+                return -1;
+        }
 
         smb2_set_uint16(iov, 0, SMB2_ERROR_REPLY_SIZE);
         smb2_set_uint8(iov, 2, rep->error_context_count);
@@ -135,6 +139,17 @@ smb2_process_error_fixed(struct smb2_context *smb2,
 
         smb2_get_uint8(iov, 2, &rep->error_context_count);
         smb2_get_uint32(iov, 4, &rep->byte_count);
+
+        /* byte_count comes straight off the wire and is used as the size of
+         * the variable part, so make sure it stays within this PDU.
+         */
+        if ((uint64_t)SMB2_HEADER_SIZE + (SMB2_ERROR_REPLY_SIZE & 0xfffe) +
+            rep->byte_count > (uint64_t)smb2->spl) {
+                smb2_set_error(smb2, "Error data extends beyond end of PDU");
+                pdu->payload = NULL;
+                free(rep);
+                return -1;
+        }
 
         return rep->byte_count;
 }

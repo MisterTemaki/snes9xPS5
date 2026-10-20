@@ -46,6 +46,43 @@ NFSv3 is the default but NFSv4 can be selected either by using the URL argument
 version=4 or programatically calling nfs_set_version(nfs, NFS_V4) before
 connecting to the server/share.
 
+NFSv4.2 is selected with version=4.2 or nfs_set_version(nfs, NFS_V4_2). It
+adds sparse file support: nfs_fallocate() for reserving, punching and zeroing
+ranges, lseek() with SEEK_HOLE and SEEK_DATA, and the READ_PLUS and
+WRITE_SAME operations. NFSv4.2 support is built by default and can be left
+out with --disable-nfs4-2 (autoconf) or -DENABLE_NFS4_2=OFF (cmake).
+
+Applications compile against it behind LIBNFS_FEATURE_NFS4_2, which libnfs.h
+defines wherever the dialect exists at all. As with the other
+LIBNFS_FEATURE_ macros that says the API is there rather than that this
+particular build has it, so a build that dropped the dialect still reports
+that only at run time, by failing nfs_set_version(nfs, NFS_V4_2).
+
+CONCURRENCY AND NFSv4.2:
+------------------------
+This matters if you drive libnfs hard, and it is the one place where the
+NFSv4.2 dialect behaves differently from NFSv3 and NFSv4.0.
+
+From NFSv4 minor version 1 onwards every request travels in a session slot,
+and a slot carries one request at a time because the server's reply cache is
+keyed on the (slot, sequence id) pair. The session therefore has a fixed
+ceiling, set by the server, on how many requests can be outstanding at the
+server at once. libnfs asks for 64 slots and uses whatever the server grants.
+
+This is a limit on requests in flight, not on requests you may submit. libnfs
+claims a slot as a request goes out on the wire rather than when you hand it
+over, so queueing tens of thousands of async calls behaves exactly as it does
+on NFSv3 and NFSv4.0; they are simply released onto the connection as slots
+free up, and nothing is rejected or blocked at submission time.
+
+What it does mean is that NFSv4.2 cannot keep more than the granted number of
+requests at the server simultaneously, where NFSv4.0 has no such bound. If
+your throughput comes from very deep request pipelining rather than from
+large transfers, measure both dialects before choosing; NFSv4.0 may well be
+faster for that shape of workload.
+
+NFSv3 and NFSv4.0 have no sessions and none of this applies to them.
+
 SERVER SUPPORT:
 ===============
 Libnfs supports building RPC servers.
@@ -102,7 +139,7 @@ Arguments supported by libnfs are :
                    : Specify the security mode.
  xprtsec=<none|tls|mtls>
                    : Specify the transport security mode.
-                     none : No TLS security.
+                     none : No TLS security. This is the default.
                      tls  : TLS with server authentication only.
                      mtls : Mutual TLS, both server and client authentication.
 
@@ -112,6 +149,7 @@ Arguments supported by libnfs are :
                    : Should libnfs try to traverse across nested mounts
                      automatically or not. Default is 1 == enabled.
  dircache=<0|1>    : Disable/enable directory caching. Enabled by default.
+ readonly	   : Set the mount to readonly.
  autoreconnect=<-1|0|>=1>
                    : Control the auto-reconnect behaviour to the NFS session.
                     -1 : Try to reconnect forever on session failures.
@@ -122,7 +160,10 @@ Arguments supported by libnfs are :
                          times before failing and returing an error back
                          to the application.
  if=<interface>    : Interface name (e.g., eth1) to bind; requires `root`
- version=<3|4>     : NFS Version. Default is 3.
+ version=<3|4|4.2> : NFS Version. Default is 3. 4 is NFSv4.0 and 4.2 is
+                     NFSv4.2; see the NFSv4 section above for what 4.2 adds
+                     and for how its session slots interact with very high
+                     request concurrency.
  nfsport=<port>    : Use this port for NFS instead of using the portmapper.
  mountport=<port>  : Use this port for the MOUNT protocol instead of
                      using portmapper. This argument is ignored for NFSv4
@@ -198,6 +239,43 @@ you no longer need to edit the export on the NFS server to set "insecure".
 I do not know what equivalent "capability" support is available on other
 platforms. Please drop me an email if your os of choice has something similar
 and I can add it to the README.
+
+
+BUILDING WITH TLS
+=================
+RPC-with-TLS support is only built if the build host has everything we need for
+it, that is:
+
+- GnuTLS >= 3.4.6, headers and library.
+- Linux kernel TLS (kTLS), i.e. <linux/tls.h> and the kTLS socket options
+  TCP_ULP, SOL_TLS and TLS_TX in the kernel headers we build against.
+
+Both build systems probe for this at configure time and simply build without
+TLS support if anything is missing, so libnfs builds fine on a host that has no
+gnutls or a kernel without kTLS.
+
+With autoconf:
+  ./configure               # build TLS support only if available (default)
+  ./configure --enable-tls  # fail the configure if TLS support is not available
+  ./configure --disable-tls # never build TLS support
+
+With cmake:
+  cmake -DENABLE_TLS=AUTO ..  # build TLS support only if available (default)
+  cmake -DENABLE_TLS=ON ..    # fail the configure if TLS support is not available
+  cmake -DENABLE_TLS=OFF ..   # never build TLS support
+
+
+BUILDING WITH KERBEROS
+======================
+sec=krb5 support needs the gssapi_krb5 headers and library, e.g. from MIT
+Kerberos.
+
+With autoconf it is built by default and --without-libkrb5 disables it.
+
+With cmake:
+  cmake -DENABLE_KRB5=AUTO ..  # build Kerberos support only if available (default)
+  cmake -DENABLE_KRB5=ON ..    # fail the configure if Kerberos is not available
+  cmake -DENABLE_KRB5=OFF ..   # never build Kerberos support
 
 
 CERTIFICATES

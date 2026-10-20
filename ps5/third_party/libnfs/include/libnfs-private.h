@@ -32,7 +32,7 @@
 #endif
 
 #ifdef HAVE_LIBKRB5
-#include "lib/krb5-wrapper.h"
+#include "../lib/krb5-wrapper.h"
 #endif
 
 #ifdef HAVE_TLS
@@ -82,8 +82,27 @@
 #define ATOMIC_DEC(rpc, x) x--
 #endif /* HAVE_MULTITHREADING */
 
+/*
+ * The service thread wakeup needs eventfd(), which is a Linux extension, and
+ * only has a thread to wake when multithreading is compiled in. Everywhere
+ * else libnfs falls back to the poll timeout, exactly as it did before the
+ * wakeup existed.
+ */
+#if defined(HAVE_MULTITHREADING) && defined(HAVE_SYS_EVENTFD_H)
+#define LIBNFS_EVENTFD_WAKEUP 1
+#endif
+
 #include "libnfs-multithreading.h"
 #include "libnfs-zdr.h"
+
+/*
+ * NFSv4.2 is never built for the small embedded and console targets, whatever
+ * the build system was told. See the note in nfsc/libnfs.h.
+ */
+#if defined(PS2_EE) || defined(PS3_PPU) || defined(AROS)
+#undef HAVE_NFS4_2
+#endif
+
 #include "../nfs/libnfs-raw-nfs.h"
 #include "../nfs4/libnfs-raw-nfs4.h"
 
@@ -91,6 +110,10 @@
 extern "C" {
 #endif
 
+#define container_of(ptr, type, member) ({                      \
+        const typeof( ((type *)0)->member ) *__mptr = (ptr);    \
+        (type *)((char *)__mptr - offsetof(type,member));})
+        
 #ifndef MIN
 #define MIN(a, b) (((a) < (b)) ? (a) : (b))
 #endif
@@ -132,17 +155,45 @@ struct rpc_fragment {
 #define RPC_PARAM_UNDEFINED -1
 
 /*
- * Queue is singly-linked but we hold on to the tail
+ * Queue is singly-linked but we hold on to the tail.
+ * Using tailp this can be used to queue high and low priority pdus where high
+ * priority pdus are at the head of the queue while low priority pdus are
+ * queued behind the high priority pdus. tailp is the tail of the high priority
+ * pdus, after which the low priority pdus start. It is NULL when the queue
+ * holds no high priority pdus.
  */
 struct rpc_queue {
-	struct rpc_pdu *head, *tail;
+	struct rpc_pdu *head, *tail, *tailp;
 };
 
 #define DEFAULT_HASHES 4
 #define NFS_RA_TIMEOUT 5
 #define NFS_MIN_XFER_SIZE NFSMAXDATA2
-#define NFS_MAX_XFER_SIZE (4 * 1024 * 1024)
+/*
+ * Largest single RPC transfer we will negotiate. A WRITE can use all of it:
+ * libnfs sends that PDU from the caller's own buffers and the reply is small,
+ * so the size costs us nothing to receive. Servers backed by object storage
+ * want this large enough to write a whole block in one RPC.
+ */
+#define NFS_MAX_XFER_SIZE (100 * 1024 * 1024)
 #define NFS_DEF_XFER_SIZE (1 * 1024 * 1024)
+
+/*
+ * Largest inbound RPC record we will accept and buffer. This bounds how much
+ * memory a broken or hostile server can make us allocate per connection, so
+ * it deliberately does not track NFS_MAX_XFER_SIZE.
+ */
+#define MAX_FRAGMENT_SIZE (8 * 1024 * 1024)
+
+/*
+ * Ceiling for anything whose size lands in a reply: rsize, and the READDIR
+ * dircount/maxcount. Negotiating beyond what we are willing to read would
+ * leave us rejecting the server's reply with "Invalid recordmarker size" and
+ * dropping the connection, so these stay under MAX_FRAGMENT_SIZE with room
+ * for the RPC and NFS headers that ride along with the data.
+ */
+#define NFS_MAX_RECV_XFER_SIZE \
+        MIN(NFS_MAX_XFER_SIZE, MAX_FRAGMENT_SIZE - 4096)
 #define ZDR_ENCODE_OVERHEAD 1024
 #define ZDR_ENCODEBUF_MINSIZE 4096
 
@@ -269,11 +320,52 @@ struct tls_context {
 #define INC_STATS(rpc, stat) ++((rpc)->stats.stat)
 
 struct gss_ctx_id_struct;
+#ifdef HAVE_NFS4_2
+/*
+ * Upper bound on the session slot table, i.e. on how many COMPOUNDs libnfs
+ * will have in flight at once. Each slot is a few bytes here and a slot's
+ * worth of reply cache on the server, so this is a ceiling rather than a
+ * target: the session gets whatever the server is willing to grant, capped
+ * here.
+ */
+#define NFS4_MAX_SLOTS 64
+
+/*
+ * How long a session may go unused before we send a SEQUENCE just to keep it
+ * alive. Any SEQUENCE renews the lease, so ordinary traffic renews it for
+ * free and this only fires on an idle connection.
+ *
+ * The server's lease time is not something libnfs asks for, so this is a
+ * fixed interval chosen to sit well inside the shortest lease in common use.
+ * Linux nfsd defaults to 90 seconds.
+ */
+#define NFS4_SESSION_RENEW_MSECS 30000
+
+/*
+ * One NFSv4.1+ session slot. in_use marks the slot as carrying a request that
+ * has not completed yet; seqid is the sequence id of the most recent request
+ * sent on it, which advances by one for each new request.
+ */
+struct nfs4_slot {
+        sequenceid4 seqid;
+        int in_use;
+};
+#endif /* HAVE_NFS4_2 */
+
 struct rpc_context {
 	uint32_t magic;
 	int fd;
         int socket_disabled; /* Do not allow read/write to the socket */
 	int old_fd;
+	/*
+	 * eventfd used to wake the multithreading service thread out of poll()
+	 * as soon as a PDU is queued, instead of waiting for the poll timeout.
+	 * -1 when the wakeup is unavailable, which is the case on any build
+	 * without LIBNFS_EVENTFD_WAKEUP and for every server context. The
+	 * wakeup is purely a latency optimisation: the service thread also
+	 * wakes on rpc->poll_timeout, so -1 costs latency, never correctness.
+	 */
+	int evfd;
 	int is_connected;
 	int is_nonblocking;
 
@@ -286,6 +378,20 @@ struct rpc_context {
 	void *connect_data;
 
 	struct AUTH *auth;
+	/* NFSv4.0 lease renewal uses the credentials that created clientid. */
+	struct AUTH *nfs40_renew_auth;
+	uint64_t nfs40_clientid;
+	uint64_t nfs40_renew_interval;
+	uint64_t nfs40_renew_due;
+	int nfs40_renew_enabled;
+	int nfs40_renew_pending;
+	uint32_t nfs40_renew_epoch;
+	uint32_t nfs40_renew_xid;
+	uint64_t nfs40_renew_backoff;
+#ifdef HAVE_MULTITHREADING
+	/* Never held while taking rpc_mutex; the RENEW callback can run under it. */
+	libnfs_mutex_t nfs40_renew_mutex;
+#endif /* HAVE_MULTITHREADING */
 	uint32_t xid;
 
         /*
@@ -302,7 +408,14 @@ struct rpc_context {
          *       return a pdu to outqueue for retransmit.
          */
 	struct rpc_queue outqueue;
+#ifdef HAVE_NFS4_2
+        struct rpc_queue nfs4_delay_queue;
+        uint32_t nfs4_delay_queue_len;
+#endif
 	struct sockaddr_storage udp_src;
+#ifdef __linux__        
+	struct sockaddr_storage udp_dst; /* Which ip we received a UDP packet on */
+#endif
         uint32_t num_hashes;
         /*
          * Queue of transmitted-and-awaiting-response PDUs.
@@ -310,6 +423,18 @@ struct rpc_context {
 	struct rpc_queue *waitpdu;
 	uint32_t waitpdu_len;
 	uint32_t max_waitpdu_len;
+
+        /*
+         * Thread id of the libnfs service thread, as returned by
+         * nfs_mt_get_tid(). Set when the service thread starts, 0 otherwise.
+         * Queryable with nfs_get_tid(), useful for correlating libnfs work
+         * with per-thread OS statistics.
+         *
+         * Plain int rather than pid_t: MSVC has no pid_t, and nfs_get_tid()
+         * returns int regardless, so nothing is lost that was not already
+         * being truncated on the platforms whose nfs_tid_t is wider.
+         */
+        int tid;
 
 #ifdef HAVE_MULTITHREADING
         int multithreading_enabled;
@@ -330,6 +455,49 @@ struct rpc_context {
 
 	/* special fields for UDP, which can sometimes be BROADCASTed */
 	int is_udp;
+
+#ifdef HAVE_NFS4_2
+	/*
+	 * NFSv4 minor version stamped into every COMPOUND4args. 0 for
+	 * NFSv4.0, 2 for NFSv4.2. Unrelated to the RPC program version,
+	 * which is 4 for every NFSv4 minor version.
+	 */
+	uint32_t nfs4_minorversion;
+
+	/*
+	 * NFSv4.2 session, established by EXCHANGE_ID + CREATE_SESSION and
+	 * kept here rather than on the nfs context because a session belongs
+	 * to the connection it was created on.
+	 *
+	 * From minor version 1 onwards every COMPOUND leads with SEQUENCE,
+	 * which names a slot and a sequence id within it. A slot carries one
+	 * request at a time: RFC 8881 2.10.6.1 forbids sending a new request
+	 * on a slot before the previous one there has completed, because the
+	 * pair (slot, sequence id) is what the server's reply cache is keyed
+	 * on. Concurrency therefore costs one slot per request in flight,
+	 * which is what nfs4_slots is: a slot is taken as a COMPOUND goes out
+	 * on the wire, and rpc_free_pdu() gives it back when that COMPOUND is
+	 * done with. Taking it at send time rather than when the request was
+	 * built is what keeps submission itself unbounded.
+	 */
+	sessionid4 nfs4_sessionid;
+	struct nfs4_slot *nfs4_slots;
+	uint32_t nfs4_slot_count;
+	uint32_t nfs4_slots_in_use;
+	uint32_t nfs4_slot_hint;
+	/* When the session next needs a SEQUENCE to keep its lease alive. */
+	uint64_t nfs4_renew_due;
+	int nfs4_session_valid;
+#ifdef HAVE_MULTITHREADING
+	/*
+	 * The slot table has a lock of its own rather than sharing rpc_mutex,
+	 * because slots are taken and released from inside regions that
+	 * already hold rpc_mutex, which is not recursive. Nothing under this
+	 * lock reaches for rpc_mutex, so the two can never deadlock.
+	 */
+	libnfs_mutex_t nfs4_slot_mutex;
+#endif /* HAVE_MULTITHREADING */
+#endif /* HAVE_NFS4_2 */
 	struct sockaddr_storage udp_dest;
 	int is_broadcast;
 
@@ -337,6 +505,21 @@ struct rpc_context {
 	struct sockaddr_storage s;
 	int auto_reconnect;
 	int num_retries;
+
+	/*
+	 * If true, reconnect will resolve 'server' afresh before reconnecting,
+	 * else it'll reconnect to the last resolved address stored in
+	 * rpc_context->s.
+	 * Defaults to false and is controlled by
+	 * rpc_set_resolve_on_reconnect(). It decides the reconnect behaviour
+	 * every time a reconnect is needed, and may be toggled at any point in
+	 * the life of the rpc transport.
+	 * When resolve_on_reconnect is set, rpc_reconnect_requeue() sets
+	 * resolve_server before calling rpc_connect_sockaddr_async(), which
+	 * then resolves 'server' before reconnecting.
+	 */
+	bool_t resolve_on_reconnect;
+	bool_t resolve_server;
 
 	/*
 	 * NFS server name or IP address. It has the following uses:
@@ -350,8 +533,32 @@ struct rpc_context {
 	 */
 	char *server;
 
+	int mountport;
+
+	/*
+	 * The port rpc_set_sockaddr() last stored in rpc_context->s, i.e. the
+	 * port this rpc_context most recently connected to. Kept so that a
+	 * re-resolve on reconnect can reuse it. Note that one rpc_context may
+	 * connect to portmap, then mount, then nfs, each on a different port.
+	 */
+	int port;
+
 	/* fragment reassembly */
 	struct rpc_fragment *fragments;
+	/*
+	 * Bytes queued in fragments[] for the record being reassembled. A
+	 * record may be split into any number of fragments, so the per
+	 * fragment limit alone leaves the total unbounded; this is what the
+	 * whole record is checked against.
+	 */
+	uint32_t fragments_size;
+	/*
+	 * How many bytes of the current fragment are already sitting in inbuf
+	 * when we start reading its payload. The first fragment of a record
+	 * arrives together with the 4 bytes following the marker, which we
+	 * stash; continuation fragments have no such prefix.
+	 */
+	uint32_t rm_prefetch;
 
 	/* parameters passable via URL */
 	int tcp_syncnt;
@@ -466,6 +673,22 @@ struct rpc_pdu {
         int free_zdr;
         int free_pdu;
 
+        /*
+         * Queueing priority that can be passed to rpc_queue_pdu2().
+         * PDU_Q_PRIO_LOW - queue at outqueue.tail, behind all queued PDUs.
+         * PDU_Q_PRIO_HI  - queue at outqueue.tailp, i.e. after the already
+         *                  queued high priority PDUs but ahead of all the low
+         *                  priority ones. is_high_prio is set for these.
+         */
+        #define PDU_Q_PRIO_LOW  0
+        #define PDU_Q_PRIO_HI   1
+
+        /*
+         * Is this a high priority pdu, i.e., was it queued with
+         * PDU_Q_PRIO_HI? Used to maintain rpc_queue->tailp.
+         */
+        bool_t is_high_prio;
+
 	struct rpc_data outdata;
 
         /* For sending/receiving
@@ -494,16 +717,93 @@ struct rpc_pdu {
                                         * Used to clamp long reads.
                                         */
 
-	rpc_cb cb;
+	
+        /*
+         * Was this PDU retransmitted?
+         * libnfs lets its users know if a PDU that completed was retransmitted
+         * or was it only sent to the server once. Users can use this info to
+         * do useful things, f.e., one of the thing they can do is work around
+         * the weakly consistent nature of NFS by treating an NFS3ERR_NOENT
+         * returned by a REMOVE/RMDIR call as NFS3_OK since it may have been
+         * deleted the first time it was sent and the subsequent retransmit
+         * may have gone to another node (which doesn't share the DRC cache)
+         * and hence it failed it with NFS3ERR_NOENT.
+         * Note that most applications will handle an unlink() call succeeding
+         * for a non-existent file better than unlink() call failing with
+         * NOENT for a file that was actually present.
+         */
+        bool_t is_retransmitted;
+
+        /*
+         * Total request bytes sent out for this PDU.
+         * This includes RPC header + NFS header + optional data (for WRITE).
+         * This can be queried using rpc_pdu_get_req_size(pdu) after the
+         * rpc_<protocol>_  API returns the to-be-sent PDU.
+         * This can be used by applications that want to provide mountstats
+         * style "avg bytes sent" telemetry.
+         */
+        uint32_t req_size;
+
+        /*
+         * Total response bytes received for this PDU.
+         * This includes RPC header + NFS header + optional data (for READ).
+         * This can be queried using rpc_pdu_get_resp_size(rpc_get_pdu(rpc))
+         * inside the rpc_<protocol>_  callback.
+         * This can be used by applications that want to provide mountstats
+         * style "avg bytes received" telemetry.
+         */
+        uint32_t resp_size;
+
+#ifdef HAVE_CLOCK_GETTIME
+        /*
+         * Microseconds since epoch when this PDU was completely written to
+         * the socket. Note that due to TCP connection b/w and sndbuf size
+         * limitations this time can be very different from the time the PDU
+         * was queued to rpc->outqueue for sending, using rpc_queue_pdu().
+         * Applications can use this to find the "rtt taken by the server to
+         * execute this RPC" by diff'ing this with the time when the callback
+         * is called.
+         */
+        uint64_t dispatch_usecs;
+#endif
+
+rpc_cb cb;
 	void *private_data;
 
 	/* function to decode the zdr reply data and buffer to decode into */
 	zdrproc_t zdr_decode_fn;
-	caddr_t zdr_decode_buf;
+	void *zdr_decode_buf;
 	uint32_t zdr_decode_bufsize;
 
         uint32_t discard_after_sending:1;
         uint32_t zero_copy_iov:1;
+
+#ifdef HAVE_NFS4_2
+        /*
+         * NFSv4.2 session slot bookkeeping.
+         *
+         * nfs4_needs_slot marks a COMPOUND that leads with SEQUENCE and so
+         * has to hold a slot while it is outstanding. The slot is taken as
+         * the pdu is written to the socket, not when it was encoded, so that
+         * an application can submit as many requests as it likes and the
+         * session's slot count only bounds how many are on the wire at once.
+         * nfs4_seq_pos is where SEQUENCE4args sits in the encoded buffer, so
+         * the slot and sequence id can be filled in at that point.
+         *
+         * nfs4_slot_sent says the pdu put bytes on the wire at some point. A
+         * pdu that took a slot and never did has to give its sequence id back
+         * as well, or the slot is left with a gap the server rejects.
+         */
+        uint32_t nfs4_needs_slot:1;
+        uint32_t nfs4_slot_held:1;
+        uint32_t nfs4_slot_sent:1;
+        uint32_t nfs4_slot;
+        uint32_t nfs4_seq_pos;
+        /* Only ordinary, replay-safe COMPOUND prefixes are eligible. */
+        uint32_t nfs4_delay_maxres;
+        uint32_t nfs4_delay_attempts;
+        uint64_t nfs4_delay_until;
+#endif /* HAVE_NFS4_2 */
 
 	/*
 	 * If TRUE, this RPC would not be retried. If no response is received
@@ -577,17 +877,31 @@ struct rpc_pdu {
 
 void rpc_reset_queue(struct rpc_queue *q);
 void rpc_enqueue(struct rpc_queue *q, struct rpc_pdu *pdu);
+void rpc_add_to_outqueue_head(struct rpc_context *rpc, struct rpc_pdu *pdu);
+void rpc_add_to_outqueue_highp(struct rpc_context *rpc, struct rpc_pdu *pdu);
+void rpc_add_to_outqueue_lowp(struct rpc_context *rpc, struct rpc_pdu *pdu);
 void rpc_return_to_outqueue(struct rpc_context *rpc, struct rpc_pdu *pdu);
 int rpc_remove_pdu_from_queue(struct rpc_queue *q, struct rpc_pdu *remove_pdu);
 unsigned int rpc_hash_xid(struct rpc_context *rpc, uint32_t xid);
 struct rpc_pdu *rpc_allocate_pdu(struct rpc_context *rpc, int program, int version, int procedure, rpc_cb cb, void *private_data, zdrproc_t zdr_decode_fn, int zdr_bufsize);
 struct rpc_pdu *rpc_allocate_pdu2(struct rpc_context *rpc, int program, int version, int procedure, rpc_cb cb, void *private_data, zdrproc_t zdr_decode_fn, int zdr_bufsize, size_t alloc_hint, int iovcnt_hint);
+struct rpc_pdu *rpc_allocate_pdu2_auth(struct rpc_context *rpc, int program, int version, int procedure, rpc_cb cb, void *private_data, zdrproc_t zdr_decode_fn, int zdr_bufsize, size_t alloc_hint, int iovcnt_hint, const struct AUTH *auth);
 void pdu_set_timeout(struct rpc_context *rpc, struct rpc_pdu *pdu, uint64_t now_msecs);
 
 void rpc_free_pdu(struct rpc_context *rpc, struct rpc_pdu *pdu);
 int rpc_queue_pdu(struct rpc_context *rpc, struct rpc_pdu *pdu);
+int rpc_queue_pdu2(struct rpc_context *rpc, struct rpc_pdu *pdu, int prio);
+
+/*
+ * Nudge the multithreading service thread so it re-runs poll() now rather
+ * than after rpc->poll_timeout. A no-op when there is no wakeup fd, and it
+ * never fails the caller: the worst outcome is the added latency we would
+ * have had anyway.
+ */
+void rpc_wakeup_service_thread(struct rpc_context *rpc);
 int rpc_process_pdu(struct rpc_context *rpc, char *buf, int size);
 struct rpc_pdu *rpc_find_pdu(struct rpc_context *rpc, uint32_t xid);
+int rpc_cancel_sent_pdu(struct rpc_context *rpc, uint32_t xid);
 void rpc_error_all_pdus(struct rpc_context *rpc, const char *error);
 
 /*
@@ -623,6 +937,21 @@ void nfs_set_error_locked(struct nfs_context *nfs, char *error_string, ...)
 #endif
 ;
 
+/*
+ * Use LOG() for logging from code that has no rpc_context, and therefore no
+ * log callback and no debug level to compare against. It logs unconditionally
+ * to stderr, so use it sparingly and only for conditions that cannot be
+ * reported to the caller by any better means.
+ */
+#if defined(PS2_EE)
+#define LOG(format, ...) ;
+#else
+#define LOG(format, ...) \
+	do { \
+		fprintf(stderr, "libnfs: " format "\n", ## __VA_ARGS__); \
+	} while (0)
+#endif
+
 #if defined(PS2_EE)
 #define RPC_LOG(rpc, level, format, ...) ;
 #else
@@ -639,29 +968,20 @@ void nfs_set_error_locked(struct nfs_context *nfs, char *error_string, ...)
 const char *nfs_get_server(struct nfs_context *nfs);
 const char *nfs_get_export(struct nfs_context *nfs);
 
-/* we dont want to expose UDP to normal applications/users  this is private to libnfs to use exclusively for broadcast RPC */
-int rpc_bind_udp(struct rpc_context *rpc, char *addr, int port);
-int rpc_set_udp_destination(struct rpc_context *rpc, char *addr, int port, int is_broadcast);
-struct rpc_context *rpc_init_udp_context(void);
-struct sockaddr *rpc_get_recv_sockaddr(struct rpc_context *rpc);
-
-void rpc_set_resiliency(struct rpc_context *rpc,
-			int num_tcp_reconnect,
-			int timeout,
-			int retrans);
-
 void rpc_set_interface(struct rpc_context *rpc, const char *ifname);
 
 void rpc_set_tcp_syncnt(struct rpc_context *rpc, int v);
+void rpc_set_mountport(struct rpc_context *rpc, int port);
+int rpc_get_mountport(struct rpc_context *rpc);
 void rpc_set_poll_timeout(struct rpc_context *rpc, int poll_timeout);
 int rpc_get_poll_timeout(struct rpc_context *rpc);
-void rpc_set_timeout(struct rpc_context *rpc, int timeout);
-int rpc_get_timeout(struct rpc_context *rpc);
 int rpc_add_fragment(struct rpc_context *rpc, char *data, uint32_t size);
 void rpc_free_all_fragments(struct rpc_context *rpc);
-int rpc_is_udp_socket(struct rpc_context *rpc);
 uint64_t rpc_current_time(void);
 uint64_t rpc_current_time_us(void);
+#ifdef HAVE_CLOCK_GETTIME
+uint64_t rpc_wallclock_time(void);
+#endif
 
 void *zdr_malloc(ZDR *zdrs, uint32_t size);
 
@@ -738,9 +1058,10 @@ struct nfs_context_internal {
        libnfs_thread_t service_thread;
        libnfs_mutex_t nfs_mutex;
        libnfs_mutex_t nfs4_open_counter_mutex;
-       libnfs_mutex_t nfs4_open_call_mutex;
+       libnfs_sem_t nfs4_open_call_sem;
        struct nfs_thread_context *thread_ctx;
 #endif /* HAVE_MULTITHREADING */
+       int readonly;
 };
 
 struct nfs_context {
@@ -814,6 +1135,14 @@ struct nfsdir {
 
        struct nfsdirent *entries;
        struct nfsdirent *current;
+
+       /*
+        * Cookie sent in the READDIR/READDIRPLUS request we are currently
+        * awaiting. A reply that does not move it on means the next request
+        * would be identical to the last, so the enumeration is not making
+        * progress and has to be failed rather than repeated forever.
+        */
+       uint64_t last_cookie;
 };
 
 struct stateid {
@@ -825,6 +1154,7 @@ struct nfsfh {
         struct nfs_fh fh;
         int is_sync;
         int is_append;
+        int is_readonly;
         int is_dirty;
         uint64_t offset;
 
@@ -903,6 +1233,9 @@ int nfs3_opendir_async(struct nfs_context *nfs, const char *path, nfs_cb cb,
 int nfs3_pread_async_internal(struct nfs_context *nfs, struct nfsfh *nfsfh,
                               void *buf, size_t count, uint64_t offset,
                               nfs_cb cb, void *private_data, int update_pos);
+int nfs3_preadv_async_internal(struct nfs_context *nfs, struct nfsfh *nfsfh,
+                               const struct iovec *iov, int iovcnt, uint64_t offset,
+                               nfs_cb cb, void *private_data, int update_pos);
 int nfs3_pwrite_async_internal(struct nfs_context *nfs, struct nfsfh *nfsfh,
                                const char *buf, size_t count, uint64_t offset,
                                nfs_cb cb, void *private_data, int update_pos);
@@ -959,8 +1292,8 @@ int nfs4_fchown_async(struct nfs_context *nfs, struct nfsfh *nfsfh, int uid,
 int nfs4_fcntl_async(struct nfs_context *nfs, struct nfsfh *nfsfh,
                      enum nfs4_fcntl_op cmd, void *arg,
                      nfs_cb cb, void *private_data);
-int nfs4_fstat64_async(struct nfs_context *nfs, struct nfsfh *nfsfh, nfs_cb cb,
-                       void *private_data);
+int nfs4_xfstat64_async(struct nfs_context *nfs, struct nfsfh *nfsfh,
+                        int nfs4_stat, nfs_cb cb, void *private_data);
 int nfs4_fsync_async(struct nfs_context *nfs, struct nfsfh *nfsfh, nfs_cb cb,
                      void *private_data);
 int nfs4_ftruncate_async(struct nfs_context *nfs, struct nfsfh *nfsfh,
@@ -969,6 +1302,44 @@ int nfs4_link_async(struct nfs_context *nfs, const char *oldpath,
 		    const char *newpath, nfs_cb cb, void *private_data);
 int nfs4_lseek_async(struct nfs_context *nfs, struct nfsfh *nfsfh,
                      int64_t offset, int whence, nfs_cb cb, void *private_data);
+#ifdef HAVE_NFS4_2
+int nfs4_session_init(struct rpc_context *rpc, const char *sessionid,
+                      uint32_t slot_count);
+void nfs4_session_destroy(struct rpc_context *rpc);
+void nfs4_session_put_slot(struct rpc_context *rpc, uint32_t slotid,
+                           int rollback);
+int rpc_nfs4_session_is_valid(struct rpc_context *rpc);
+int nfs4_pdu_take_slot(struct rpc_context *rpc, struct rpc_pdu *pdu);
+int nfs4_pdu_retry_delay(struct rpc_context *rpc, struct rpc_pdu *pdu,
+                        const COMPOUND4res *res);
+void nfs4_defer_pdu(struct rpc_context *rpc, struct rpc_pdu *pdu);
+void nfs4_service_delayed(struct rpc_context *rpc);
+int nfs4_next_delay_msecs(struct rpc_context *rpc);
+void nfs4_requeue_delayed(struct rpc_context *rpc);
+int nfs4_session_has_free_slot(struct rpc_context *rpc);
+void nfs4_session_mutex_init(struct rpc_context *rpc);
+void nfs4_session_mutex_destroy(struct rpc_context *rpc);
+int nfs42_umount_async(struct nfs_context *nfs, nfs_cb cb, void *private_data);
+struct rpc_pdu *rpc_nfs4_bind_conn_to_session_task(struct rpc_context *rpc,
+                                                   rpc_cb cb,
+                                                   void *private_data);
+struct rpc_pdu *rpc_nfs4_destroy_session_task(struct rpc_context *rpc,
+                                              rpc_cb cb, void *private_data);
+struct rpc_pdu *rpc_nfs4_renew_session_task(struct rpc_context *rpc,
+                                            rpc_cb cb, void *private_data);
+int nfs42_fallocate_async(struct nfs_context *nfs, struct nfsfh *nfsfh,
+                          int mode, uint64_t offset, uint64_t length,
+                          nfs_cb cb, void *private_data);
+#endif /* HAVE_NFS4_2 */
+int rpc_nfs40_save_renew_auth(struct rpc_context *rpc);
+int nfs4_parse_mount_rwmax(struct nfs_context *nfs, GETATTR4resok *attrs,
+                            uint32_t *lease_seconds);
+void rpc_nfs40_stop_renew(struct rpc_context *rpc);
+int rpc_nfs40_renew_delay(struct rpc_context *rpc);
+void rpc_nfs40_start_renew(struct rpc_context *rpc, uint64_t clientid,
+                           uint32_t lease_seconds);
+struct rpc_pdu *rpc_nfs40_renew_task(struct rpc_context *rpc, rpc_cb cb,
+                                    void *private_data);
 int nfs4_lockf_async(struct nfs_context *nfs, struct nfsfh *nfsfh,
                      enum nfs4_lock_op op, uint64_t count,
                      nfs_cb cb, void *private_data);
@@ -985,8 +1356,11 @@ int nfs4_opendir_async(struct nfs_context *nfs, const char *path, nfs_cb cb,
 int nfs4_pread_async_internal(struct nfs_context *nfs, struct nfsfh *nfsfh,
                               void *buf, size_t count, uint64_t offset,
                               nfs_cb cb, void *private_data, int update_pos);
+int nfs4_preadv_async_internal(struct nfs_context *nfs, struct nfsfh *nfsfh,
+                               const struct iovec *iov, int iovcnt, uint64_t offset,
+                               nfs_cb cb, void *private_data, int update_pos);
 int nfs4_pwrite_async_internal(struct nfs_context *nfs, struct nfsfh *nfsfh,
-                               uint64_t offset, size_t count, const char *buf,
+                               const void *buf, size_t count, uint64_t offset,
                                nfs_cb cb, void *private_data, int update_pos);
 int nfs4_readlink_async(struct nfs_context *nfs, const char *path, nfs_cb cb,
                         void *private_data);
@@ -994,8 +1368,9 @@ int nfs4_rename_async(struct nfs_context *nfs, const char *oldpath,
 		      const char *newpath, nfs_cb cb, void *private_data);
 int nfs4_rmdir_async(struct nfs_context *nfs, const char *path, nfs_cb cb,
                      void *private_data);
-int nfs4_stat64_async(struct nfs_context *nfs, const char *path,
-                      int no_follow, nfs_cb cb, void *private_data);
+int nfs4_xstat64_async(struct nfs_context *nfs, const char *path,
+                       int no_follow, int nfs4_stat, nfs_cb cb,
+                       void *private_data);
 int nfs4_statvfs_async(struct nfs_context *nfs, const char *path, nfs_cb cb,
                        void *private_data);
 int nfs4_statvfs64_async(struct nfs_context *nfs, const char *path, nfs_cb cb,

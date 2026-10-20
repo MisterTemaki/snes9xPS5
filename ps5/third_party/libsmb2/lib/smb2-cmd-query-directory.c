@@ -82,7 +82,7 @@ smb2_decode_fileidfulldirectoryinformation(
         smb2_get_uint32(vec, 64, &fs->ea_size);
         smb2_get_uint64(vec, 72, &fs->file_id);
 
-        fs->name = smb2_utf16_to_utf8((uint16_t *)&vec->buf[80], name_len / 2);
+        fs->name = smb2_utf16_to_utf8((uint16_t *)(void *)&vec->buf[80], name_len / 2);
 
         smb2_get_uint64(vec, 8, &t);
         smb2_win_to_timeval(t, &fs->creation_time);
@@ -117,6 +117,11 @@ smb2_encode_query_directory_request(struct smb2_context *smb2,
         }
 
         iov = smb2_add_iovector(smb2, &pdu->out, buf, len, free);
+        if (iov == NULL) {
+                smb2_set_error(smb2, "Failed to add iovector for query-directory request");
+                free(name);
+                return -1;
+        }
 
         /* Name */
         if (req->name && req->name[0]) {
@@ -149,6 +154,10 @@ smb2_encode_query_directory_request(struct smb2_context *smb2,
                                         buf,
                                         2 * name->len,
                                         free);
+                if (iov == NULL) {
+                        smb2_set_error(smb2, "Failed to add iovector for query-directory name");
+                        return -1;
+                }
         }
         free(name);
 
@@ -226,7 +235,7 @@ smb2_encode_query_directory_reply(struct smb2_context *smb2,
                         in_offset = 0;
                         in_remain = fslen;
                         do {
-                                fs = (struct smb2_fileidbothdirectoryinformation*)(rep->output_buffer + in_offset);
+                                fs = (struct smb2_fileidbothdirectoryinformation*)(void *)(rep->output_buffer + in_offset);
                                 fname_len = 0;
                                 if (fs->name && fs->name[0]) {
                                         name = smb2_utf8_to_utf16(fs->name);
@@ -277,6 +286,10 @@ smb2_encode_query_directory_reply(struct smb2_context *smb2,
                                         buf,
                                         len,
                                         free);
+        if (iov == NULL) {
+                smb2_set_error(smb2, "Failed to add iovector for query-directory output buffer");
+                return -1;
+        }
 
         in_offset = 0;
         in_remain = fslen;
@@ -290,7 +303,7 @@ smb2_encode_query_directory_reply(struct smb2_context *smb2,
         else {
 
                 do {
-                        fs = (struct smb2_fileidbothdirectoryinformation*)(rep->output_buffer + in_offset);
+                        fs = (struct smb2_fileidbothdirectoryinformation*)(void *)(rep->output_buffer + in_offset);
                         fname_len = 0;
                         if (fs->name && fs->name[0]) {
                                 name = smb2_utf8_to_utf16(fs->name);
@@ -403,7 +416,7 @@ smb2_cmd_query_directory_reply_async(struct smb2_context *smb2,
         return pdu;
 }
 
-#define IOV_OFFSET (rep->output_buffer_offset - SMB2_HEADER_SIZE - \
+#define IOV_OFFSET_DIRECTORY (rep->output_buffer_offset - SMB2_HEADER_SIZE - \
                     (SMB2_QUERY_DIRECTORY_REPLY_SIZE & 0xfffe))
 
 int
@@ -434,9 +447,11 @@ smb2_process_query_directory_fixed(struct smb2_context *smb2,
         smb2_get_uint16(iov, 2, &rep->output_buffer_offset);
         smb2_get_uint32(iov, 4, &rep->output_buffer_length);
         if (rep->output_buffer_length &&
-            (rep->output_buffer_offset + rep->output_buffer_length > smb2->spl)) {
+            ((uint64_t)rep->output_buffer_offset +
+             rep->output_buffer_length > (uint64_t)smb2->spl)) {
                 smb2_set_error(smb2, "Output buffer extends beyond end of "
                                "PDU");
+                pdu->payload = NULL;
                 free(rep);
                 return -1;
         }
@@ -449,6 +464,7 @@ smb2_process_query_directory_fixed(struct smb2_context *smb2,
             (SMB2_QUERY_INFO_REPLY_SIZE & 0xfffe)) {
                 smb2_set_error(smb2, "Output buffer overlaps with "
                                "Query Dir reply header");
+                pdu->payload = NULL;
                 free(rep);
                 return -1;
         }
@@ -456,7 +472,7 @@ smb2_process_query_directory_fixed(struct smb2_context *smb2,
         /* Return the amount of data that the output buffer will take up.
          * Including any padding before the output buffer itself.
          */
-        return IOV_OFFSET + rep->output_buffer_length;
+        return IOV_OFFSET_DIRECTORY + rep->output_buffer_length;
 }
 
 int
@@ -466,12 +482,12 @@ smb2_process_query_directory_variable(struct smb2_context *smb2,
         struct smb2_query_directory_reply *rep = pdu->payload;
         struct smb2_iovec *iov = &smb2->in.iov[smb2->in.niov - 1];
 
-        rep->output_buffer = &iov->buf[IOV_OFFSET];
+        rep->output_buffer = &iov->buf[IOV_OFFSET_DIRECTORY];
 
         return 0;
 }
 
-#define IOVREQ_OFFSET (req->file_name_offset - SMB2_HEADER_SIZE - \
+#define IOVREQ_OFFSET_DIRECTORY (req->file_name_offset - SMB2_HEADER_SIZE - \
                     (SMB2_QUERY_DIRECTORY_REQUEST_SIZE & 0xfffe))
 
 int
@@ -508,9 +524,11 @@ smb2_process_query_directory_request_fixed(struct smb2_context *smb2,
         smb2_get_uint32(iov, 28, &req->output_buffer_length);
 
         if (req->file_name_length &&
-            (req->file_name_offset + req->file_name_length > (uint16_t)smb2->spl)) {
+            ((uint32_t)req->file_name_offset +
+             req->file_name_length > smb2->spl)) {
                 smb2_set_error(smb2, "Filename extends beyond end of "
                                "PDU");
+                pdu->payload = NULL;
                 free(req);
                 return -1;
         }
@@ -523,6 +541,7 @@ smb2_process_query_directory_request_fixed(struct smb2_context *smb2,
             (SMB2_QUERY_DIRECTORY_REQUEST_SIZE & 0xfffe)) {
                 smb2_set_error(smb2, "Name buffer overlaps with "
                                "Query Dir request header");
+                pdu->payload = NULL;
                 free(req);
                 return -1;
         }
@@ -530,7 +549,7 @@ smb2_process_query_directory_request_fixed(struct smb2_context *smb2,
         /* Return the amount of data that the name will take up.
          * Including any padding before the name itself.
          */
-        return IOVREQ_OFFSET + req->file_name_length;
+        return IOVREQ_OFFSET_DIRECTORY + req->file_name_length;
 }
 
 int
@@ -543,7 +562,7 @@ smb2_process_query_directory_request_variable(struct smb2_context *smb2,
         int name_byte_len;
 
         if (req->file_name_length > 0) {
-                req->name = smb2_utf16_to_utf8((uint16_t*)&iov->buf[IOVREQ_OFFSET], req->file_name_length / 2);
+                req->name = smb2_utf16_to_utf8((uint16_t*)(void *)&iov->buf[IOVREQ_OFFSET_DIRECTORY], req->file_name_length / 2);
                 if (req->name) {
                         name_byte_len = strlen(req->name) + 1;
                         ptr = smb2_alloc_init(smb2, name_byte_len);
