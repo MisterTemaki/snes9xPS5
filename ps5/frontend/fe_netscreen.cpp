@@ -8,6 +8,7 @@
 
 #include "fe_menu.h"
 
+#include "fe_i18n.h"
 #include "fe_osk.h"
 #include "fe_text.h"
 #include "fe_ui.h"
@@ -19,6 +20,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdio>
 #include <memory>
 #include <vector>
 
@@ -41,10 +43,10 @@ const char* StateName(NetfsState s)
 	switch (s)
 	{
 		case NetfsState::Idle:
-		case NetfsState::Connecting: return "Connecting...";
-		case NetfsState::Ready: return "Connected";
-		case NetfsState::Failed: return "Not connected";
-		case NetfsState::Dead: return "Connection lost";
+		case NetfsState::Connecting: return T("Connecting...");
+		case NetfsState::Ready: return T("Connected");
+		case NetfsState::Failed: return T("Not connected");
+		case NetfsState::Dead: return T("Connection lost");
 	}
 	return "";
 }
@@ -100,7 +102,7 @@ bool Ask(const char* title, const char* yes, const char* no)
 	{
 		Header(title);
 		DrawOptionBox(title, {{yes, ""}, {no, ""}}, sel, false);
-		Footer((std::string(icon::Cross) + " Choose     " + icon::Circle + " " + no).c_str());
+		Footer((std::string(icon::Cross) + " " + T("Choose") + "     " + icon::Circle + " " + no).c_str());
 		Present();
 		const Nav n = nav.Read();
 		if (n.up || n.down)
@@ -161,24 +163,25 @@ Row FormRow(Item it, const NetfsShareFields& f)
 	const bool smb = f.scheme == Scheme::Smb;
 	switch (it)
 	{
-		case Item::Type: return {"Type", smb ? "SMB (Windows, Samba, NAS)" : "NFS"};
-		case Item::Server: return {"Server", OrDefault(f.server, "IP address, like 192.168.1.50")};
-		case Item::Share: return {"Share name", OrDefault(f.share, "required")};
+		case Item::Type: return {T("Share type"), smb ? "SMB (Windows, Samba, NAS)" : "NFS"}; // names
+		case Item::Server: return {T("Server"), OrDefault(f.server, T("IP address, like 192.168.1.50"))};
+		case Item::Share: return {T("Share name"), OrDefault(f.share, T("required"))};
 		case Item::Folder:
-			return smb ? Row{"Folder in the share", OrDefault(f.folder, "the whole share")} : Row{"Export path", OrDefault(f.folder, "like /export/snes")};
-		case Item::User: return {"User name", OrDefault(f.user, "Guest")};
-		case Item::Password: return {"Password", f.password.empty() ? "None" : "********"};
-		case Item::Domain: return {"Domain", OrDefault(f.domain, "None")};
-		case Item::SmbVersion: return {"SMB version", OrDefault(f.vers, "Auto")};
-		case Item::Sign: return {"Signing", f.sign ? "On" : "Off"};
-		case Item::Seal: return {"Encryption", f.seal ? "On" : "Off"};
-		case Item::NfsVersion: return {"NFS version", std::to_string(f.nfs_version)};
-		case Item::Uid: return {"User ID", OrDefault(f.uid, "Default")};
-		case Item::Gid: return {"Group ID", OrDefault(f.gid, "Default")};
-		case Item::Test: return {"Test connection", ""};
-		case Item::Save: return {"Save", ""};
-		case Item::Remove: return {"Remove this share", ""};
-		case Item::Cancel: return {"Cancel", ""};
+			return smb ? Row{T("Folder in the share"), OrDefault(f.folder, T("the whole share"))}
+					   : Row{T("Export path"), OrDefault(f.folder, T("like /export/snes"))};
+		case Item::User: return {T("User name"), OrDefault(f.user, T("Guest"))};
+		case Item::Password: return {T("Password"), f.password.empty() ? T("None") : "********"};
+		case Item::Domain: return {T("Domain"), OrDefault(f.domain, T("None"))};
+		case Item::SmbVersion: return {T("SMB version"), OrDefault(f.vers, T("Auto"))};
+		case Item::Sign: return {T("Signing"), T(f.sign ? "On" : "Off")};
+		case Item::Seal: return {T("Encryption"), T(f.seal ? "On" : "Off")};
+		case Item::NfsVersion: return {T("NFS version"), std::to_string(f.nfs_version)};
+		case Item::Uid: return {T("User ID"), OrDefault(f.uid, T("Default"))};
+		case Item::Gid: return {T("Group ID"), OrDefault(f.gid, T("Default"))};
+		case Item::Test: return {T("Test connection"), ""};
+		case Item::Save: return {T("Save"), ""};
+		case Item::Remove: return {T("Remove this share"), ""};
+		case Item::Cancel: return {T("Cancel"), ""};
 	}
 	return {};
 }
@@ -212,17 +215,17 @@ std::string* TextField(Item it, NetfsShareFields& f, const char*& title, bool& s
 	max_len = 128;
 	switch (it)
 	{
-		case Item::Server: title = "Server: an IP address like 192.168.1.50"; max_len = 64; return &f.server;
-		case Item::Share: title = "Share name"; max_len = 80; return &f.share;
+		case Item::Server: title = T("Server: an IP address like 192.168.1.50"); max_len = 64; return &f.server;
+		case Item::Share: title = T("Share name"); max_len = 80; return &f.share;
 		case Item::Folder:
-			title = f.scheme == Scheme::Smb ? "Folder in the share (empty: the whole share)" : "Export path, like /export/snes";
+			title = f.scheme == Scheme::Smb ? T("Folder in the share (empty: the whole share)") : T("Export path, like /export/snes");
 			max_len = 200;
 			return &f.folder;
-		case Item::User: title = "User name (empty: guest)"; max_len = 64; return &f.user;
-		case Item::Password: title = "Password"; secret = true; return &f.password;
-		case Item::Domain: title = "Domain (usually empty)"; max_len = 64; return &f.domain;
-		case Item::Uid: title = "User ID (a number, empty: default)"; max_len = 9; return &f.uid;
-		case Item::Gid: title = "Group ID (a number, empty: default)"; max_len = 9; return &f.gid;
+		case Item::User: title = T("User name (empty: guest)"); max_len = 64; return &f.user;
+		case Item::Password: title = T("Password"); secret = true; return &f.password;
+		case Item::Domain: title = T("Domain (usually empty)"); max_len = 64; return &f.domain;
+		case Item::Uid: title = T("User ID (a number, empty: default)"); max_len = 9; return &f.uid;
+		case Item::Gid: title = T("Group ID (a number, empty: default)"); max_len = 9; return &f.gid;
 		default: return nullptr;
 	}
 }
@@ -234,7 +237,7 @@ bool RunForm(const NetfsFileShare* existing)
 	NetfsShareFields f;
 	if (existing)
 		f = netfs_fields_from_config(existing->cfg);
-	const std::string subtitle = existing ? ShortName(existing->cfg) : "Add a share";
+	const std::string subtitle = existing ? ShortName(existing->cfg) : std::string(T("Add a share"));
 
 	NavReader nav;
 	int sel = 1; // the first thing to fill in
@@ -270,18 +273,20 @@ bool RunForm(const NetfsFileShare* existing)
 		for (Item it : items)
 			rows.push_back(FormRow(it, f));
 		Header(subtitle.c_str());
-		DrawOptionBox(existing ? "Edit share" : "Add a share", rows, sel, false);
+		DrawOptionBox(T(existing ? "Edit share" : "Add a share"), rows, sel, false);
 		if (test)
 		{
 			const int dots = int(std::fmod(Now() * 3.0, 4.0));
-			DrawNote(std::string("Testing the connection") + std::string(size_t(dots), '.'), kDim);
+			DrawNote(std::string(T("Testing the connection")) + std::string(size_t(dots), '.'), kDim);
 		}
 		else if (!status.empty())
 			DrawNote(status, status_color);
 		else if (existing == nullptr && sel == 1)
-			DrawNote("Use the server's IP address: names often do not resolve on the console.", kDim);
-		Footer(test ? (std::string(icon::Circle) + " Stop the test").c_str()
-					: (std::string(icon::Cross) + " Edit     " + icon::DpadLeftRight + " Change     " + icon::Circle + " Back").c_str());
+			DrawNote(T("Use the server's IP address: names often do not resolve on the console."), kDim);
+		Footer(test ? (std::string(icon::Circle) + " " + T("Stop the test")).c_str()
+					: (std::string(icon::Cross) + " " + T("Edit") + "     " + icon::DpadLeftRight + " " + T("Change") + "     " + icon::Circle + " " +
+					   T("Back"))
+						  .c_str());
 		Present();
 
 		const Nav n = nav.Read();
@@ -290,7 +295,7 @@ bool RunForm(const NetfsFileShare* existing)
 			if (n.back)
 			{
 				test.reset();
-				status = "Test stopped.";
+				status = T("Test stopped.");
 				status_color = kDim;
 			}
 			continue;
@@ -302,7 +307,7 @@ bool RunForm(const NetfsFileShare* existing)
 			sel = (sel + 1) % count;
 		if (n.back || n.options)
 		{
-			if (!dirty || Ask("Discard your changes?", "Discard", "Keep editing"))
+			if (!dirty || Ask(T("Discard your changes?"), T("Discard"), T("Keep editing")))
 				return false;
 			nav = NavReader();
 			continue;
@@ -362,7 +367,7 @@ bool RunForm(const NetfsFileShare* existing)
 			}
 			case Item::Remove:
 			{
-				if (!Ask("Remove this share?", "Remove", "Keep it"))
+				if (!Ask(T("Remove this share?"), T("Remove"), T("Keep it")))
 				{
 					nav = NavReader();
 					break;
@@ -379,7 +384,7 @@ bool RunForm(const NetfsFileShare* existing)
 				return true;
 			}
 			case Item::Cancel:
-				if (!dirty || Ask("Discard your changes?", "Discard", "Keep editing"))
+				if (!dirty || Ask(T("Discard your changes?"), T("Discard"), T("Keep editing")))
 					return false;
 				nav = NavReader();
 				break;
@@ -401,20 +406,20 @@ void NetworkMenu()
 		std::vector<Row> rows;
 		for (const NetfsFileShare& s : view.shares)
 		{
-			std::string state = "Not used";
+			std::string state = T("Not used");
 			for (const NetfsShareInfo& i : live)
 				if (s.used && i.mount_point == s.mount_point)
 					state = StateName(i.state);
 			rows.push_back({ShortName(s.cfg), state, true, true});
 		}
 		const int add_row = int(rows.size());
-		rows.push_back({"Add a share", ""});
-		rows.push_back({"Connect again", ""});
-		rows.push_back({"Back", ""});
+		rows.push_back({T("Add a share"), ""});
+		rows.push_back({T("Connect again"), ""});
+		rows.push_back({T("Back"), ""});
 		sel = std::min(sel, int(rows.size()) - 1);
 
-		Header(view.error.empty() ? "Games on your network (SMB or NFS)" : "Network shares");
-		DrawOptionBox("Network shares", rows, sel, false);
+		Header(T(view.error.empty() ? "Games on your network (SMB or NFS)" : "Network shares"));
+		DrawOptionBox(T("Network shares"), rows, sel, false);
 		if (!view.error.empty())
 			DrawNote(view.error, kBad);
 		else if (sel < add_row)
@@ -434,10 +439,17 @@ void NetworkMenu()
 		else if (!note.empty())
 			DrawNote(note, kDim);
 		else if (view.shares.empty())
-			DrawNote("No shares yet. Add one: the games on it show up in the list, saves stay on the console.", kDim);
+			DrawNote(T("No shares yet. Add one: the games on it show up in the list, saves stay on the console."), kDim);
 		else if (view.invalid > 0)
-			DrawNote(std::to_string(view.invalid) + (view.invalid == 1 ? " line" : " lines") + " of shares.txt are not valid addresses and are skipped.", kDim);
-		Footer((std::string(icon::Cross) + " Open     " + icon::Circle + " Back").c_str());
+		{
+			char text[256];
+			snprintf(text, sizeof(text),
+				T(view.invalid == 1 ? "%d line of shares.txt is not a valid address and is skipped."
+									: "%d lines of shares.txt are not valid addresses and are skipped."),
+				int(view.invalid));
+			DrawNote(text, kDim);
+		}
+		Footer((std::string(icon::Cross) + " " + T("Open") + "     " + icon::Circle + " " + T("Back")).c_str());
 		Present();
 
 		const Nav n = nav.Read();
@@ -463,7 +475,11 @@ void NetworkMenu()
 			for (const NetfsFileShare& s : view.shares)
 				used += s.used;
 			if (used >= kNetfsMaxShares)
-				note = "Up to " + std::to_string(kNetfsMaxShares) + " shares are used. Remove one first.";
+			{
+				char text[128];
+				snprintf(text, sizeof(text), T("Up to %d shares are used. Remove one first."), int(kNetfsMaxShares));
+				note = text;
+			}
 			else
 			{
 				if (RunForm(nullptr))
@@ -475,7 +491,7 @@ void NetworkMenu()
 		else
 		{
 			netfs_reload();
-			note = "Connecting to every share again.";
+			note = T("Connecting to every share again.");
 		}
 	}
 }

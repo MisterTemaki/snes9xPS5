@@ -8,6 +8,7 @@
 
 #include "fe_osk.h"
 
+#include "fe_i18n.h"
 #include "fe_text.h"
 #include "fe_ui.h"
 
@@ -129,10 +130,16 @@ void Window(const std::string& shown, size_t cursor, int scale, int max_px, std:
 void DrawKey(const KeyBox& b, int row, const std::string& label, bool selected, uint32_t color, int scale)
 {
 	const int y = kKeysY + row * kPitchY;
+	// a translated function key that is too wide for its key: a size smaller, then cut
+	std::string text = label;
+	while (scale > 2 && TextWidth(text.c_str(), scale) > b.w - 16)
+		scale--;
+	if (TextWidth(text.c_str(), scale) > b.w - 16)
+		text = FitText(text, scale, b.w - 16);
 	if (selected)
 		ps5video::FillRect(b.x - 4, y - 4, b.w + 8, kKeyH + 8, kAccent);
 	ps5video::FillRect(b.x, y, b.w, kKeyH, selected ? kSel : kPanel);
-	DrawText(b.x + (b.w - TextWidth(label.c_str(), scale)) / 2, y + (kKeyH - kGlyphH * scale) / 2, label.c_str(), scale, color, false);
+	DrawText(b.x + (b.w - TextWidth(text.c_str(), scale)) / 2, y + (kKeyH - kGlyphH * scale) / 2, text.c_str(), scale, color, false);
 }
 } // namespace
 
@@ -166,8 +173,8 @@ bool EditText(const std::string& title, std::string& text, bool secret, size_t m
 		if (std::fmod(Now(), 1.0) < 0.6)
 			ps5video::FillRect(cx, ty - 4, 4, kGlyphH * 5 + 8, kAccent);
 		char info[64];
-		snprintf(info, sizeof(info), CountChars(work) == 1 ? "%zu character" : "%zu characters", CountChars(work));
-		DrawText(fx, fy + fh + 18, secret ? "Hidden as you type." : "", 2, kDim, false);
+		snprintf(info, sizeof(info), T(CountChars(work) == 1 ? "%zu character" : "%zu characters"), CountChars(work));
+		DrawText(fx, fy + fh + 18, secret ? T("Hidden as you type.") : "", 2, kDim, false);
 		DrawText(fx + fw - TextWidth(info, 2), fy + fh + 18, info, 2, kDim, false);
 
 		for (int r = 0; r <= kFnRow; r++)
@@ -179,7 +186,7 @@ bool EditText(const std::string& title, std::string& text, bool secret, size_t m
 				if (r == kFnRow)
 				{
 					static const char* const kNames[FnCount] = {"Shift", "#+=", "Space", "Delete", "Cancel", "Done"};
-					std::string label = kNames[c];
+					std::string label = c == FnSymbols ? kNames[c] : T(kNames[c]); // #+= is no word
 					if (c == FnSymbols && symbols)
 						label = "abc";
 					const bool lit = (c == FnShift && shift) || (c == FnSymbols && symbols);
@@ -189,8 +196,9 @@ bool EditText(const std::string& title, std::string& text, bool secret, size_t m
 					DrawKey(boxes[c], r, std::string(1, page[r][c]), sel, kText, 4);
 			}
 		}
-		Footer((std::string(icon::Cross) + " Type   " + icon::Square + " Delete   " + icon::Triangle + " Space   " + icon::L2 + " Shift   " +
-				icon::R2 + " #+=   " + icon::L1 + " " + icon::R1 + " Cursor   " + icon::Options + " Done   " + icon::Circle + " Cancel")
+		Footer((std::string(icon::Cross) + " " + T("Type") + "   " + icon::Square + " " + T("Delete") + "   " + icon::Triangle + " " + T("Space") +
+				"   " + icon::L2 + " " + T("Shift") + "   " + icon::R2 + " #+=   " + icon::L1 + " " + icon::R1 + " " + T("Cursor") + "   " +
+				icon::Options + " " + T("Done") + "   " + icon::Circle + " " + T("Cancel"))
 				   .c_str());
 		Present();
 

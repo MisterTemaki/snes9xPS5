@@ -596,6 +596,12 @@ void LoadingProgress(const char* text, float fraction)
 }
 
 // ---- tabs, and what the shares are doing (the Network tab) -------------------------------------------------
+// A tab's name on the screen (USB is a name; the log keeps tabs::Name in English).
+const char* TabLabel(int t)
+{
+	return t == tabs::Usb ? tabs::Name(t) : T(tabs::Name(t));
+}
+
 // The tab bar, centred at the top: Internal, USB (only with a USB game), Network. L1 / R1 stand at its ends.
 void DrawTabs(const int counts[tabs::kCount], int active)
 {
@@ -604,7 +610,7 @@ void DrawTabs(const int counts[tabs::kCount], int active)
 	int total = 0, shown = 0;
 	for (int t = 0; t < tabs::kCount; t++)
 		if (tabs::Shown(counts, t))
-			total += (widths[t] = TextWidth(tabs::Name(t), scale) + 2 * padx) + (shown++ ? gap : 0);
+			total += (widths[t] = TextWidth(TabLabel(t), scale) + 2 * padx) + (shown++ ? gap : 0);
 	int x = (W - total) / 2;
 	const uint32_t dim = Rgb(150, 146, 185);
 	if (shown > 1)
@@ -620,7 +626,7 @@ void DrawTabs(const int counts[tabs::kCount], int active)
 		ps5video::FillRect(x, y, widths[t], h, on ? Rgb(78, 62, 170) : Rgb(32, 30, 58));
 		if (on)
 			ps5video::FillRect(x, y + h - 4, widths[t], 4, Rgb(170, 150, 255));
-		DrawText(x + padx, y + 12, tabs::Name(t), scale, on ? Rgb(245, 245, 252) : dim);
+		DrawText(x + padx, y + 12, TabLabel(t), scale, on ? Rgb(245, 245, 252) : dim);
 		x += widths[t] + gap;
 	}
 }
@@ -648,17 +654,26 @@ NetView NetStatus(std::map<std::string, double>& since, double now)
 		{
 			v.waiting++;
 			const double t0 = since.emplace(s.mount_point, now).first->second;
-			v.lines.push_back({"Connecting to " + s.label + "... " + std::to_string(int(now - t0)) + " s", Rgb(205, 200, 235), false});
+			char text[256];
+			snprintf(text, sizeof(text), T("Connecting to %s... %d s"), s.label.c_str(), int(now - t0));
+			v.lines.push_back({text, Rgb(205, 200, 235), false});
 			continue;
 		}
 		since.erase(s.mount_point);
 		if (s.state == NetfsState::Ready)
 		{
 			v.ready++;
-			v.lines.push_back({s.label + ": connected, no ROMs found.", Rgb(205, 200, 235), true});
+			char text[256];
+			snprintf(text, sizeof(text), T("%s: connected, no ROMs found."), s.label.c_str());
+			v.lines.push_back({text, Rgb(205, 200, 235), true});
 		}
 		else
-			v.lines.push_back({s.error.empty() ? s.label + " is not available." : s.error, Rgb(255, 150, 150), false});
+		{
+			// netfs's own reason stays in English (it is the log's text too)
+			char text[256];
+			snprintf(text, sizeof(text), T("%s is not available."), s.label.c_str());
+			v.lines.push_back({s.error.empty() ? std::string(text) : s.error, Rgb(255, 150, 150), false});
+		}
 	}
 	return v;
 }
@@ -839,7 +854,7 @@ std::string Shelf()
 			if (mounts != net_seen || named || rescan)
 			{
 				if (rescan)
-					Loading("Scanning the network shares...");
+					Loading(T("Scanning the network shares..."));
 				rescan = false;
 				net_seen = mounts;
 				naming_seen = resolved;
@@ -1091,24 +1106,28 @@ std::string Shelf()
 		else if (tab == tabs::Network)
 		{
 			// PSFlycast's empty Network tab says what the share answered
-			const char* plural = net.shares > 1 ? "shares" : "share";
-			CenterText(300, net.shares == 0 ? "No network shares yet."
-						   : net.waiting ? "Looking for network games..."
-						   : net.ready == 0 ? std::string("Could not reach the network ") + plural + "."
-											: std::string("No games found on the network ") + plural + ".",
+			const bool plural = net.shares > 1;
+			CenterText(300, T(net.shares == 0 ? "No network shares yet."
+							  : net.waiting  ? "Looking for network games..."
+							  : net.ready == 0 ? (plural ? "Could not reach the network shares." : "Could not reach the network share.")
+											   : (plural ? "No games found on the network shares." : "No games found on the network share.")),
 					   5, Rgb(240, 240, 250));
 			int y = 420;
 			for (size_t i = 0; i < net.lines.size() && i < 4; i++, y += 50)
 				CenterText(y, net.lines[i].text, 3, net.lines[i].color);
 			if (net.lines.size() > 4)
-				CenterText(y, "and " + std::to_string(net.lines.size() - 4) + " more", 3, Rgb(175, 170, 205));
+			{
+				char more[64];
+				snprintf(more, sizeof(more), T("and %d more"), int(net.lines.size() - 4));
+				CenterText(y, more, 3, Rgb(175, 170, 205));
+			}
 			if (net.shares == 0)
 			{
-				CenterText(640, std::string("Add one:  ") + icon::Triangle + "  Settings > Network shares", 4, Rgb(200, 190, 255));
-				CenterText(710, "SMB or NFS; the pad types the address, user and password.", 3, Rgb(200, 200, 220));
+				CenterText(640, std::string(T("Add one:")) + "  " + icon::Triangle + "  " + T("Settings > Network shares"), 4, Rgb(200, 190, 255));
+				CenterText(710, T("SMB or NFS; the pad types the address, user and password."), 3, Rgb(200, 200, 220));
 			}
 			else if (!net.waiting)
-				CenterText(660, std::string(icon::Square) + "  Scan again        " + icon::Triangle + "  Settings > Network shares", 3,
+				CenterText(660, std::string(icon::Square) + "  " + T("Scan again") + "        " + icon::Triangle + "  " + T("Settings > Network shares"), 3,
 						   Rgb(200, 190, 255));
 		}
 		else
