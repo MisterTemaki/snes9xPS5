@@ -17,9 +17,11 @@ own icon and background. The PS5 layer follows the layout of PS5SX2 (the PCSX2 p
 Everything outside `ps5/` is the original Snes9x source, unchanged, apart from this README (the original one is
 [README-Snes9x.md](README-Snes9x.md)).
 
-> **Status (2.6.1):** runs on the console: the app opens from its icon, the shelf, the controller, video and sound
-> work, and games play. It builds with the ps5-payload-dev SDK and passes 242 host tests, which run the same code
-> on Linux with the PS5 calls simulated. If something fails, the logs in `/data/snes9x/logs/` say where.
+> **Status (2.7):** 2.6 runs on the console: the app opens from its icon, the shelf, the controller, video and sound
+> work, and games play. 2.7's new parts (network shares, shelf tabs, borders) have **not been run on a PS5 yet**. It
+> builds with the ps5-payload-dev SDK and passes 379 host tests (one, the sound-queue timing, depends on the test
+> machine's load), which run the same code on Linux with the PS5 calls simulated, plus the network-share unit and
+> loopback tests. If something fails, turn on Settings, Debug logs: the logs in `/data/snes9x/logs/` say where.
 
 ## How it works (the PS5SX2 model)
 
@@ -48,9 +50,17 @@ written to PS5SX2's folders (`/data/PCSX2`, `/data/homebrew/PPSA99203`).
 
 ## Versions
 
-Every release carries its version in the file name: `Snes9xPS5-v2.6.1.elf` and `snes9x-ps5-v2.6.1-src.zip`
+Every release carries its version in the file name: `Snes9xPS5-v2.7.elf` and `snes9x-ps5-v2.7-src.zip`
 (`make dist`). When updating, replace the old ELF with the new one in your autoload or Payload Manager. In this
 README, "`Snes9xPS5.elf`" always means the current release's ELF.
+
+**2.7:** **Games on network shares (SMB and NFS)**, **shelf tabs** (Internal, USB, Network), **borders around the
+picture** (per game, from The Bezel Project, or a built-in frame), **covers for more games** (fan translations and
+renamed ROMs, an online database for games libretro-thumbnails lacks) and **cheats that reload when their file
+changes**, by [thatboialex](https://github.com/thatboialex) ([#3](https://github.com/MisterTemaki/snes9xPS5/pull/3)).
+With them: libsmb2 and libnfs taken to their newest upstream code (fixes for memory bugs a malicious server could
+trigger, among them CVE-2025-57632 and CVE-2026-110712), the new screens in the five languages, and the interface
+languages of 2.6.1.
 
 **2.6.1:** **Interface languages**: English (the default), Spanish, Portuguese (Brazil), French and German
 (Settings, Language). The **debug logs are off by default** (Settings, Debug logs turns them on).
@@ -158,10 +168,10 @@ notification of the app to Spanish (Español), Portuguese (Brazil) (Português (
 
 1. **Send `Snes9xPS5.elf`** with PS5 Payload Manager, or from a PC on the same network:
    ```sh
-   nc -q0 PS5_IP 9021 < Snes9xPS5-v2.6.1.elf
+   nc -q0 PS5_IP 9021 < Snes9xPS5-v2.7.elf
    ```
    It installs the app in `/data/homebrew/PPSA99922/` (`eboot.bin`, `sce_module/libc.prx`, `param.json`, the
-   icon and the backgrounds), shows **"Snes9x PS5 2.6.1 installed. Open it from the Snes9x PS5 icon on the home
+   icon and the backgrounds), shows **"Snes9x PS5 2.7 installed. Open it from the Snes9x PS5 icon on the home
    screen."** and stays running as the helper.
 2. **Open the Snes9x PS5 icon.** The game shelf appears and the controller works.
 3. **Copy your ROMs** (`.sfc .smc .swc .fig .bs .st .zip .gz`) to `/data/snes9x/roms`, over FTP for example, or
