@@ -682,6 +682,16 @@ The build has three stages:
   the cover prefetch and exiting through the system).
 - The VideoOut tiling and setup follow the SDK's SDL2 port (zlib license).
 - **zlib** (Jean-loup Gailly and Mark Adler): zlib license.
+- **libsmb2** (Ronnie Sahlberg and contributors, [github.com/sahlberg/libsmb2](https://github.com/sahlberg/libsmb2))
+  and **libnfs** (Ronnie Sahlberg and contributors, [github.com/sahlberg/libnfs](https://github.com/sahlberg/libnfs)):
+  LGPL-2.1-or-later, linked statically into the app for the network shares. Their full source, with the port's few
+  changes (`ps5/third_party/libnfs/PATCHES.md`, `ps5/third_party/libsmb2/README.snes9xps5`), is in this repository
+  and in each release's source zip, together with everything needed to rebuild and relink the app with a modified
+  version. libsmb2 also contains code under other terms: "derived from the RSA Data Security, Inc. MD4
+  Message-Digest Algorithm", public-domain AES and MD5, and the RFC 4634 SHA/HMAC code (its notices are in the
+  files); libnfs's generated RPC code is under its BSD licence.
+- **The network share code** (`ps5/netfs/`, the Network shares screen, the on-screen keyboard), the shelf tabs, the
+  borders and the online covers lookup are by [thatboialex](https://github.com/thatboialex) (pull request #3).
 - **Mbed TLS** 3.6.7 ([github.com/Mbed-TLS/mbedtls](https://github.com/Mbed-TLS/mbedtls), the Mbed TLS
   contributors): Apache-2.0 (`ps5/frontend/third_party/mbedtls/LICENSE`).
 - **Mozilla's CA certificate list** (`ps5/frontend/data/cacert.pem`, as packaged by
