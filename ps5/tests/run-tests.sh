@@ -1434,20 +1434,31 @@ for L in 1 2 3 4; do
 	T=$(newroot t27_$L)
 	echo "language=$L" >>"$T/root/snes9x-ps5.ini"
 	python3 tests/make_test_rom.py "$T/root/roms/Alpha (USA).sfc" ntsc >/dev/null
-	# the settings (every row, the controller shortcuts), the shelf, a game: quick save, the pause menu (every row,
-	# a state saved, the cheat manager), then quit from it
+	# the settings (every row, the Border row's values, the Network shares screen, the controller shortcuts, Download all
+	# borders), the shelf's Network tab, a game: quick save, the pause menu (every row, a state saved, the cheat
+	# manager), then quit from it
+	key() { pad="$pad;$f:$1;$((f + 2)):0"; f=$((f + ${2:-6})); } # one press, then the next one $2 flips later
 	pad="0:0;20:$TRIANGLE;22:0"; f=30
-	for i in $(seq 1 13); do pad="$pad;$f:$DOWN;$((f + 2)):0"; f=$((f + 6)); done
-	pad="$pad;$f:$CROSS;$((f + 2)):0;$((f + 20)):$CIRCLE;$((f + 22)):0"; f=$((f + 30))
-	for i in $(seq 1 3); do pad="$pad;$f:$DOWN;$((f + 2)):0"; f=$((f + 6)); done
-	pad="$pad;$f:$CIRCLE;$((f + 2)):0"; f=$((f + 30))
+	key $DOWN; key $DOWN
+	key $RIGHT; key $RIGHT; key $RIGHT 10 # Border: Off -> Auto -> Default frame -> Off (as group 35 d)
+	for i in $(seq 1 10); do key $DOWN; done
+	# Network shares (as group 31): Add a share, Cross on Server opens the keyboard, Circle closes it; Up to the
+	# share type, Right (NFS: its rows), Circle asks to discard, Up + Cross discards; Connect again; Circle back
+	key $CROSS 20; key $CROSS 20; key $CROSS 20; key $CIRCLE 20
+	key $UP; key $RIGHT 20; key $CIRCLE 20; key $UP; key $CROSS 20
+	key $DOWN; key $CROSS 20; key $CIRCLE 20
+	key $DOWN; key $CROSS 20; key $CIRCLE 10
+	key $DOWN; key $DOWN; key $CROSS 20 # Download all borders: "1 queued"
+	key $DOWN; key $CIRCLE 30
+	# the shelf's Network tab (as group 32 c): R1, Square scans again, L1 back to the game
+	key $R1 20; key $SQUARE 30; key $L1 30
 	pad="$pad;$f:$CROSS;$((f + 2)):0"; f=$((f + 150))
 	pad="$pad;$f:$(printf %x $((0x$L2 | 0x$UP)));$((f + 4)):0"; f=$((f + 20))
 	pad="$pad;$f:$L3R3;$((f + 4)):0"; f=$((f + 15))
 	pad="$pad;$f:$DOWN;$((f + 2)):0;$((f + 8)):$CROSS;$((f + 10)):0"; f=$((f + 20))
 	for i in $(seq 1 3); do pad="$pad;$f:$DOWN;$((f + 2)):0"; f=$((f + 6)); done
 	pad="$pad;$f:$CROSS;$((f + 2)):0;$((f + 20)):$CIRCLE;$((f + 22)):0"; f=$((f + 30))
-	for i in $(seq 1 14); do pad="$pad;$f:$DOWN;$((f + 2)):0"; f=$((f + 6)); done
+	for i in $(seq 1 15); do pad="$pad;$f:$DOWN;$((f + 2)):0"; f=$((f + 6)); done # to Quit Snes9x
 	pad="$pad;$((f + 4)):$CROSS;$((f + 6)):0"
 	rm -f $T/missing.txt
 	rc=$(SNES9X_HOST_I18N_MISSING=$T/missing.txt run "$T" "$pad" "")

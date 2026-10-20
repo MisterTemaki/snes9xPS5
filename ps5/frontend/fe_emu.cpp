@@ -1014,7 +1014,7 @@ FrameResult RunFrame()
 	g.frame++;
 	// A cheat added to the file while the game runs is picked up within a few seconds: one stat a second, no search.
 	if (g.frame % 60 == 0 && SyncCheatsFromFile(false))
-		Osd("Cheats updated: %d", CheatCount());
+		Osd(fe::T("Cheats updated: %d"), CheatCount());
 	if (g.frame == 60 || g.frame == 240 || g.frame % 3600 == 0)
 		OrbisLog("[emu] frame %u: audio queued %d, underruns %llu, shader %.1f ms", g.frame, ps5audio::Queued(),
 			(unsigned long long)ps5audio::Underruns(), ps5video::TakeShaderMs());

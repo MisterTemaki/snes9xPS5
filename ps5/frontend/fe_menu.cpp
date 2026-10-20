@@ -123,7 +123,7 @@ std::string RootLabel(const std::string& root)
 	if (root.rfind("/mnt/usb", 0) == 0)
 		return "USB " + root.substr(8, 1) + "  (" + root + ")";
 	if (root.rfind("/smb/", 0) == 0 || root.rfind("/nfs/", 0) == 0)
-		return "Network: " + root.substr(5) + (root[1] == 's' ? "  (SMB)" : "  (NFS)");
+		return Fmt(T("Network: %s"), root.substr(5).c_str()) + (root[1] == 's' ? "  (SMB)" : "  (NFS)");
 	return root;
 }
 
@@ -240,11 +240,11 @@ std::string NetworkSummary()
 {
 	const std::vector<NetfsShareInfo> shares = netfs_shares();
 	if (shares.empty())
-		return "None";
+		return T("None");
 	int ready = 0;
 	for (const NetfsShareInfo& i : shares)
 		ready += i.state == NetfsState::Ready;
-	return std::to_string(ready) + " of " + std::to_string(shares.size()) + " connected";
+	return Fmt(T("%d of %d connected"), ready, int(shares.size()));
 }
 
 // The Download all borders row: what the helper is doing (borders/progress.txt), or what the last press asked for.
@@ -259,13 +259,13 @@ std::string BorderDownloadValue()
 	const CoverProgress p = ReadBorderProgress();
 	const double age = Now() - g_border_ask.at;
 	if (p.valid && p.left > 0)
-		return std::to_string(p.left) + " left";
+		return Fmt(T("%d left"), int(p.left));
 	if (age < 6.0)
-		return g_border_ask.queued > 0 ? std::to_string(g_border_ask.queued) + " queued" : "Nothing to fetch";
+		return g_border_ask.queued > 0 ? Fmt(T("%d queued"), g_border_ask.queued) : std::string(T("Nothing to fetch"));
 	if (g_border_ask.queued > 0 && !p.valid && age < 120.0)
-		return "Waiting for the helper";
+		return T("Waiting for the helper");
 	if (p.valid && p.fetched > 0)
-		return std::to_string(p.fetched) + " fetched";
+		return Fmt(T("%d fetched"), int(p.fetched));
 	return "";
 }
 

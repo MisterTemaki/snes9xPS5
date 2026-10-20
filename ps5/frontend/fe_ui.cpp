@@ -123,10 +123,15 @@ void DrawOptionBox(const char* title, const std::vector<Row>& rows, int sel, boo
 		if (int(i) == sel)
 			ps5video::FillRect(bx + 16, y - 6, bw - 32, row_h, kSel);
 		const uint32_t col = rows[i].enabled ? kText : kDim;
-		DrawText(bx + 40, y, FitText(rows[i].label, scale, bw - 320).c_str(), scale, col);
+		const std::string label = FitText(rows[i].label, scale, bw - 320);
+		DrawText(bx + 40, y, label.c_str(), scale, col);
 		if (!rows[i].value.empty())
 		{
-			const std::string v = (int(i) == sel && !rows[i].plain ? "< " + rows[i].value + " >" : rows[i].value);
+			// a long (translated) value is cut before it reaches the label
+			const int room = bw - 80 - TextWidth(label.c_str(), scale) - 30;
+			const bool arrows = int(i) == sel && !rows[i].plain;
+			const std::string value = FitText(rows[i].value, scale, room - (arrows ? TextWidth("<  >", scale) : 0));
+			const std::string v = arrows ? "< " + value + " >" : value;
 			DrawText(bx + bw - 40 - TextWidth(v.c_str(), scale), y, v.c_str(), scale, int(i) == sel ? kText : kAccent);
 		}
 	}
