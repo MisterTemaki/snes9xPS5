@@ -7,6 +7,8 @@
 #pragma once
 
 #include <cstdint>
+#include <memory>
+#include <vector>
 
 namespace ps5video
 {
@@ -33,6 +35,8 @@ void FillRect(int x, int y, int w, int h, uint32_t color);
 void DarkenRect(int x, int y, int w, int h); // halves every channel
 
 // The SNES picture: how GFX.Screen (RGB565) is scaled into the surface.
+// The NTSC picture the whole-multiple sizes count in (Integer scale: 4x is 1024x896).
+constexpr int kPictureW = 256, kPictureH = 224;
 enum class Aspect : int
 {
 	Ratio4x3 = 0, // 1440x1080, what a CRT showed
@@ -43,13 +47,40 @@ enum class Aspect : int
 };
 const char* AspectName(Aspect a);
 
-// Scales a w x h RGB565 picture (pitch in bytes) into the surface (nearest neighbour); returns the
-// rectangle that changed so the caller can Present just that. 'scanlines' darkens the last output row of
-// every source line, CRT style, when the scale is 3x or more.
 struct Rect
 {
 	int x, y, w, h;
 };
+
+// Art around the picture (docs: .context/projects/snes9xps5/borders-spec.md). The picture goes in the border's window;
+// the border itself is painted into the surface once, where the surface is cleared, so a normal frame still changes
+// only the picture rectangle.
+// One pixel of the border that lies inside the window: drawn over the picture every frame.
+struct RimPixel
+{
+	uint32_t index; // y * kWidth + x
+	uint32_t pre; // 0xAABBGGRR with A = 0: each colour already multiplied by alpha / 255
+	uint32_t inv; // 255 - alpha
+};
+struct Border
+{
+	std::vector<uint32_t> backdrop; // kWidth * kHeight, 0xAABBGGRR, opaque. Window pixels 0xff000000, rim pixels already on black.
+	Rect window;
+	std::vector<RimPixel> rim; // every pixel inside `window` with alpha 1..255, sorted by index
+};
+// The border DrawSnes uses from the next frame on; null = none (today's black). Cheap: swaps a pointer.
+void SetBorder(std::shared_ptr<const Border> border);
+
+// Where the picture goes inside 'bounds' (the whole surface, or a border's window): centred, width kept even.
+// 4:3 and 8:7 fit by the limiting side, or fill 'bounds' when it has that ratio within 3%; Integer is the largest whole
+// multiple that fits (and when 'bounds' is itself a whole multiple of 256 x 224, as a border's window is for Integer
+// scale, a picture of another height, 239 lines, fills it like 8:7 would instead of dropping to a smaller multiple);
+// Stretch fills 'bounds'. src_w / src_h are the picture's size as the core draws it.
+Rect ComputeRect(int src_w, int src_h, Aspect aspect, const Rect& bounds);
+
+// Scales a w x h RGB565 picture (pitch in bytes) into the surface (nearest neighbour); returns the
+// rectangle that changed so the caller can Present just that. 'scanlines' darkens the last output row of
+// every source line, CRT style, when the scale is 3x or more.
 // shader: a ps5crt::Shader (0 = none: the plain scaler, with 'scanlines'); with one, the CRT shader draws the picture
 // instead (ProsperoCrt.h).
 Rect DrawSnes(const uint16_t* src, int pitch_bytes, int w, int h, Aspect aspect, bool scanlines, int shader = 0);

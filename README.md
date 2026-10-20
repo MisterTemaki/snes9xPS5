@@ -35,7 +35,7 @@ system UI, so the controller never worked. Since 1.6 Snes9x follows PS5SX2's mod
 When it opens, the app asks the helper to let it out of its sandbox; without that an app sees neither `/data`
 nor USB drives. The request is the one PS5SX2 makes:
 
-- **Who is asked, in order:** the Snes9x helper (127.0.0.1:9089 since 2.6; 2.3's used 9083; older helpers used 9075 up to 2.1 and 9080 in
+- **Who is asked, in order:** the Snes9x helper (127.0.0.1:9090 since it downloads borders; 2.6's used 9089; 2.3's used 9083; older helpers used 9075 up to 2.1 and 9080 in
   2.2, and are left alone), then etaHEN (9028) and the daemon on port 9069.
 - **If nobody answers:** the app carries a copy of the helper (`Snes9xPS5-helper.elf`), sends it to the ELF
   loader (127.0.0.1:9021) and asks again. So the icon keeps working after a reboot, as long as the ELF loader
@@ -106,6 +106,13 @@ only let PPSA99009 out.
 **Replace the old ELF in your autoload** with the new ELF, or the old version keeps
 being installed beside the new one.
 
+**Sending a new build updates the app in place.** Every build carries the same title ID (PPSA99922), content ID and
+folder, so the installer only rewrites the files that changed (in practice `eboot.bin`); `param.json` is not touched, so
+the home screen has nothing new to register. A second Snes9x icon means a second folder under `/data/homebrew/`
+whose `param.json` is ours (an old version under another title ID, a copy of the folder, or an old ELF in your
+autoload that installs it again). The installer lists every such folder in its notification and in
+`/data/snes9x/logs/installer.log`; it never removes them itself.
+
 ## Updates
 
 From 2.6 on, the app updates itself from this repository's GitHub releases, as
@@ -174,6 +181,7 @@ the helper is already running only installs and exits.
 | `/data/snes9x/patches` | IPS/UPS/BPS patches named after the ROM |
 | `/data/snes9x/bios` | `BS-X.bin`, `STBIOS.bin` (Satellaview, Sufami Turbo) |
 | `/data/snes9x/covers` | downloaded covers and your own |
+| `/data/snes9x/borders` | borders around the picture (optional, see Borders) |
 | `/data/snes9x/logs` | `boot.log` (the app), `installer.log` (installer/helper), `helper.log` (the helper the app starts), and the previous session's `.prev.log` files |
 | `/data/snes9x/snes9x-ps5.ini` | the menu settings |
 | `/data/snes9x/snes9x.conf` | optional: Snes9x's own configuration file, for advanced options |
@@ -213,13 +221,29 @@ author's line with the GitHub mark: **github.com/MisterTemaki** (PS5SX2 shows it
 - the others are tilted on both sides, in perspective, reflected on the floor;
 - the shelf slides when you change games.
 
-- **All your games at once:** the shelf gathers the ROMs in `/data/snes9x/roms` and on USB drives
-  (`snes9x/roms`), subfolders included, sorted by game name.
+- **All your games, in tabs:** the shelf gathers the ROMs in `/data/snes9x/roms` and on USB drives
+  (`snes9x/roms`), subfolders included, sorted by game name. A bar at the top keeps them apart, as PSFlycast's
+  library does: **Internal** (the console's drive), **USB** (only while a game is on a USB drive) and **Network**
+  (games on a share). **L1 / R1** go round the tabs; each tab keeps its place, and the shelf opens on the tab
+  you used last.
 - **Official names:** SNES ROMs have no serial. A game is identified by its file name or, when that doesn't
   match, by the ROM's CRC32, looked up in a No-Intro table of 4268 games built into the app.
   - The CRC is taken without a copier header; for a `.zip`, the CRC stored in the zip is used.
   - Loose names (`super mario world.smc`) are recognised too.
   - CRCs are cached in `covers/crc-cache.txt`, so each ROM is read once.
+  - **Fan translations and renamed ROMs** (`Super Robot Wars 4 (English).sfc`) find the cover of the game they come
+    from, whatever the file is called. Three clues are used: the ROM's CRC32 in a second table of fan-translation dumps
+    built into the app (`data/snes-extra-crc.tsv`); the words of the file name (tags, `v1.1`, roman numerals,
+    `Dai-4-ji`, `Wars`/`Taisen` and romanisation spellings are smoothed out; a different number or an ambiguous
+    result never matches); and, last, the title inside the ROM itself. Your file name is what the shelf shows; only
+    the cover comes from the original game.
+  - **Games libretro-thumbnails has no cover for** (pirate carts, hacks, homebrew, and games only some databases list,
+    such as `Aladdin 2000`, `Pokemon Stadium` or `King of Fighters 2000`) get the cover an online database has: a
+    table built into the app (`data/snes-db-art.tsv`, 411 games) names them by CRC32 and by name, and the helper
+    downloads the image from [hasheous.org](https://hasheous.org) or from TheGamesDB's image server, after
+    libretro-thumbnails had none. No checksum or file name of yours is sent to those two: only the image address
+    from the table is fetched. A game no database lists (there is no SNES `Street Fighter III`) still gets a title card; put
+    `<ROM file name>.png` or `.jpg` in `/data/snes9x/covers` for those.
 - **Automatic covers, in the background:** covers come from
   [libretro-thumbnails](https://github.com/libretro-thumbnails/Nintendo_-_Super_Nintendo_Entertainment_System)
   (`Named_Boxarts`) over HTTPS.
@@ -288,10 +312,11 @@ On the test PC a frame takes about 15 ms on 2 cores.
 | Button | Does |
 |---|---|
 | Left / Right (D-pad or stick) | change game (hold to speed up) |
-| L1 / R1 | skip 10 games |
+| L1 / R1 | next / previous tab (Internal, USB, Network) |
+| L2 / R2 | skip 10 games |
 | Cross | play |
 | Triangle | settings |
-| Square | download this game's cover again (the cover it has stays until the new one has arrived) |
+| Square | download this game's cover again (the cover it has stays until the new one has arrived); on the Network tab: scan the shares again |
 | OPTIONS | quit Snes9x (asks first) |
 
 **In a game** (buttons by position, as on the SNES pad)
@@ -425,6 +450,41 @@ Good to know:
 - The host tests play an MSU-1 track from a test ROM through to the console's sound output (files beside the ROM
   and a `.msu1` pack); it has not yet been tried with a real MSU-1 hack on a console.
 
+## Network shares (SMB and NFS)
+
+Games can be read from a Windows, Samba, NAS or router share instead of a drive. Add one on the console:
+**Settings (Triangle) > Network shares > Add a share**. Pick SMB or NFS, type the server's IP address, the share
+(or export) and, if it needs them, a user name and password with the on-screen keyboard (D-pad and Cross; Square
+deletes, Triangle is a space, L2 is Shift, R2 the symbols page, OPTIONS is Done). **Test connection** says what
+is in the folder, or why it cannot be reached, before you save. Open a share in the list to change or remove it.
+
+The screen keeps its shares in `/data/snes9x/shares.txt` (the first run writes it with examples). You can edit the
+file instead, one address per line (up to 8); the screen changes only the line you edit and keeps your comments:
+
+```
+smb://192.168.1.50/games/snes
+smb://jason@192.168.1.50/games/snes?password=secret
+nfs://192.168.1.50/export/snes
+```
+
+Use the server's IP address. Inside a user name, password or folder, write `& = % # @ ; / ? ` and spaces as `%XX`
+(`p@ss` is `p%40ss`). The password sits in this file in plain text.
+
+- The share's games appear on the **Network** tab as soon as it has connected; the other tabs do not wait for it.
+  While a share is connecting, or cannot be reached, the tab says so (and why, in a sentence), and with no share
+  set up it points to Settings > Network shares. **Square** on the tab scans again: it forgets the folder
+  listings and connects the shares that were down once more.
+  Network games are first named from their file names; a background pass then reads each ROM once to name it
+  by checksum (the answer is remembered), and a cover for a game that shows up late is fetched when it does.
+- A share is read-only. Saves, states, cheats, covers and settings stay on the console.
+- A game is read into memory when it starts. MSU-1 music is fetched before the first frame, and a slow or lost
+  connection never stalls the picture or the sound: a track that has not arrived is silent, and the game goes on.
+  This covers loose files beside the ROM (`<rom>.msu`, `<rom>-1.pcm`...). An MSU-1 pack (`<rom>.msu1`, a zip) is not
+  fetched ahead and can make the game wait for the network; unpack its tracks beside the ROM.
+- If a share cannot be reached, a notification says why (no answer, wrong password, share not found...) and the
+  same sentence is in `/data/snes9x/logs/boot.log` (`[net]`).
+- SMB uses libsmb2 and NFS uses libnfs; both are LGPL-2.1 and sit in `ps5/third_party/` with their licence notices.
+
 ## Picture and sound
 
 - 1920x1080 output through `libSceVideoOut`, flipping on vsync. With little video memory it falls back to
@@ -434,6 +494,79 @@ Good to know:
 - Sound through `libSceAudioOut` at 48 kHz, on its own thread.
   - Snes9x's *dynamic rate control* adjusts the sound by up to 0.5% to follow the TV's 60 Hz without crackles.
   - PAL (50 Hz) games follow the audio clock.
+
+## Borders around the picture
+
+While a game runs, the area around the SNES picture can show art, such as a console cabinet, instead of black bars.
+The picture sits in a window of the art (a rounded glass, for the built-in one).
+
+**Settings (Triangle on the shelf, or L3 + R3 in a game) > Border:**
+
+| Value | What you see |
+|---|---|
+| **Off** (default) | Black bars, as before. |
+| **Auto** | The game's own border from `/data/snes9x/borders`; without one, the game's border from The Bezel Project, downloaded the first time you play it (see below); until it lands, or for a game it has none for, `borders/default.png`; without that, the built-in frame. |
+| **Default frame** | `borders/default.png` if you put one there, else the built-in frame, for every game. |
+
+It is saved as `border=0`, `1` or `2` in `snes9x-ps5.ini`. Changing it in the pause menu applies when you resume. The
+border is Off until you have seen it on your console: how it looks at 1080p and 720p and what it costs a frame with the
+shaders have only been tested on the Linux host, not on a PS5.
+
+**The window follows Aspect ratio.** Borders are drawn for a 4:3 picture, so the app refits the art until its window has the
+shape you picked, and the picture fills it: **4:3** as drawn; **8:7 (pixel perfect)** a narrower window; **Stretch 16:9** a
+wider window (the picture is about 1712x963 instead of 1920x1080, the frame stays); **Integer scale** a window exactly the
+whole-multiple picture, 4x = 1024x896, so there is no black around it. The art is not squeezed out of shape: the side art
+is scaled up evenly and cropped to the height when its margin grows (the left side from the top, the right side from the
+bottom, where covers keep their logos), and cut to its outer part when it shrinks; the 24 pixels along the window and the
+corners of the window stay as drawn, and only the thin top and bottom rims stretch. A 239-line (PAL) picture fills the height
+of an Integer window with thin bars at the sides instead of dropping to 3x. A window that already has the shape (within 3%)
+is not touched. It changes at once when you change Aspect ratio in the pause menu.
+
+**Your own borders.** Put PNG files in `/data/snes9x/borders` (over FTP, like the covers):
+
+```
+/data/snes9x/borders/
+  default.png          used when a game has no border of its own (optional)
+  games/
+    Super Mario World (USA).png      a border for one game
+    Super Mario World (USA).ini      optional settings for it
+```
+
+- A game's border is found the way its cover is: the ROM's own file name first (`Super Mario World (USA).sfc` uses
+  `games/Super Mario World (USA).png`), then the game's name, so renamed ROMs and translations find the border of
+  the original game.
+- **The art:** exactly 1920x1080 pixels, a PNG with transparency (RGBA, or palette with a `tRNS` chunk), under
+  8 MiB. The clear area in the middle is the window: the picture is drawn there, and the soft edge or rounded
+  corners of the art stay over the picture. An RGB image has no clear area, so it needs `window=` in its `.ini`.
+  A file of another size, one without a clear centre, or one whose window is smaller than 480x270 is skipped, with
+  a line `[border] <file>: <reason>` in `logs/boot.log`, and so is one whose soft edge inside the window is over
+  400,000 pixels; the next choice applies and the game starts as usual. `boot.log` also says which file a game got
+  (`[border] <game> -> <file> (<source>): window ..., rim N pixels, N ms`).
+- **The `.ini`** (same name as the PNG, `key=value` lines, `#` for comments):
+  - `window=x,y,w,h`: the window in screen pixels (at least 480x270), when the art's window cannot be found by
+    itself. The rectangle is cleared in the art, so a soft edge or rounded corner of the art inside it is lost;
+  - `off=1`: this game has no border even when Border is Auto (this works without a PNG of that name).
+- **The Bezel Project:** its `GameBezels/SNES/*.png` files work as they are: copy them to `borders/games/`, or let the app
+  download the ones you need (below).
+- **Downloaded borders.** With Auto, a game that has no border of its own gets The Bezel Project's picture for it, as
+  SwanStationPS5 does for PS1 games. The app has the list of the 1445 SNES names the project has (built in; the pictures
+  are not) and finds the game's name in it the way a cover is found, so a European release or a translation gets the
+  original game's border. The helper downloads the picture (100 to 400 KB) into `borders/games/` under the project's own name, the
+  built-in frame stays up until it lands, and then the game's border replaces it while you play. It is downloaded once;
+  the next start finds it in the folder. A game the project has no picture for keeps the default or built-in frame
+  and is not asked about again for 30 days (`<name>.missing` in `borders/games/`). Most USA and European releases have
+  one; Japan-only games mostly do not.
+  - **Settings > Download all borders** (on the shelf, below Repair missing covers) fetches the borders of every game in the
+    library in the background; the row shows how many are left.
+  - Downloads need the helper (like the covers) and a network connection; the first start after updating starts a new
+    helper (port 9090).
+  - `border_download=0` in `snes9x-ps5.ini` turns downloading off: Auto then uses only what is in the folder.
+  - The project states no licence for its pictures, which are made from the games' own art. The app does not include
+    them; it fetches them from the project's GitHub repository on your console, only with Border on Auto. The decision
+    and the alternatives are ADR 006 in `thatboialex/.context`.
+- **The built-in frame** is original art, generated by `ps5/tools/make_default_border.py` (needs Python with Pillow and
+  numpy; the result, `ps5/frontend/assets/borders/default.png`, is checked in and built into the app). To use your own
+  for every game, put a PNG at `borders/default.png`.
 
 ## Debugging (logs and crashes)
 
@@ -517,7 +650,8 @@ The build has three stages:
   and No-Intro names (`fe_games.cpp`, `data/snes-nointro.tsv`), HTTPS (`fe_http.cpp`; the helper's own: `fe_tlshttp.cpp`, `fe_mbedtls_config.h`, `data/cacert.pem`, with
   Mbed TLS 3.6.7 in `third_party/mbedtls`), the helper's background downloads (`fe_coverworker.cpp`,
   `fe_coverfetch.cpp`), text with PS5SX2's fonts
-  (`fe_text.cpp`), menus, settings, and `fe_emu.cpp`, which connects the Snes9x core to the PS5 layer.
+  (`fe_text.cpp`), menus, settings, the borders around the picture (`fe_border.cpp`, `fe_borderfetch.cpp` for the downloads, and `assets/borders/default.png`,
+  made by `ps5/tools/make_default_border.py`), and `fe_emu.cpp`, which connects the Snes9x core to the PS5 layer.
 - **`ps5/proto/native/`**: ps5-native-app-boilerplate's tools (BlackBearReloaded, GPL-3.0), taken from PS5SX2
   and PS5_Vulkan (mihawk-99):
   - `ps5-native-tool`, for linking and signing;
@@ -561,6 +695,15 @@ The build has three stages:
   - **PromptFont** (Yukari "Shinmera" Hafner, SIL OFL 1.1);
   - **Font Awesome Brands** (Fonticons, Inc.; font SIL OFL 1.1, icons CC BY 4.0), for the GitHub mark on the
     shelf.
+- **Borders:** [The Bezel Project](https://github.com/thebezelproject/bezelproject-SNES) (USA and World games) and its
+  [Super Famicom set](https://github.com/thebezelproject/bezelproject-SFC) (Japan, Europe and the other regions),
+  downloaded on the console, not included; only the list of its file names is built in
+  (`ps5/frontend/data/snes-border-index.txt`, from `ps5/tools/make_border_index.py`). No licence is stated for its
+  pictures.
 - **Covers:** [libretro-thumbnails](https://github.com/libretro-thumbnails), downloaded on the console, not
   included. **Names and CRCs:** [libretro-database](https://github.com/libretro/libretro-database) (No-Intro).
+  **CRCs of fan-translation dumps, and covers libretro-thumbnails lacks:** the public SNES dump of
+  [Hasheous](https://hasheous.org), taken 2026-10-17 (`ps5/tools/make_extra_crc.py`, `ps5/tools/make_db_art.py`); those
+  covers are IGDB's, served by Hasheous, or [TheGamesDB](https://thegamesdb.net)'s, downloaded on the console, not
+  included.
 - **Port:** [github.com/MisterTemaki](https://github.com/MisterTemaki).

@@ -1,4 +1,4 @@
-// The app's earlier title IDs (ProsperoMigrate.h): found, never touched.
+// Our other copies in /data/homebrew (ProsperoMigrate.h): found, never touched.
 //
 // SPDX-License-Identifier: MIT
 
@@ -7,6 +7,9 @@
 #include "OrbisPaths.h"
 #include "ProsperoMigrateConfig.h"
 
+#include <dirent.h>
+
+#include <algorithm>
 #include <cstdio>
 #include <cstdlib>
 #include <string>
@@ -20,26 +23,6 @@ std::string HomebrewRoot()
 {
 	const char* v = getenv(MIG_ENV_PREFIX "PS5_HOMEBREW");
 	return v && *v ? v : "/data/homebrew";
-}
-
-std::vector<std::string> OldIds()
-{
-	std::vector<std::string> out;
-	const std::string s = MIG_OLD_TITLES;
-	size_t a = 0;
-	while (a <= s.size())
-	{
-		size_t b = s.find(',', a);
-		if (b == std::string::npos)
-			b = s.size();
-		std::string id = s.substr(a, b - a);
-		while (!id.empty() && id[0] == ' ')
-			id.erase(0, 1);
-		if (id.size() == 9 && id != MIG_NEW_TITLE)
-			out.push_back(id);
-		a = b + 1;
-	}
-	return out;
 }
 
 std::string ReadSmall(const std::string& path)
@@ -72,26 +55,36 @@ std::string JsonString(const std::string& json, const char* key)
 }
 } // namespace
 
-std::string ContentIdFor(const char* title_id)
+std::vector<OtherInstall> FindOtherInstalls()
 {
-	return std::string("UP9000-") + title_id + "_00-" MIG_CONTENT_LABEL;
-}
+	std::vector<OtherInstall> found;
+	const std::string root = HomebrewRoot();
+	DIR* d = opendir(root.c_str());
+	if (!d)
+		return found;
+	std::vector<std::string> names;
+	while (const dirent* e = readdir(d))
+		if (e->d_name[0] != '.')
+			names.push_back(e->d_name);
+	closedir(d);
+	std::sort(names.begin(), names.end());
 
-std::string FindOldInstalls()
-{
-	std::string found;
-	for (const std::string& id : OldIds())
+	const std::string tail = "_00-" MIG_CONTENT_LABEL;
+	for (const std::string& name : names)
 	{
-		const std::string dir = HomebrewRoot() + "/" + id;
-		if (!OrbisIsDir(dir))
+		if (name == MIG_NEW_TITLE)
 			continue;
+		const std::string dir = root + "/" + name;
 		const std::string param = ReadSmall(dir + "/sce_sys/param.json");
-		const bool ours = !param.empty() && JsonString(param, "titleId") == id &&
-						  JsonString(param, "contentId") == ContentIdFor(id.c_str());
+		if (param.empty())
+			continue;
+		const std::string content_id = JsonString(param, "contentId");
+		const bool ours = content_id.compare(0, 7, "UP9000-") == 0 && content_id.size() > tail.size() &&
+						  content_id.compare(content_id.size() - tail.size(), tail.size(), tail) == 0;
 		OrbisLog("[migrate] %s: %s, left as it is", dir.c_str(),
-			ours ? "our earlier version (the old icon)" : "another app's folder");
+			ours ? "another copy of Snes9x PS5 (a second icon)" : "another app's folder");
 		if (ours)
-			found += (found.empty() ? "" : ", ") + id;
+			found.push_back({name, JsonString(param, "titleId")});
 	}
 	return found;
 }

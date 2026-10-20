@@ -37,11 +37,6 @@ constexpr size_t kMaxListBytes = 32u << 20;
 
 std::atomic<bool> g_started{false};
 
-std::string CoversDir()
-{
-	return OrbisDir("covers");
-}
-
 // A regular file of ours (symbolic links refused), at most kMaxListBytes.
 bool ReadList(const std::string& path, std::string* text, time_t* mtime, off_t* size)
 {
@@ -94,23 +89,31 @@ bool RecentlyMissing(const std::string& marker, const std::string& url)
     return old == url;
 }
 
-struct Worker
+// One kind of download: the files wanted (the app writes <lists>/wanted.txt, and <lists>/priority.txt with the ones it needs
+// first), where they go, and how far the worker got (<lists>/progress.txt).
+struct Lane
 {
+	const char* tag; // for the log: "covers", "borders"
+	std::string files_dir, lists_dir;
 	std::vector<WantedCover> wanted, priority;
-	time_t wanted_mtime = 0, priority_mtime = 0;
-	off_t wanted_size = 0, priority_size = 0;
+	time_t wanted_mtime = 0;
+	off_t wanted_size = 0;
+	std::string priority_text; // priority.txt is small: it is read every round and compared as text (a new list of the same size
+	                           // written within the same second is still seen; the mtime would not tell)
 	size_t cursor = 0;
 	int left = 0, fetched = 0;
 	std::map<std::string, time_t> tried; // file -> when it last failed (not a 404)
 	std::string last_progress;
-	std::unique_ptr<HttpClient> http = MakeCoverWorkerHttp();
+	time_t last_write = 0;
+
+	Lane(const char* t, std::string files, std::string lists) : tag(t), files_dir(std::move(files)), lists_dir(std::move(lists)) {}
 
 	bool Needs(const WantedCover& w)
 	{
 		auto t = tried.find(w.file);
 		if (t != tried.end() && time(nullptr) - t->second < kFailRetrySeconds)
 			return false;
-		const std::string path = CoversDir() + "/" + w.file;
+		const std::string path = files_dir + "/" + w.file;
 		const std::string base = path.substr(0, path.size() - 4);
 		struct stat st = {};
 		if (stat((base + ".refetch").c_str(), &st) == 0)
@@ -120,7 +123,7 @@ struct Worker
 
 	void Reload()
 	{
-		const std::string wpath = CoversDir() + "/wanted.txt", ppath = PriorityListPath();
+		const std::string wpath = lists_dir + "/wanted.txt", ppath = lists_dir + "/priority.txt";
 		if (Changed(wpath, wanted_mtime, wanted_size))
 		{
 			std::string text;
@@ -132,14 +135,16 @@ struct Worker
 			left = 0;
 			for (const WantedCover& w : wanted)
 				left += Needs(w) ? 1 : 0;
-			OrbisLog("[covers] wanted list: %zu cover(s), %d to fetch", wanted.size(), left);
+			OrbisLog("[%s] wanted list: %zu file(s), %d to fetch", tag, wanted.size(), left);
 		}
-		if (Changed(ppath, priority_mtime, priority_size))
+		std::string text;
+		time_t mtime = 0;
+		off_t size = 0;
+		if (!ReadList(ppath, &text, &mtime, &size))
+			text.clear();
+		if (text != priority_text)
 		{
-			std::string text;
-			priority_mtime = 0;
-			priority_size = 0;
-			ReadList(ppath, &text, &priority_mtime, &priority_size);
+			priority_text = text;
 			priority = ParseWantedList(text);
 		}
 	}
@@ -149,20 +154,24 @@ struct Worker
 		char line[96];
 		snprintf(line, sizeof(line), "%d %d %s\n", left, fetched, state);
 		// written when it changes, and at least every 20 s while there is work (so the shelf sees it's alive)
-		static time_t last_write = 0;
 		const time_t now = time(nullptr);
 		if (line == last_progress && (left == 0 || now - last_write < 20))
 			return;
 		last_progress = line;
 		last_write = now;
-		WriteFileAtomicTo(CoversDir() + "/progress.txt", std::vector<uint8_t>(line, line + strlen(line)));
+		WriteFileAtomicTo(lists_dir + "/progress.txt", std::vector<uint8_t>(line, line + strlen(line)));
 	}
 
-	const WantedCover* Next()
+	const WantedCover* NextPriority()
 	{
 		for (const WantedCover& w : priority)
 			if (Needs(w))
 				return &w;
+		return nullptr;
+	}
+
+	const WantedCover* NextWanted()
+	{
 		while (cursor < wanted.size())
 		{
 			if (Needs(wanted[cursor]))
@@ -171,54 +180,106 @@ struct Worker
 		}
 		return nullptr;
 	}
+};
+} // namespace
 
-	void Run()
+struct DownloadWorker::Impl
+{
+	Lane covers, borders;
+	std::unique_ptr<HttpClient> http;
+	time_t offline_until = 0;
+
+	Impl(std::unique_ptr<HttpClient> h, const std::string& covers_dir, const std::string& borders_dir)
+		: covers("covers", covers_dir, covers_dir), borders("borders", borders_dir + "/games", borders_dir), http(std::move(h))
 	{
-		OrbisLog("[covers] background downloads ready (%s)", CoversDir().c_str());
-		time_t offline_until = 0;
-		for (;;)
+	}
+
+	// The border the player waits for, the covers around the selection, the other covers, the borders of the library.
+	Lane* Pick(const WantedCover** next)
+	{
+		if ((*next = borders.NextPriority()))
+			return &borders;
+		if ((*next = covers.NextPriority()))
+			return &covers;
+		if ((*next = covers.NextWanted()))
+			return &covers;
+		if ((*next = borders.NextWanted()))
+			return &borders;
+		return nullptr;
+	}
+
+	int Step()
+	{
+		covers.Reload();
+		borders.Reload();
+		if (time(nullptr) < offline_until)
 		{
-			Reload();
-			if (time(nullptr) < offline_until)
-			{
-				Progress("offline");
-				sleep(1);
-				continue;
-			}
-			const WantedCover* next = Next();
-			if (!next)
-			{
-				left = 0;
-				Progress("idle");
-				usleep(500 * 1000);
-				continue;
-			}
-			const WantedCover w = *next; // the lists can be reloaded below
-			Progress("busy");
-			std::vector<uint8_t> data;
-			const int status = FetchCoverUrl(*http, w.url, w.file, data);
-			const int saved = SaveCoverResult(CoversDir(), w, status, data);
-			OrbisLog("[covers] %s -> %d (%zu bytes)%s", w.file.c_str(), status, data.size(),
-				saved == 1 ? "" : saved == 0 ? ": not on the server" : ": not saved");
-			if (saved == 1)
-				fetched++;
-			if (saved < 0)
-				tried[w.file] = time(nullptr);
-			if (left > 0)
-				left--;
-			if (status == -1 && http->Offline())
-			{
-				OrbisLog("[covers] the console is offline: trying again in %ld s", kOfflinePauseSeconds);
-				http->Term();
-				offline_until = time(nullptr) + kOfflinePauseSeconds;
-			}
+			covers.Progress("offline");
+			borders.Progress("offline");
+			return 1000;
 		}
+		const WantedCover* next = nullptr;
+		Lane* lane = Pick(&next);
+		if (!lane)
+		{
+			covers.left = 0;
+			borders.left = 0;
+			covers.Progress("idle");
+			borders.Progress("idle");
+			return 500;
+		}
+		const WantedCover w = *next; // the lists can be reloaded below
+		covers.Progress(lane == &covers || covers.left > 0 ? "busy" : "idle");
+		borders.Progress(lane == &borders || borders.left > 0 ? "busy" : "idle");
+		std::vector<uint8_t> data;
+		const int status = FetchCoverUrl(*http, w.url, w.file, data);
+		const int saved = SaveCoverResult(lane->files_dir, w, status, data);
+		OrbisLog("[%s] %s -> %d (%zu bytes)%s", lane->tag, w.file.c_str(), status, data.size(),
+			saved == 1 ? "" : saved == 0 ? ": not on the server" : ": not saved");
+		if (saved == 1)
+			lane->fetched++;
+		if (saved < 0)
+			lane->tried[w.file] = time(nullptr);
+		if (lane->left > 0)
+			lane->left--;
+		if (status == -1 && http->Offline())
+		{
+			OrbisLog("[%s] the console is offline: trying again in %ld s", lane->tag, kOfflinePauseSeconds);
+			http->Term();
+			offline_until = time(nullptr) + kOfflinePauseSeconds;
+		}
+		return 0;
 	}
 };
 
+DownloadWorker::DownloadWorker(std::unique_ptr<HttpClient> http, const std::string& covers_dir, const std::string& borders_dir)
+	: m_i(new Impl(std::move(http), covers_dir, borders_dir))
+{
+}
+
+DownloadWorker::~DownloadWorker() = default;
+
+int DownloadWorker::Step()
+{
+	return m_i->Step();
+}
+
+void DownloadWorker::Run()
+{
+	OrbisLog("[covers] background downloads ready (%s, %s)", m_i->covers.files_dir.c_str(), m_i->borders.files_dir.c_str());
+	for (;;)
+	{
+		const int wait_ms = Step();
+		if (wait_ms > 0)
+			usleep(useconds_t(wait_ms) * 1000);
+	}
+}
+
+namespace
+{
 void* WorkerMain(void*)
 {
-	static Worker worker; // lives as long as the helper
+	static DownloadWorker worker(MakeCoverWorkerHttp(), OrbisDir("covers"), OrbisDir("borders")); // lives as long as the helper
 	worker.Run();
 	return nullptr;
 }
@@ -234,6 +295,7 @@ void StartCoverWorker()
 	if (g_started.exchange(true))
 		return;
 	OrbisMkdirs(OrbisDir("covers"));
+	OrbisMkdirs(OrbisDir("borders/games"));
 	pthread_attr_t attr;
 	pthread_attr_init(&attr);
 	pthread_attr_setstacksize(&attr, 1024 * 1024);
@@ -248,10 +310,12 @@ void StartCoverWorker()
 	}
 }
 
-CoverProgress ReadCoverProgress()
+namespace
+{
+CoverProgress ReadProgress(const std::string& dir)
 {
 	CoverProgress p;
-	const std::string path = OrbisDir("covers") + "/progress.txt";
+	const std::string path = dir + "/progress.txt";
 	struct stat st = {};
 	if (stat(path.c_str(), &st) != 0 || time(nullptr) - st.st_mtime > 60)
 		return p;
@@ -263,5 +327,16 @@ CoverProgress ReadCoverProgress()
 	fclose(f);
 	p.state = state;
 	return p;
+}
+} // namespace
+
+CoverProgress ReadCoverProgress()
+{
+	return ReadProgress(OrbisDir("covers"));
+}
+
+CoverProgress ReadBorderProgress()
+{
+	return ReadProgress(OrbisDir("borders"));
 }
 } // namespace fe

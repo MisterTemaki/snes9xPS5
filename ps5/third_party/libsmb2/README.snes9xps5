@@ -1,0 +1,19 @@
+libsmb2 for Snes9x PS5
+======================
+
+What:     libsmb2 6.2, the SMB 2/3 client library by Ronnie Sahlberg and contributors.
+Licence:  LGPL-2.1 (LICENCE-LGPL-2.1.txt, COPYING). Statically linked into the app; the sources
+          here are the complete corresponding source. Replace the files and rebuild to relink.
+Source:   libsmb2_6.2+dfsg.orig.tar.gz from the Debian archive
+          (https://deb.debian.org/debian/pool/main/libs/libsmb2/),
+          sha256 5fa97ecb099d0cebcf7ba6b0a5e3f84d89eb66aeed7e71111e6dee22699d031b
+          Upstream: https://github.com/sahlberg/libsmb2
+
+Kept:     lib/*.c and lib/*.h (the client; the server code that shares libsmb2.c comes with it),
+          include/ (smb2/*.h, libsmb2-private.h, portable-endian.h, slist.h, asprintf.h).
+Left out: Kerberos (krb5-wrapper.c), the other platforms' folders and makefiles, examples, tests,
+          CMake, packaging.
+Changed:  nothing in lib/ or include/. config.h is ours (it replaces the CMake-generated one).
+          On the console, libsmb2's fcntl() and getaddrinfo() calls reach netfs/netfs_shims_ps5.cpp
+          through the link-time --wrap list (NETFS_WRAPPED_PS5 in ps5/Makefile).
+Built by: ps5/Makefile (LIBSMB2_*), used by ps5/netfs/backend_smb.cpp.
