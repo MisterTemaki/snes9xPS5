@@ -24,7 +24,9 @@ namespace jailbreak
 // to download the covers) on 9080; 2.3's, with its own HTTPS, listens on 9083, so an older helper still running
 // (until the console restarts) is left alone and the app starts its own.
 // 2.6 moved the app to a new title ID (PPSA99922): older helpers only let PPSA99009 out, so 2.6's listens on 9089.
-constexpr int kHelperPort = 9089;
+// The helper that also downloads the borders (fe_coverworker.h) listens on 9090: an older one still running would take the
+// request and never fetch a border, so the app starts its own.
+constexpr int kHelperPort = 9090;
 // the ELF loader the helper is sent to when it isn't running (SNES9X_ELFLDR_PORT on the host)
 constexpr int kElfLoaderPort = 9021;
 

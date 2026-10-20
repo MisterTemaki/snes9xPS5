@@ -51,6 +51,27 @@ std::string ThumbnailName(const std::string& nointro);
 // Use the closest verified Libretro artwork filename; never guess an unsupported remote file.
 std::string CoverNameFor(const GameInfo& game);
 
+// The entry of `names` (file names without extension, a list that may differ every call: a border pack) that is this
+// game's art, by the same matcher as the cover: the No-Intro name, aliases, the extra CRC name, spelling, words and the
+// ROM header. "" when none fits.
+std::string MatchPackName(const std::vector<std::string>& names, const GameInfo& game);
+
+// MatchPackName for many games over one list: the indexes are made once, in the constructor (a list of 1500 names takes a
+// few milliseconds), and the list is copied, so it may change afterwards. Match may be called from any thread.
+// usa_on_tie: a name that fits a USA and a Japanese entry alike (a retranslation of a game released in both) gets the USA
+// one, where the cover matcher gives none (artmatch::Resolve).
+class PackMatcher
+{
+public:
+	explicit PackMatcher(const std::vector<std::string>& names, bool usa_on_tie = false);
+	~PackMatcher();
+	std::string Match(const GameInfo& game) const;
+
+private:
+	struct Impl;
+	std::unique_ptr<Impl> m_i;
+};
+
 // The download address of a game's box art (the libretro-thumbnails template, SNES9X_COVER_URL on the host).
 std::string CoverUrlFor(const std::string& nointro);
 // Resolve box, title screen and screenshot names independently from verified Libretro lists.

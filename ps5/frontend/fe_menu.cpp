@@ -7,6 +7,7 @@
 
 #include "fe_menu.h"
 
+#include "fe_coverworker.h"
 #include "fe_emu.h"
 #include "fe_games.h"
 #include "fe_i18n.h"
@@ -14,6 +15,9 @@
 #include "fe_settings.h"
 #include "fe_shortcuts.h"
 #include "fe_text.h"
+#include "fe_ui.h"
+
+#include "netfs.h"
 
 #include "OrbisPaths.h"
 #include "ProsperoJailbreak.h"
@@ -43,6 +47,8 @@
 
 namespace fe
 {
+using namespace ui;
+
 namespace
 {
 using ps5video::Rgb;
@@ -55,104 +61,6 @@ std::string Fmt(const char* fmt, ...)
 	vsnprintf(buf, sizeof(buf), fmt, ap);
 	va_end(ap);
 	return buf;
-}
-constexpr int W = ps5video::kWidth;
-constexpr int H = ps5video::kHeight;
-
-const uint32_t kBg = Rgb(14, 14, 28);
-const uint32_t kPanel = Rgb(26, 24, 48);
-const uint32_t kAccent = Rgb(150, 125, 255);
-const uint32_t kSel = Rgb(78, 62, 170);
-const uint32_t kText = Rgb(235, 235, 245);
-const uint32_t kDim = Rgb(150, 150, 175);
-const uint32_t kFolder = Rgb(255, 210, 110);
-
-double Now()
-{
-	timespec ts = {};
-	clock_gettime(CLOCK_MONOTONIC, &ts);
-	return ts.tv_sec + ts.tv_nsec / 1e9;
-}
-
-// ---- input with key repeat ---------------------------------------------------------------------------
-struct Nav
-{
-	bool up = false, down = false, left = false, right = false;
-	bool pgup = false, pgdn = false;
-	bool ok = false, back = false, options = false, triangle = false, menu = false;
-};
-
-class NavReader
-{
-public:
-	NavReader()
-	{
-		ps5input::Poll();
-		m_prev = ps5input::Pad(0).buttons; // buttons still held from before don't count
-	}
-	Nav Read()
-	{
-		ps5input::Poll();
-		const uint32_t cur = ps5input::Pad(0).buttons;
-		const uint32_t down = cur & ~m_prev;
-		m_prev = cur;
-		const double now = Now();
-		Nav n;
-		n.up = Repeat(cur, down, SCE_PAD_BUTTON_UP, now, 0);
-		n.down = Repeat(cur, down, SCE_PAD_BUTTON_DOWN, now, 1);
-		n.left = Repeat(cur, down, SCE_PAD_BUTTON_LEFT, now, 2);
-		n.right = Repeat(cur, down, SCE_PAD_BUTTON_RIGHT, now, 3);
-		n.pgup = Repeat(cur, down, SCE_PAD_BUTTON_L1, now, 4);
-		n.pgdn = Repeat(cur, down, SCE_PAD_BUTTON_R1, now, 5);
-		n.ok = down & SCE_PAD_BUTTON_CROSS;
-		n.back = down & SCE_PAD_BUTTON_CIRCLE;
-		n.options = down & SCE_PAD_BUTTON_OPTIONS;
-		n.triangle = down & SCE_PAD_BUTTON_TRIANGLE;
-		const uint32_t combo = shortcuts::kChoices[Config().shortcut_pause].buttons;
-		n.menu = (cur & combo) == combo && (down & combo);
-		return n;
-	}
-
-private:
-	bool Repeat(uint32_t cur, uint32_t down, uint32_t bit, double now, int i)
-	{
-		if (down & bit)
-		{
-			m_next[i] = now + 0.40;
-			return true;
-		}
-		if ((cur & bit) && now >= m_next[i])
-		{
-			m_next[i] = now + 0.07;
-			return true;
-		}
-		return false;
-	}
-	uint32_t m_prev = 0;
-	double m_next[6] = {};
-};
-
-void Present()
-{
-	ps5video::Present(0, 0, 0, 0, true);
-}
-
-void Header(const char* subtitle)
-{
-	ps5video::FillRect(0, 0, W, H, kBg);
-	ps5video::FillRect(0, 0, W, 150, kPanel);
-	ps5video::FillRect(0, 150, W, 4, kAccent);
-	DrawText(80, 34, "Snes9x PS5", 6, kAccent);
-	const char* ver = "Snes9x " VERSION " - port PS5 " SNES9X_PS5_VERSION;
-	DrawText(W - 80 - TextWidth(ver, 2), 40, ver, 2, kDim);
-	if (subtitle && *subtitle)
-		DrawText(84, 104, FitText(subtitle, 3, W - 168).c_str(), 3, kDim);
-}
-
-void Footer(const char* help)
-{
-	ps5video::FillRect(0, H - 80, W, 80, kPanel);
-	DrawText(80, H - 60, FitText(help, 3, W - 160).c_str(), 3, kDim);
 }
 
 bool HasRomExtension(const char* name)
@@ -214,50 +122,26 @@ std::string RootLabel(const std::string& root)
 		return std::string(T("Console")) + "  (" + root + ")";
 	if (root.rfind("/mnt/usb", 0) == 0)
 		return "USB " + root.substr(8, 1) + "  (" + root + ")";
+	if (root.rfind("/smb/", 0) == 0 || root.rfind("/nfs/", 0) == 0)
+		return "Network: " + root.substr(5) + (root[1] == 's' ? "  (SMB)" : "  (NFS)");
 	return root;
-}
-
-// A box of label/value rows (pause menu, settings).
-struct Row
-{
-	std::string label;
-	std::string value; // "" = an action
-	bool enabled = true;
-};
-
-void DrawOptionBox(const char* title, const std::vector<Row>& rows, int sel, bool over_game)
-{
-	const int scale = 3;
-	const int row_h = 44;
-	const int bw = 1050;
-	const int visible = std::min(16, int(rows.size()));
-	const int start = std::min(std::max(0, sel - visible + 1), std::max(0, int(rows.size()) - visible));
-	const int bh = 120 + visible * row_h + 30;
-	const int bx = (W - bw) / 2;
-	const int by = std::max(20, (H - bh) / 2);
-	if (!over_game)
-		ps5video::FillRect(bx - 4, by - 4, bw + 8, bh + 8, kAccent);
-	ps5video::FillRect(bx, by, bw, bh, kPanel);
-	ps5video::FillRect(bx, by + 86, bw, 3, kAccent);
-	DrawText(bx + 40, by + 24, FitText(title, 5, bw - 80).c_str(), 5, kAccent);
-	for (int i = start; i < start + visible; i++)
-	{
-		const int y = by + 110 + (i - start) * row_h;
-		if (int(i) == sel)
-			ps5video::FillRect(bx + 16, y - 6, bw - 32, row_h, kSel);
-		const uint32_t col = rows[i].enabled ? kText : kDim;
-		DrawText(bx + 40, y, FitText(rows[i].label, scale, bw - 320).c_str(), scale, col);
-		if (!rows[i].value.empty())
-		{
-			const std::string v = (int(i) == sel ? "< " + rows[i].value + " >" : rows[i].value);
-			DrawText(bx + bw - 40 - TextWidth(v.c_str(), scale), y, v.c_str(), scale, int(i) == sel ? kText : kAccent);
-		}
-	}
 }
 
 const char* YesNo(bool b)
 {
 	return T(b ? "On" : "Off");
+}
+
+// Settings::border: nothing, the game's own art from /data/snes9x/borders (else the pack's default, else the built-in
+// frame), or the default frame only.
+const char* BorderName(int b)
+{
+	switch (b)
+	{
+		case 1: return "Auto";
+		case 2: return "Default frame";
+		default: return "Off";
+	}
 }
 
 // The settings shared by the game list (Triangle) and the pause menu. Returns true if 'idx' was a setting
@@ -266,6 +150,7 @@ enum SettingRow
 {
 	S_SHADER,
 	S_ASPECT,
+	S_BORDER,
 	S_SCANLINES,
 	S_FPS,
 	S_AUDIO,
@@ -350,12 +235,47 @@ void UpdateAction()
 	PollUpdate(true);
 }
 
+// The Network shares row: how many shares are set up, and how many of them are connected.
+std::string NetworkSummary()
+{
+	const std::vector<NetfsShareInfo> shares = netfs_shares();
+	if (shares.empty())
+		return "None";
+	int ready = 0;
+	for (const NetfsShareInfo& i : shares)
+		ready += i.state == NetfsState::Ready;
+	return std::to_string(ready) + " of " + std::to_string(shares.size()) + " connected";
+}
+
+// The Download all borders row: what the helper is doing (borders/progress.txt), or what the last press asked for.
+struct BorderAsk
+{
+	double at = -1000;
+	int queued = 0;
+} g_border_ask;
+
+std::string BorderDownloadValue()
+{
+	const CoverProgress p = ReadBorderProgress();
+	const double age = Now() - g_border_ask.at;
+	if (p.valid && p.left > 0)
+		return std::to_string(p.left) + " left";
+	if (age < 6.0)
+		return g_border_ask.queued > 0 ? std::to_string(g_border_ask.queued) + " queued" : "Nothing to fetch";
+	if (g_border_ask.queued > 0 && !p.valid && age < 120.0)
+		return "Waiting for the helper";
+	if (p.valid && p.fetched > 0)
+		return std::to_string(p.fetched) + " fetched";
+	return "";
+}
+
 std::string SettingLabel(int s)
 {
 	switch (s)
 	{
 		case S_SHADER: return T("Shader");
 		case S_ASPECT: return T("Aspect ratio");
+		case S_BORDER: return T("Border");
 		case S_SCANLINES: return T("Scanlines (shader Off)");
 		case S_FPS: return T("Show FPS");
 		case S_AUDIO: return T("Sound");
@@ -377,6 +297,7 @@ std::string SettingValue(int s)
 	{
 		case S_SHADER: return T(ps5crt::Name(ps5crt::Shader(c.shader)));
 		case S_ASPECT: return T(ps5video::AspectName(ps5video::Aspect(c.aspect)));
+		case S_BORDER: return T(BorderName(c.border));
 		case S_SCANLINES: return YesNo(c.scanlines);
 		case S_FPS: return YesNo(c.show_fps);
 		case S_AUDIO: return YesNo(c.audio);
@@ -403,6 +324,7 @@ void ChangeSetting(int s, int dir)
 			break;
 		}
 		case S_ASPECT: c.aspect = (c.aspect + dir + n) % n; break;
+		case S_BORDER: c.border = (c.border + dir + 3) % 3; break;
 		case S_SCANLINES: c.scanlines = !c.scanlines; break;
 		case S_FPS: c.show_fps = !c.show_fps; break;
 		case S_AUDIO: c.audio = !c.audio; break;
@@ -444,8 +366,10 @@ void SettingsMenu()
 		std::vector<Row> rows;
 		for (int s = 0; s < S_COUNT; s++)
 			rows.push_back({SettingLabel(s), SettingValue(s)});
+		rows.push_back({T("Network shares"), NetworkSummary(), true, true});
 		rows.push_back({T("Controller shortcuts"), ""});
 		rows.push_back({T("Repair missing covers"), ""});
+		rows.push_back({T("Download all borders"), BorderDownloadValue(), true, true});
 		rows.push_back({T("Back"), ""});
 		Header(T("Settings"));
 		DrawOptionBox(T("Settings"), rows, sel, false);
@@ -471,16 +395,26 @@ void SettingsMenu()
 			ChangeSetting(sel, n.left ? -1 : 1);
 		if (n.ok && sel == S_COUNT)
 		{
-			ShortcutMenu();
+			NetworkMenu();
 			nav = NavReader();
 		}
 		if (n.ok && sel == S_COUNT + 1)
+		{
+			ShortcutMenu();
+			nav = NavReader();
+		}
+		if (n.ok && sel == S_COUNT + 2)
 		{
 			const int count = RepairMissingCovers();
 			OrbisLog("[settings] queued %d missing covers for retry", count);
 			nav = NavReader();
 		}
-		if (n.back || n.options || (n.ok && sel == S_COUNT + 2))
+		if (n.ok && sel == S_COUNT + 3)
+		{
+			g_border_ask.queued = DownloadBorders();
+			g_border_ask.at = Now();
+		}
+		if (n.back || n.options || (n.ok && sel == S_COUNT + 4))
 		{
 			Config().Save();
 			return;
@@ -502,7 +436,7 @@ std::string RomBrowser()
 	Settings& cfg = Config();
 	NavReader nav;
 
-	std::vector<std::string> roots = OrbisRomRoots();
+	std::vector<std::string> roots = RomRoots();
 	std::string dir;
 	// Reopen the last folder if it is still there and under one of the roots.
 	if (!cfg.last_dir.empty() && OrbisIsDir(cfg.last_dir))
@@ -517,7 +451,7 @@ std::string RomBrowser()
 	std::vector<Entry> list;
 	int sel = 0, top = 0;
 	auto reload = [&](const std::string& select_path) {
-		roots = OrbisRomRoots();
+		roots = RomRoots();
 		if (dir.empty())
 		{
 			list.clear();
@@ -559,6 +493,8 @@ std::string RomBrowser()
 				T("Copy your SNES ROMs (.sfc .smc .swc .fig .bs .zip) to:"),
 				"    /data/snes9x/roms",
 				T("or, on a USB drive, to the folder  snes9x/roms"),
+				"",
+				T("Games on a NAS or PC?  Triangle (Settings), then Network shares."),
 			};
 			int y = 330;
 			for (const char* l : lines)
@@ -763,7 +699,8 @@ PauseAction PauseMenu()
 }
 
 
-// Cheat groups are read from the game already loaded by emu::LoadGame.
+// Cheat groups are read from the game already loaded by emu::LoadGame, and again whenever the cheat file changes
+// (a code added over FTP shows up here by itself).
 // A scrolled list is essential: RetroArch files can contain hundreds of codes.
 void CheatMenu()
 {
@@ -771,17 +708,22 @@ void CheatMenu()
 	int sel = 0;
 	int top = 0;
 	constexpr int kVisible = 14;
+	bool first = true;
 	for (;;)
 	{
-		if (emu::CheatCount() == 0) emu::ReloadDownloadedCheats();
+		emu::RefreshCheats(first);
+		first = false;
 		const int count = emu::CheatCount();
 		const int visible = std::min(count, kVisible);
+		// the list may have become shorter under the selection
+		sel = std::max(0, std::min(sel, count - 1));
+		top = std::max(0, std::min(top, count - visible));
 		if (count == 0)
 		{
 			Header(T("Cheats"));
 			DrawOptionBox(T("No cheats found"), {{T("Place a matching .cht file in /data/snes9x/cheats"), ""}, {T("Back"), ""}}, 1, false);
 			DrawText(150, H - 184, FitText(emu::CheatStatus(), 3, W - 300).c_str(), 3, kText);
-			Footer(T("Copy .cht file over FTP     Circle: Back"));
+			Footer(T("Copy .cht file over FTP, it loads by itself     Circle: Back"));
 		}
 		else
 		{
@@ -871,7 +813,24 @@ void MessageBox(const std::string& title, const std::string& text)
 		ps5video::FillRect(bx - 4, by - 4, bw + 8, bh + 8, kAccent);
 		ps5video::FillRect(bx, by, bw, bh, kPanel);
 		DrawText(bx + 40, by + 30, FitText(title, 5, bw - 80).c_str(), 5, kAccent);
-		DrawText(bx + 40, by + 130, FitText(text, 3, bw - 80).c_str(), 3, kText);
+		if (text.find('\n') == std::string::npos)
+			DrawText(bx + 40, by + 130, FitText(text, 3, bw - 80).c_str(), 3, kText);
+		else
+		{
+			// a few lines (a ROM's path, then why it did not open), skipping the blank ones
+			int y = by + 100;
+			for (size_t i = 0, e; i < text.size() && y < by + bh - 80; i = e + 1)
+			{
+				e = text.find('\n', i);
+				if (e == std::string::npos)
+					e = text.size();
+				if (e > i)
+				{
+					DrawText(bx + 40, y, FitText(text.substr(i, e - i), 3, bw - 80).c_str(), 3, kText);
+					y += 46;
+				}
+			}
+		}
 		DrawText(bx + 40, by + bh - 70, (std::string(icon::Cross) + " " + T("OK")).c_str(), 3, kDim);
 		Present();
 		const Nav n = nav.Read();

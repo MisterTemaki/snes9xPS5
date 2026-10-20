@@ -10,6 +10,8 @@ struct Settings
 {
 	int shader = 1; // ps5crt::Shader: CRT Easymode style unless another is picked (0 = Off)
 	int aspect = 0; // ps5video::Aspect
+	int border = 0; // art around the picture: 0 Off, 1 Auto (the game's own, else default), 2 Default frame
+	bool border_download = true; // Auto also downloads the game's border from The Bezel Project (border_download=0 turns it off)
 	bool scanlines = false; // with the shader Off
 	bool show_fps = false;
 	bool audio = true;
@@ -24,6 +26,7 @@ struct Settings
 	int language = 0;            // fe::Language: 0 English (the default), 1 Spanish, 2 Portuguese (Brazil), 3 French, 4 German
 	std::string last_dir; // the browser reopens here
 	std::string last_rom; // and puts the cursor on this file
+	int last_tab = 0; // the shelf's tab (fe_tabs.h): 0 Internal, 1 USB, 2 Network
 
 	void Load();
 	void Save() const;

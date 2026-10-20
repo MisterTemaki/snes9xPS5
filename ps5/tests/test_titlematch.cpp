@@ -2,7 +2,14 @@
 #include "../frontend/fe_titlematch.h"
 #include "../frontend/fe_cheatlookup.h"
 #include "../frontend/fe_artaliases.h"
+#include "../frontend/fe_artmatch.h"
+#include "../frontend/fe_dbart.h"
+#include "../frontend/fe_romheader.h"
 #include <cassert>
+#include <cstdio>
+#include <iterator>
+#include <map>
+#include <set>
 #include <string>
 #include <vector>
 #include <iostream>
@@ -120,6 +127,326 @@ int main()
         for (const auto& item : translated)
             same(item.first);
         std::cout << "Index lookups equal to the plain scan: " << checked << "\n";
+    }
+
+    // Renamed and fan-translated ROMs (fe_artmatch.h): the art is filed under the Japanese No-Intro name.
+    {
+        namespace am = fe::artmatch;
+        const fe::artmatch::Index& ix = am::IndexOf(boxarts);
+        const std::string srw4 = "Dai-4-ji Super Robot Taisen (Japan)";
+        assert(std::find(boxarts.begin(), boxarts.end(), srw4) != boxarts.end());
+        // what a name says besides its title
+        assert(am::Parse("Super Robot Wars 4 (English).sfc").title == "Super Robot Wars 4");
+        assert(am::Parse("Super Robot Wars 4 (English).sfc").translated);
+        assert(am::Parse("Final Fantasy 6 [T+Eng v1.1]").title == "Final Fantasy 6");
+        assert(am::Parse("Chrono Trigger (ENG) # SNES").title == "Chrono Trigger");
+        assert(am::Parse("Dragon_Quest_V_English_Patched_v2.0").title == "Dragon Quest V");
+        assert(am::Parse("Mother 2 (Japan, USA) (En,Ja)").region == "Japan");
+        assert(am::Parse("Super Mario World (U) [!]").region == "USA");
+        assert(!am::Parse("Super Mario World (USA)").translated);
+        // spelling, numerals and word order do not tell two names of one game apart
+        assert(am::TitleKey("Final Fantasy VI (Japan)") == am::TitleKey("final_fantasy_6 (English)"));
+        assert(am::TitleKey("Kidou Butouden G Gundam (Japan)") == am::TitleKey("Kidou Butoden G-Gundam"));
+        assert(am::TitleKey("Legend of Zelda, The - A Link to the Past (USA)") == am::TitleKey("The Legend of Zelda - A Link to the Past"));
+        assert(am::TitleKey("Super Mario World (USA)") != am::TitleKey("Super Mario World 2 - Yoshi's Island (USA)"));
+        // Jason's example, and the ways a translator or a library tool may write it
+        for (const char* name : {"Super Robot Wars 4 (English)", "Super Robot Wars 4 (English).sfc", "Super Robot Wars 4 [T+Eng v1.1]",
+                                 "Super Robot Wars 4", "Super Robot Wars IV (Translated)", "super_robot_wars_4_english_patched",
+                                 "Super Robot Wars 4 (ENG) # SNES", "Super Robot Wars 4 - English v1.02", "Super Robot Taisen 4 (En)",
+                                 "SUPER ROBOT WARS 4 (Fan Translation)"})
+            assert(am::Resolve(ix, name) == srw4);
+        // the names a hash database gives translated dumps ("T-Eng", year, group), and a Hepburn/Wars retitle
+        assert(am::Parse("Super Robot Wars 4 T-Eng (2026)(Aeon Genesis)").title == "Super Robot Wars 4");
+        assert(am::Parse("Super Robot Wars 4 T-Eng (2026)(Aeon Genesis)").translated);
+        assert(am::Parse("Dai-4-Ji Super Robot Taisen (J) (V1.0) [T Eng025_Fraka]").title == "Dai-4-Ji Super Robot Taisen");
+        assert(am::Resolve(ix, "Super Robot Wars 4 T-Eng (2026)(Aeon Genesis)") == srw4);
+        assert(am::Resolve(ix, "Dai-4-Ji Super Robot Taisen (J) (V1.0) [T Eng025_Fraka]") == srw4);
+        assert(am::Resolve(ix, "Super Robot Wars EX T-Eng (2018)(Aeon Genesis)") == "Super Robot Taisen EX (Japan)");
+        assert(am::TitleKey(am::Resolve(ix, "Super Robot Wars 3 T-Eng v2.00m2 (2019)(Aeon Genesis)")) == am::TitleKey("Dai-3-ji Super Robot Taisen"));
+        // the main title is kept, the subtitle is the translator's own; a different number is a different game
+        assert(am::Resolve(ix, "Flying Hero - Bugyuru's Adventure (English)") == "Flying Hero - Bugyuru no Daibouken (Japan)");
+        assert(am::Resolve(ix, "Chrono Trigger - Retranslation") == "Chrono Trigger (USA)");
+        assert(am::Resolve(ix, "Ranma 1-2 - Hard Battle II - Super Move Hustle").empty());
+        // a game that explains the whole name beats the main title alone: Gun Hazard is not Front Mission
+        assert(am::Resolve(ix, "Front Mission - Gun Hazard (English)") == "Front Mission Series - Gun Hazard (Japan)");
+        assert(am::Resolve(ix, "Front Mission - Gun Hazard T-Eng (2004)(Aeon Genesis)") == "Front Mission Series - Gun Hazard (Japan)");
+        assert(am::Resolve(ix, "Front Mission T-Eng v1.02 (2023)(mteam, F.H.)") == "Front Mission (Japan)");
+        assert(am::Resolve(ix, "Front Mission - Something Else") == "Front Mission (Japan)"); // no such game: the main title's art, as for a hack
+        // close in spelling is not enough when the numbers disagree
+        assert(am::NumbersConflict("Dragon Quest III (English)", "Dragon Quest I & II (Japan)"));
+        assert(am::NumbersConflict("Final Fantasy III", "Final Fantasy II (USA)"));
+        assert(!am::NumbersConflict("Fire Emblem 5 - Thracia 776", "Fire Emblem - Thracia 776 (Japan)"));
+        assert(!am::NumbersConflict("Super Mario World", "Super Mario World (USA)"));
+        // a different number, no number, a game that is not in the list, a single common word: nothing
+        assert(am::Resolve(ix, "Super Robot Wars 5 (English)").empty());
+        assert(am::Resolve(ix, "Super Robot Wars (English)").empty());
+        assert(am::Resolve(ix, "Completely Different Game (English)").empty());
+        assert(am::Resolve(ix, "Super (English)").empty());
+        // subtitles left out, roman numerals, Hepburn spelling: still one game
+        assert(am::Resolve(ix, "Dragon Quest V (English)") == "Dragon Quest V - Tenkuu no Hanayome (Japan)");
+        assert(am::Resolve(ix, "dragon quest 5 english") == "Dragon Quest V - Tenkuu no Hanayome (Japan)");
+        assert(am::TitleKey(am::Resolve(ix, "Final Fantasy 5 (English)")) == am::TitleKey("Final Fantasy V"));
+        assert(am::Resolve(ix, "Kidou Butoden G-Gundam (English)") == "Kidou Butouden G Gundam (Japan)");
+        // a number that differs is a different game, whatever else matches
+        assert(am::TitleKey(am::Resolve(ix, "Dragon Quest III (English)")) != am::TitleKey("Dragon Quest I & II"));
+        // region: the tag wins; without one USA comes first, a clean release before a Rev
+        assert(am::Resolve(ix, "Chrono Trigger (Japan) (English)") == "Chrono Trigger (Japan)");
+        assert(am::Resolve(ix, "Chrono Trigger (English)") == "Chrono Trigger (USA)");
+        assert(am::Resolve(ix, "Dai 4 Ji Super Robot Taisen (Rev 1)") == srw4);
+        // every name of each list, written the ways above, finds its own game (and never another)
+        size_t variants = 0;
+        for (const auto* list : {&boxarts, &titles, &snaps})
+        {
+            const fe::artmatch::Index& lx = am::IndexOf(*list);
+            for (const std::string& name : *list)
+            {
+                const std::string base = am::Parse(name).title;
+                std::string underscored = base;
+                std::replace(underscored.begin(), underscored.end(), ' ', '_');
+                for (const std::string& variant : {base + " (English)", am::Lower(base) + " [T+Eng v1.1]", underscored + "_English",
+                                                   name + ".sfc"})
+                {
+                    ++variants;
+                    const std::string found = am::Resolve(lx, variant);
+                    if (am::TitleKey(found) != am::TitleKey(name))
+                        std::cout << "Resolve(\"" << variant << "\") = \"" << found << "\"\n";
+                    assert(am::TitleKey(found) == am::TitleKey(name));
+                }
+            }
+        }
+        // a name with one rare word spoiled finds its game or nothing, never another game
+        size_t spoiled = 0;
+        for (const std::string& name : boxarts)
+        {
+            std::vector<std::string> words = am::Tokens(am::Parse(name).title);
+            if (words.size() < 3) continue;
+            size_t rare = 0;
+            for (size_t i = 0; i < words.size(); ++i)
+                if (!am::IsDigits(words[i]) && (am::IsDigits(words[rare]) || am::Weight(ix, words[i]) > am::Weight(ix, words[rare]))) rare = i;
+            std::string query;
+            for (size_t i = 0; i < words.size(); ++i) query += (i == rare ? std::string("qzxwv") : words[i]) + " ";
+            const std::string found = am::Resolve(ix, query);
+            ++spoiled;
+            assert(found.empty() || am::TitleKey(found) == am::TitleKey(name));
+        }
+        std::cout << "Word matcher: " << variants << " renamed variants and " << spoiled << " spoiled names\n";
+    }
+    // The extra CRC table (dumps No-Intro does not list): made by tools/make_extra_crc.py from a hash database.
+    {
+        namespace am = fe::artmatch;
+        const auto nointro = index("ps5/frontend/data/snes-nointro.tsv");
+        const auto extra = index("ps5/frontend/data/snes-extra-crc.tsv");
+        std::vector<std::string> known;
+        for (const std::string& line : nointro) known.push_back(line.substr(0, line.find('\t')));
+        std::sort(known.begin(), known.end());
+        std::map<std::string, std::string> by_crc;
+        for (const std::string& line : extra)
+        {
+            const size_t tab = line.find('\t');
+            assert(tab == 8);
+            assert(!std::binary_search(known.begin(), known.end(), line.substr(0, 8))); // only what No-Intro lacks
+            assert(by_crc.emplace(line.substr(0, 8), line.substr(9)).second);           // one name per CRC
+        }
+        const fe::artmatch::Index& ix = am::IndexOf(boxarts);
+        const std::string srw4 = "Dai-4-ji Super Robot Taisen (Japan)";
+        assert(by_crc.at("72BBACCA") == "Super Robot Wars 4 T-Eng (2026)(Aeon Genesis)");
+        assert(am::Resolve(ix, by_crc.at("72BBACCA")) == srw4);
+        assert(am::Resolve(ix, by_crc.at("6B36672F")) == srw4); // an older translation of the same game, named the Japanese way
+        // how many English translations in it find art (the rest are games the art list does not have, or names too different)
+        size_t translations = 0, found = 0;
+        for (const auto& entry : by_crc)
+        {
+            const std::string name = am::Lower(entry.second);
+            bool english = false;
+            for (const char* mark : {"t-eng", "t+eng", "t eng", "[t-en", "[t+en", "(english", "translat"})
+                english = english || name.find(mark) != std::string::npos;
+            if (!english) continue;
+            ++translations;
+            if (!am::Resolve(ix, name).empty()) ++found;
+        }
+        std::cout << "Extra CRC table: " << by_crc.size() << " dumps, " << found << " of " << translations << " English translations find art\n";
+        assert(translations > 300 && found * 100 >= translations * 75);
+    }
+    // The border index (tools/make_border_index.py): The Bezel Project's SNES repository, then its Super Famicom one. Japanese
+    // games have their borders in the second: an index of the first alone left every Japan-only game with the built-in frame.
+    {
+        namespace am = fe::artmatch;
+        std::vector<std::string> snes, sfc;
+        {
+            std::ifstream f("ps5/frontend/data/snes-border-index.txt", std::ios::binary);
+            assert(f);
+            std::string line;
+            bool in_sfc = false;
+            while (std::getline(f, line))
+            {
+                if (line.compare(0, 3, "#@ ") == 0) in_sfc = line.compare(3, 3, "SFC") == 0;
+                else if (!line.empty() && line[0] != '#') (in_sfc ? sfc : snes).push_back(line);
+            }
+        }
+        assert(snes.size() > 1400 && sfc.size() > 2500);
+        std::vector<std::string> all = snes;
+        all.insert(all.end(), sfc.begin(), sfc.end());
+        assert(std::set<std::string>(all.begin(), all.end()).size() == all.size()); // no name in both: its section says where it is
+        const auto has = [&all](const char* name) { return std::find(all.begin(), all.end(), name) != all.end(); };
+        assert(std::find(snes.begin(), snes.end(), "Super Mario World (USA)") != snes.end());
+        assert(std::find(sfc.begin(), sfc.end(), "Star Ocean (Japan)") != sfc.end());
+        assert(std::find(sfc.begin(), sfc.end(), "Seiken Densetsu 3 (Japan)") != sfc.end());
+        const fe::artmatch::Index& ix = am::IndexOf(all);
+        // the English patches of the two games Jason found without a border, by the names their CRCs have in the extra table
+        const auto extra = index("ps5/frontend/data/snes-extra-crc.tsv");
+        std::map<std::string, std::string> by_crc;
+        for (const std::string& line : extra) by_crc.emplace(line.substr(0, 8), line.substr(9));
+        for (const char* crc : {"A2B3B3FD", "6BA9E08D", "5CA81740"}) // Star Ocean, DeJap
+            assert(am::Resolve(ix, by_crc.at(crc)) == "Star Ocean (Japan)");
+        for (const char* crc : {"5F14F4CA", "11B87DEA", "86C49FCD"}) // Seiken Densetsu 3: Corlett, Spanish, cheat hack
+            assert(am::Resolve(ix, by_crc.at(crc)) == "Seiken Densetsu 3 (Japan)");
+        // the file names these patches usually go by
+        for (const char* name : {"Star Ocean (English)", "Star Ocean [T-Eng]", "Star Ocean (Translated)", "star_ocean_english"})
+            assert(am::Resolve(ix, name) == "Star Ocean (Japan)");
+        for (const char* name : {"Seiken Densetsu 3 (English)", "Seiken Densetsu 3 [T+Eng v1.1]", "Seiken Densetsu 3 (Translated)"})
+            assert(am::Resolve(ix, name) == "Seiken Densetsu 3 (Japan)");
+        assert(fe::artaliases::Canonical("Secret of Mana 2") == "Seiken Densetsu 3 (Japan)" && has("Seiken Densetsu 3 (Japan)"));
+        assert(fe::artaliases::Canonical("Secret of Mana 2 (English)") == "Seiken Densetsu 3 (Japan)");
+        assert(fe::artaliases::Canonical("Secret of Mana").empty());
+        // a retranslation that fits a game's USA and Japanese entries alike: the cover matcher declines, the border matcher
+        // (usa_on_tie) takes the USA one; a name that is not a tie is unchanged, and so is a tie of anything but two games
+        // with one main title, one of them released in the USA (a franchise is not one game)
+        for (const char* name : {"Breath of Fire II - Retranslation (U)", "Super Mario RPG - Relocalized T-Eng v2.0 (2023)(CoolCatBomberMan)"})
+        {
+            assert(am::Resolve(ix, name).empty());
+            assert(am::Resolve(ix, name, "", true) == (name[0] == 'B' ? "Breath of Fire II (USA)" : "Super Mario RPG - Legend of the Seven Stars (USA)"));
+        }
+        for (const char* name : {"Star Ocean (English)", "Mortal Kombat II (Europe)", "Super Robot Wars 4 (English)",
+                                 "Dragon Ball Z - Chou Gokuuden - Totsugeki Hen T-Eng v0.98 (2016)(Kakkoii Translations)"})
+            assert(am::Resolve(ix, name, "", true) == am::Resolve(ix, name));
+        for (const std::string& name : {by_crc.at("00D047EA"), std::string("Looney Tunes - Acme Animation Factory"),
+                                        std::string("Legend of Zelda, The (World) (REV-F) (Digital) (NES Conversion)")})
+            assert(am::Resolve(ix, name, "", true).empty()); // DBZ Super Densetsu, Looney Tunes, Zelda for the NES
+        // the Ranma 1/2 patch that names the game by the gang is the Japan-only Akanekodan Teki Hihou, not Hard Battle
+        assert(fe::artaliases::Canonical("Ranma 1-2 - Treasure of the Red Cat Gang T-Eng (2000)(Dynamic-Designs)") ==
+               "Ranma 1-2 - Akanekodan Teki Hihou (Japan)" && has("Ranma 1-2 - Akanekodan Teki Hihou (Japan)"));
+        assert(fe::artaliases::Canonical("Ranma 1-2 - Hard Battle").empty());
+        // a game takes its own region's border now (Europe for Europe, Japan for Japan), not the USA one
+        assert(am::Resolve(ix, "Mortal Kombat II (Europe)") == "Mortal Kombat II (Europe)");
+        assert(am::Resolve(ix, "Populous (Japan)") == "Populous (Japan)");
+        // every No-Intro Japan release but the betas, prototypes and unlicensed ones has a border in the index
+        const auto nointro = index("ps5/frontend/data/snes-nointro.tsv");
+        size_t japan = 0, bordered = 0;
+        for (const std::string& line : nointro)
+        {
+            const std::string name = line.substr(9);
+            if (name.find("(Japan") == std::string::npos) continue;
+            bool odd = false;
+            for (const char* tag : {"(Beta", "(Proto", "(Sample", "(Unl", "(Aftermarket", "(Pirate", "(Demo", "(Enhancement Chip", "(Program"})
+                odd = odd || name.find(tag) != std::string::npos;
+            if (odd) continue;
+            ++japan;
+            bordered += has(name.c_str());
+        }
+        std::cout << "Border index: " << snes.size() << " SNES + " << sfc.size() << " Super Famicom names, " << bordered << " of " << japan
+                  << " Japan releases have a border by name\n";
+        assert(japan > 1500 && bordered * 100 >= japan * 95);
+    }
+    // The database covers (tools/make_db_art.py): games libretro-thumbnails has no art for.
+    {
+        namespace am = fe::artmatch;
+        namespace da = fe::dbart;
+        std::ifstream f("ps5/frontend/data/snes-db-art.tsv", std::ios::binary);
+        assert(f);
+        const std::string text((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
+        da::Table table;
+        da::Parse(text.data(), text.data() + text.size(), table);
+        assert(table.rows.size() > 300 && table.names.size() == table.rows.size());
+        // by CRC32: a pirate cart that is a dump of Aladdin 2000, and Pokemon Stadium
+        const da::Row* aladdin = da::Find(table, 0x752A25D3, "mystery pirate");
+        assert(aladdin && aladdin->name == "Aladdin 2000");
+        assert(da::Urls(*aladdin, "https://h/", "https://t/") == "https://h/AF768536EEED4254A29FE3F540CE879677D5FE1D");
+        const da::Row* stadium = da::Find(table, 0xA8142249, "");
+        assert(stadium && stadium->name == "Pokemon Stadium");
+        // by the words of the name: the article after the comma, a different number or subtitle never matches
+        const da::Row* kof = da::Find(table, 0, "King of Fighters 2000");
+        assert(kof && da::Urls(*kof, "https://h/", "https://t/") == "https://t/27252-1.jpg");
+        assert(da::Find(table, 0, "Street Fighter EX Plus Alpha (Japan)"));
+        assert(!da::Find(table, 0, "Street Fighter III - Super Version")); // no database lists a SNES Street Fighter III
+        assert(!da::Find(table, 0, "Completely Different Game"));
+        assert(!da::Find(table, 0xDEADBEEF, ""));
+        // the table lists only what libretro-thumbnails lacks, so no CRC of it is a game with art
+        const auto nointro = index("ps5/frontend/data/snes-nointro.tsv");
+        std::map<std::string, std::string> nointro_name;
+        for (const std::string& line : nointro) nointro_name[line.substr(0, 8)] = line.substr(9);
+        const std::set<std::string> covered(boxarts.begin(), boxarts.end());
+        size_t overlap = 0;
+        for (const auto& entry : table.by_crc)
+        {
+            char crc[9];
+            std::snprintf(crc, sizeof crc, "%08X", entry.first);
+            const auto n = nointro_name.find(crc);
+            if (n != nointro_name.end() && covered.count(n->second)) ++overlap;
+        }
+        assert(overlap == 0);
+        std::cout << "Database covers: " << table.rows.size() << " games, " << table.by_crc.size() << " CRCs\n";
+    }
+    // The ROM header: LoROM, HiROM, ExHiROM, a copier header, a wrong checksum, and no header at all.
+    {
+        namespace rh = fe::romheader;
+        namespace am = fe::artmatch;
+        auto image = [](size_t size, size_t at, const char* title, uint8_t map, uint8_t country, bool checksum_ok, bool copier) {
+            std::vector<uint8_t> rom((copier ? 512 : 0) + size, 0);
+            const size_t h = at + (copier ? 512 : 0);
+            std::string padded = title;
+            padded.resize(21, ' ');
+            for (size_t i = 0; i < 21; ++i) rom[h + i] = uint8_t(padded[i]);
+            rom[h + 0x15] = map;
+            rom[h + 0x17] = 0x0A;
+            rom[h + 0x19] = country;
+            const uint16_t sum = 0x1234, comp = checksum_ok ? uint16_t(~sum) : uint16_t(0x0001);
+            rom[h + 0x1C] = uint8_t(comp); rom[h + 0x1D] = uint8_t(comp >> 8);
+            rom[h + 0x1E] = uint8_t(sum); rom[h + 0x1F] = uint8_t(sum >> 8);
+            return rom;
+        };
+        auto read = [](const std::vector<uint8_t>& rom, rh::Info* info) {
+            return rh::Read([&rom](uint64_t at, uint8_t* out, size_t n) {
+                if (at + n > rom.size()) return false;
+                std::memcpy(out, rom.data() + at, n);
+                return true;
+            }, rom.size(), info);
+        };
+        rh::Info info;
+        assert(read(image(0x100000, 0x7FC0, "ZELDANODENSETSU", 0x20, 0, true, false), &info));
+        assert(info.title == "ZELDANODENSETSU" && info.japan() && info.map == 0x20);
+        assert(read(image(0x200000, 0xFFC0, "DRAGONQUEST5", 0x21, 0, true, false), &info) && info.title == "DRAGONQUEST5");
+        assert(read(image(0x600000, 0x40FFC0, "EXHIROM TEST ROM", 0x25, 1, true, false), &info) && info.title == "EXHIROM TEST ROM" && !info.japan());
+        assert(read(image(0x100000, 0x7FC0, "COPIER HEADER GAME", 0x20, 0, true, true), &info) && info.title == "COPIER HEADER GAME");
+        assert(read(image(0x200000, 0xFFC0, "UNFIXED CHECKSUM", 0x31, 0, false, false), &info) && info.title == "UNFIXED CHECKSUM");
+        assert(read(image(0x200000, 0xFFC0, "UNFIXED AND COPIER", 0x21, 0, false, true), &info) && info.title == "UNFIXED AND COPIER");
+        std::vector<uint8_t> junk(0x200000);
+        uint32_t seed = 12345; // a seeded generator: the same junk on every run
+        for (uint8_t& b : junk) { seed = seed * 1664525u + 1013904223u; b = uint8_t(seed >> 24); }
+        assert(!read(junk, &info));
+        assert(!read(std::vector<uint8_t>(0x100000, 0), &info));
+        assert(!read(std::vector<uint8_t>(100, 0x20), &info));
+        // half-width katakana become romaji (Nihon-shiki spelling, as fe_artmatch.h's Phon)
+        const uint8_t goemon[] = {0xB6, 0xDE, 0xDD, 0xCA, 0xDE, 0xDA, 0xBA, 0xDE, 0xB4, 0xD3, 0xDD, 0x20, 0xB7, 0xD7, 0xB7, 0xD7};
+        assert(rh::Title(goemon, sizeof(goemon)) == "ganbaregoemon kirakira");
+        const uint8_t shuppon[] = {0xBC, 0xAD, 0xAF, 0xCE, 0xDF, 0xDD, 0xB0};
+        assert(rh::Title(shuppon, sizeof(shuppon)) == "syuppon");
+        // the header names the game when the file name does not
+        auto from_header = [&](const char* title, const char* map_name) {
+            (void)map_name;
+            return am::ResolveHeader(am::IndexOf(boxarts), title, true);
+        };
+        assert(from_header("ZELDANODENSETSU", "") == "Zelda no Densetsu - Kamigami no Triforce (Japan)");
+        assert(from_header("FINAL FANTASY 6", "") == "Final Fantasy VI (Japan)");
+        assert(from_header("DRAGONQUEST5", "") == "Dragon Quest V - Tenkuu no Hanayome (Japan)");
+        assert(from_header("SUPER ROBOT TAISEN4", "") == "Dai-4-ji Super Robot Taisen (Japan)");
+        assert(am::TitleKey(from_header("ganbaregoemon kirakira", "")) == am::TitleKey("Ganbare Goemon Kirakira Douchuu - Boku ga Dancer ni Natta Wake"));
+        assert(from_header("SUPER BOMBERMAN", "") == "Super Bomberman (Japan)");
+        assert(am::ResolveHeader(am::IndexOf(boxarts), "SUPER BOMBERMAN", false) == "Super Bomberman (USA)");
+        // not told apart (a cut-short title that starts several games), too short, or generic: nothing
+        assert(from_header("DRAGON BALL Z SUPER BUTO", "").empty());
+        assert(from_header("TEST", "").empty());
+        assert(from_header("SUPER NES", "").empty());
+        assert(from_header("", "").empty());
     }
     std::cout << "Title matcher regressions passed\n";
     return 0;

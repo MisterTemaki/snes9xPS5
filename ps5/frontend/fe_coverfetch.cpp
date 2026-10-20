@@ -24,7 +24,7 @@ bool WriteFileAtomicTo(const std::string& path, const std::vector<uint8_t>& data
 	FILE* f = fopen(tmp.c_str(), "wb");
 	if (!f)
 		return false;
-	bool ok = fwrite(data.data(), 1, data.size(), f) == data.size();
+	bool ok = data.empty() || fwrite(data.data(), 1, data.size(), f) == data.size(); // an empty list is a valid file
 	ok = fflush(f) == 0 && ok;
 	ok = fsync(fileno(f)) == 0 && ok;
 	ok = fclose(f) == 0 && ok;
@@ -87,8 +87,9 @@ int FetchCoverUrl(HttpClient& http, std::string urls, const std::string& label, 
 
 bool SafeCoverFile(const std::string& f)
 {
-	// "<name>.png" in the covers folder: no folder part, so no way out of it
-	return !f.empty() && f.size() < 250 && f.find('/') == std::string::npos && f.find("..") == std::string::npos &&
+	// "<name>.png" in the covers folder: no folder part (no / or \\), so no way out of it; "..." inside a name
+	// ("Dragon Quest III - Soshite Densetsu e... (Japan)") is fine, and a name can't be "." or ".." as it ends in .png
+	return !f.empty() && f.size() < 250 && f.find('/') == std::string::npos &&
 		   f.find('\\') == std::string::npos && f.find('\0') == std::string::npos && f[0] != '.' && f.size() > 4 &&
 		   f.compare(f.size() - 4, 4, ".png") == 0;
 }

@@ -24,10 +24,13 @@
 #include <unistd.h>
 
 #include <algorithm>
+#include <atomic>
 #include <cerrno>
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <ctime>
+#include <memory>
 #include <vector>
 
 namespace ps5video
@@ -497,6 +500,7 @@ struct SnesGeom
 	Aspect aspect = Aspect::Count;
 	bool scanlines = false;
 	int shader = 0;
+	uint64_t border_gen = 0; // s_border_gen when the surface was last prepared
 	Rect dst = {0, 0, 0, 0};
 	std::vector<uint16_t> xlut; // dst column -> src column
 	std::vector<uint16_t> ylut; // dst row -> src row
@@ -509,6 +513,8 @@ std::vector<uint32_t> s_argb; // the frame in A8R8G8B8, for the shaders
 double s_shader_ms = 0;
 int s_shader_frames = 0;
 uint64_t s_frame_no = 0;
+std::shared_ptr<const Border> s_border; // published by SetBorder with atomic_store, read once per DrawSnes with atomic_load
+std::atomic<uint64_t> s_border_gen{0}; // counts SetBorder calls: a new border repaints the surface
 
 void BuildColorLut()
 {
@@ -526,37 +532,99 @@ void BuildColorLut()
 	}
 }
 
-Rect ComputeRect(int src_w, int src_h, Aspect aspect)
+bool SameRect(const Rect& a, const Rect& b)
+{
+	return a.x == b.x && a.y == b.y && a.w == b.w && a.h == b.h;
+}
+
+// The rim of a border over the picture: out = pic * (255 - a) / 255 + colour * a / 255 for every rim pixel that lies in
+// the picture rectangle (the others are in the backdrop already). The rim is sorted by index, so only the rows of the
+// rectangle are visited.
+void BlendRim(const Border& b, const Rect& d)
+{
+	const uint32_t lo = uint32_t(d.y) * kWidth, hi = uint32_t(d.y + d.h) * kWidth;
+	const auto cmp = [](const RimPixel& p, uint32_t index) { return p.index < index; };
+	const RimPixel* it = std::lower_bound(b.rim.data(), b.rim.data() + b.rim.size(), lo, cmp);
+	const RimPixel* end = std::lower_bound(it, b.rim.data() + b.rim.size(), hi, cmp);
+	uint32_t* surf = g.surface;
+	for (; it != end; ++it)
+	{
+		const uint32_t x = it->index % kWidth;
+		if (x < uint32_t(d.x) || x >= uint32_t(d.x + d.w))
+			continue;
+		const uint32_t pic = surf[it->index], pre = it->pre, inv = it->inv;
+		const uint32_t r = ((pic & 0xff) * inv + 127) / 255 + (pre & 0xff);
+		const uint32_t gr = (((pic >> 8) & 0xff) * inv + 127) / 255 + ((pre >> 8) & 0xff);
+		const uint32_t bl = (((pic >> 16) & 0xff) * inv + 127) / 255 + ((pre >> 16) & 0xff);
+		surf[it->index] = 0xff000000u | (bl << 16) | (gr << 8) | r;
+	}
+}
+
+// A picture of ratio rw:rh in 'bounds': as large as fits, or all of 'bounds' when it is within 3% of that ratio.
+void FitRatio(const Rect& bounds, int64_t rw, int64_t rh, int& dw, int& dh)
+{
+	const int64_t diff = std::llabs(int64_t(bounds.w) * rh - int64_t(bounds.h) * rw); // |bw/bh - rw/rh| * bh * rh
+	if (diff * 100 <= 3 * int64_t(bounds.h) * rw)
+	{
+		dw = bounds.w;
+		dh = bounds.h;
+		return;
+	}
+	dh = bounds.h;
+	dw = int((int64_t(bounds.h) * rw + rh / 2) / rh);
+	if (dw > bounds.w)
+	{
+		dw = bounds.w;
+		dh = int((int64_t(bounds.w) * rh + rw / 2) / rw);
+	}
+}
+
+bool UsableBorder(const Border& b)
+{
+	const Rect& w = b.window;
+	return b.backdrop.size() == size_t(kWidth) * kHeight && w.w > 0 && w.h > 0 && w.x >= 0 && w.y >= 0 &&
+		   w.x + w.w <= kWidth && w.y + w.h <= kHeight;
+}
+} // namespace
+
+Rect ComputeRect(int src_w, int src_h, Aspect aspect, const Rect& bounds)
 {
 	// 512-wide hi-res and 448/478-line interlaced pictures cover the same screen area as 256 x 224/239.
 	const int base_w = src_w > 256 ? src_w / 2 : src_w;
 	const int lines = src_h > 256 ? src_h / 2 : src_h;
-	int dw = kWidth, dh = kHeight;
+	int dw = bounds.w, dh = bounds.h;
 	switch (aspect)
 	{
 		case Aspect::Ratio4x3:
-			dh = kHeight;
-			dw = kHeight * 4 / 3;
+			FitRatio(bounds, 4, 3, dw, dh);
 			break;
 		case Aspect::PixelPerfect:
-			dh = kHeight;
-			dw = (kHeight * base_w + lines / 2) / lines;
+			FitRatio(bounds, base_w, lines, dw, dh);
 			break;
 		case Aspect::Integer:
 		{
-			const int k = std::max(1, std::min(kWidth / base_w, kHeight / lines));
-			dw = base_w * k;
-			dh = lines * k;
+			const int k = std::min(bounds.w / base_w, bounds.h / lines);
+			// a window cut to a whole multiple of the 256 x 224 picture (fe_borderimg.cpp, IntegerOpening) and a picture of
+			// another height: it fills the window, not a smaller multiple with black around it
+			if (lines != kPictureH && bounds.w % kPictureW == 0 && bounds.h % kPictureH == 0 &&
+				bounds.w / kPictureW == bounds.h / kPictureH)
+				FitRatio(bounds, base_w, lines, dw, dh);
+			else if (k < 1) // a window smaller than the picture: no whole multiple fits
+				FitRatio(bounds, 4, 3, dw, dh);
+			else
+			{
+				dw = base_w * k;
+				dh = lines * k;
+			}
 			break;
 		}
 		default:
 			break;
 	}
-	dw = std::min(dw, int(kWidth)) & ~1;
-	dh = std::min(dh, int(kHeight));
-	return Rect{(kWidth - dw) / 2, (kHeight - dh) / 2, dw, dh};
+	dw = std::min(dw, bounds.w) & ~1; // always inside 'bounds'
+	dh = std::min(dh, bounds.h);
+	return Rect{bounds.x + (bounds.w - dw) / 2, bounds.y + (bounds.h - dh) / 2, dw, dh};
 }
-} // namespace
 
 const char* AspectName(Aspect a)
 {
@@ -568,6 +636,12 @@ const char* AspectName(Aspect a)
 		case Aspect::Stretch: return "Stretch 16:9";
 		default: return "?";
 	}
+}
+
+void SetBorder(std::shared_ptr<const Border> border)
+{
+	std::atomic_store(&s_border, std::move(border));
+	s_border_gen.fetch_add(1, std::memory_order_release); // after the pointer: DrawSnes reads them in the other order
 }
 
 Rect LastSnesRect()
@@ -597,16 +671,35 @@ Rect DrawSnes(const uint16_t* src, int pitch_bytes, int w, int h, Aspect aspect,
 	if (!s_rgb565)
 		BuildColorLut();
 
+	// read once: SetBorder may run meanwhile (the count first, so a border newer than the count only repaints again)
+	const uint64_t border_gen = s_border_gen.load(std::memory_order_acquire);
+	std::shared_ptr<const Border> border = std::atomic_load(&s_border);
+	if (border && !UsableBorder(*border))
+	{
+		static const Border* refused = nullptr;
+		if (refused != border.get())
+		{
+			refused = border.get();
+			OrbisLog("[border] refused: backdrop %zu pixels, window %d,%d %dx%d", border->backdrop.size(),
+				border->window.x, border->window.y, border->window.w, border->window.h);
+		}
+		border.reset();
+	}
+
 	bool cleared = false;
 	if (w != s_geom.src_w || h != s_geom.src_h || aspect != s_geom.aspect || scanlines != s_geom.scanlines ||
-		shader != s_geom.shader)
+		shader != s_geom.shader || border_gen != s_geom.border_gen)
 	{
+		const bool surface_known = s_geom.src_w != 0; // InvalidateSnes() or the first frame: unknown contents
+		const bool border_changed = border_gen != s_geom.border_gen;
+		const Rect old_dst = s_geom.dst;
 		s_geom.shader = shader;
 		s_geom.src_w = w;
 		s_geom.src_h = h;
 		s_geom.aspect = aspect;
 		s_geom.scanlines = scanlines;
-		s_geom.dst = ComputeRect(w, h, aspect);
+		s_geom.border_gen = border_gen;
+		s_geom.dst = ComputeRect(w, h, aspect, border ? border->window : Rect{0, 0, kWidth, kHeight});
 		const Rect& d = s_geom.dst;
 		s_geom.xlut.resize(d.w);
 		for (int x = 0; x < d.w; x++)
@@ -624,21 +717,34 @@ Rect DrawSnes(const uint16_t* src, int pitch_bytes, int w, int h, Aspect aspect,
 				s_geom.dark[y] = (line_here != line_next) && (d.h / lines >= 3);
 			}
 		}
-		FillRect(0, 0, kWidth, kHeight, Rgb(0, 0, 0));
-		cleared = true;
+		if (!border)
+		{
+			FillRect(0, 0, kWidth, kHeight, Rgb(0, 0, 0));
+			cleared = true;
+		}
+		else if (!surface_known || border_changed || !SameRect(old_dst, d))
+		{
+			// only the picture rectangle changes from frame to frame: the border goes in once, here
+			memcpy(g.surface, border->backdrop.data(), size_t(kWidth) * kHeight * sizeof(uint32_t));
+			cleared = true;
+		}
 		const Rect& r = s_geom.dst;
 		// logged when it changes (the pause menu redraws the frame, with InvalidateSnes, every time it draws)
-		static int logged[5] = {-1, -1, -1, -1, -1};
-		const int now[5] = {w, h, int(aspect), scanlines ? 1 : 0, shader};
+		static int logged[9] = {-1, -1, -1, -1, -1, -1, -1, -1, -1};
+		const Rect win = border ? border->window : Rect{0, 0, 0, 0};
+		const int now[9] = {w, h, int(aspect), scanlines ? 1 : 0, shader, win.x, win.y, win.w, win.h};
 		if (memcmp(logged, now, sizeof(now)) != 0)
 		{
 			memcpy(logged, now, sizeof(now));
+			char in_border[64] = "";
+			if (border)
+				snprintf(in_border, sizeof(in_border), ", border window %d,%d %dx%d", win.x, win.y, win.w, win.h);
 			if (shader > 0)
-				OrbisLog("[video] picture %dx%d, %s, shader %s -> %d,%d %dx%d", w, h, AspectName(aspect),
-					ps5crt::Name(ps5crt::Shader(shader)), r.x, r.y, r.w, r.h);
+				OrbisLog("[video] picture %dx%d, %s, shader %s -> %d,%d %dx%d%s", w, h, AspectName(aspect),
+					ps5crt::Name(ps5crt::Shader(shader)), r.x, r.y, r.w, r.h, in_border);
 			else
-				OrbisLog("[video] picture %dx%d, %s%s -> %d,%d %dx%d", w, h, AspectName(aspect),
-					scanlines ? ", scanlines" : "", r.x, r.y, r.w, r.h);
+				OrbisLog("[video] picture %dx%d, %s%s -> %d,%d %dx%d%s", w, h, AspectName(aspect),
+					scanlines ? ", scanlines" : "", r.x, r.y, r.w, r.h, in_border);
 		}
 	}
 
@@ -662,6 +768,8 @@ Rect DrawSnes(const uint16_t* src, int pitch_bytes, int w, int h, Aspect aspect,
 		clock_gettime(CLOCK_MONOTONIC, &t1);
 		s_shader_ms += (t1.tv_sec - t0.tv_sec) * 1e3 + (t1.tv_nsec - t0.tv_nsec) / 1e6;
 		s_shader_frames++;
+		if (border)
+			BlendRim(*border, d);
 		return cleared ? Rect{0, 0, kWidth, kHeight} : d;
 	}
 	const uint16_t* xl = s_geom.xlut.data();
@@ -692,6 +800,8 @@ Rect DrawSnes(const uint16_t* src, int pitch_bytes, int w, int h, Aspect aspect,
 		else
 			memcpy(out, bright, size_t(d.w) * 4);
 	}
+	if (border)
+		BlendRim(*border, d);
 	return cleared ? Rect{0, 0, kWidth, kHeight} : d;
 }
 } // namespace ps5video

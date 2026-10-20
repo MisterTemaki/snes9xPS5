@@ -11,6 +11,10 @@
 // send 8095f00c in 20 ms; the helper runs outside any sandbox, like the app after its jailbreak), so the helper
 // brings its own HTTPS: TlsHttp (fe_tlshttp.h, Mbed TLS with Mozilla's CA list, plain sockets).
 //
+// The same thread downloads the borders (fe_borderfetch.h): borders/wanted.txt and borders/priority.txt in the same format, the
+// pictures into borders/games, borders/progress.txt. The border of the game being played goes first, then the covers
+// around the selection, the other covers, and last the borders of the whole library (Settings, Download borders).
+//
 // SPDX-License-Identifier: MIT
 #pragma once
 
@@ -25,10 +29,28 @@ namespace fe
 // the worker) gets the libSceHttp2 one.
 std::unique_ptr<HttpClient> MakeCoverWorkerHttp();
 
+// The helper's download loop, one round at a time: the helper's thread runs it (StartCoverWorker), the tests step it with a
+// fake client. `covers_dir`: the covers folder (OrbisDir("covers")); `borders_dir`: the borders folder (OrbisDir("borders")),
+// whose games/ folder gets the pictures.
+class DownloadWorker
+{
+public:
+	DownloadWorker(std::unique_ptr<HttpClient> http, const std::string& covers_dir, const std::string& borders_dir);
+	~DownloadWorker();
+	// Reloads the lists that changed, then fetches the next file wanted, if any. Returns how many milliseconds to wait before
+	// the next round (0: go on at once).
+	int Step();
+	void Run(); // Step, forever
+
+private:
+	struct Impl;
+	std::unique_ptr<Impl> m_i;
+};
+
 // The helper, once it serves requests: starts the download thread (once).
 void StartCoverWorker();
 
-// covers/progress.txt, as the worker writes it: covers left, fetched since the helper started, and its state.
+// <folder>/progress.txt, as the worker writes it: files left, fetched since the helper started, and its state.
 struct CoverProgress
 {
 	bool valid = false; // a progress file the worker updated in the last minute
@@ -36,7 +58,8 @@ struct CoverProgress
 	int fetched = 0;
 	std::string state; // "busy", "idle", "offline"
 };
-CoverProgress ReadCoverProgress();
+CoverProgress ReadCoverProgress(); // covers/progress.txt
+CoverProgress ReadBorderProgress(); // borders/progress.txt
 
 std::string PriorityListPath();
 } // namespace fe

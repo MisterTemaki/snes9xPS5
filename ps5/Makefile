@@ -21,7 +21,7 @@
 PS5_PAYLOAD_SDK ?= /opt/ps5-payload-sdk
 PS5_HOST ?= ps5
 PS5_PORT ?= 9021
-VERSION ?= 2.6.1
+VERSION ?= 2.7
 TITLE_ID ?= PPSA99922
 # where the app looks for its updates (Settings, Updates): this repository's GitHub releases
 UPDATE_REPO ?= MisterTemaki/snes9xPS5
@@ -39,15 +39,52 @@ CORE_SRC := apu/apu.cpp apu/bapu/dsp/sdsp.cpp apu/bapu/smp/smp.cpp apu/bapu/smp/
 	tileimpl-n2x1.cpp tileimpl-h2x1.cpp sha256.cpp bml.cpp movie.cpp fscompat.cpp loadzip.cpp
 CORE_C_SRC := unzip/unzip.c unzip/ioapi.c
 
+# netfs: network shares as folders (SMB and NFS), see netfs/netfs_backend.h. The protocol files are swapped
+# in by the backend work: backend_smb.cpp / backend_nfs.cpp replace the stubs (which fail with "not built in").
+NETFS_CORE_SRC := netfs/netfs_share.cpp netfs/netfs_core.cpp netfs/netfs_cache.cpp netfs/netfs_vfs.cpp netfs/netfs_wrap.cpp netfs/netfs_edit.cpp netfs/netfs_shims_ps5.cpp
+# the libc calls netfs answers for /smb/... and /nfs/... paths (netfs/netfs_wrap.cpp has a __wrap_ function for each).
+# They go into both links as --wrap, so a call anywhere in the app (the core, minizip, libc++'s file streams) lands
+# in netfs first and is passed on to the real call when the path or handle is not netfs's.
+NETFS_WRAPPED := fopen fclose fread fseek fseeko ftell ftello rewind feof ferror clearerr \
+	fileno fgetc getc ungetc fgets fflush setvbuf flockfile funlockfile open close read pread lseek fstat stat lstat \
+	access realpath opendir readdir closedir
+# glibc only: the console's libc has no 64-bit variants (off_t is 64 bits), and minizip maps its fopen64 calls to
+# fopen on FreeBSD targets (unzip/ioapi.h), so a --wrap of these would leave __real_* undefined in the console link.
+# On the host, ioapi.h also turns stat and readdir into stat64 and readdir64 in files that include it first.
+NETFS_WRAPPED_LFS64 := fopen64 fseeko64 ftello64 stat64 lstat64 fstat64 readdir64 open64 pread64 lseek64
+# console only (netfs/netfs_shims_ps5.cpp): sockets that take SO_NBIO instead of fcntl, and a getaddrinfo that works in a native title
+NETFS_WRAPPED_PS5 := fcntl getaddrinfo freeaddrinfo
+NETFS_WRAP_LLD := $(foreach s,$(NETFS_WRAPPED) $(NETFS_WRAPPED_PS5),--wrap=$(s))
+NETFS_WRAP_GCC := $(foreach s,$(NETFS_WRAPPED) $(NETFS_WRAPPED_LFS64),-Wl,--wrap=$(s))
+NETFS_SMB_SRC := netfs/backend_smb.cpp
+NETFS_NFS_SRC := netfs/backend_nfs.cpp
+NETFS_SRC := $(NETFS_CORE_SRC) $(NETFS_SMB_SRC) $(NETFS_NFS_SRC)
+# libsmb2 and libnfs (LGPL-2.1) are vendored into these folders, with their notices. While a folder is absent
+# its list is empty and nothing is built. libsmb2 6.2 is built from a config.h of ours (no CMake). It needs no
+# PS4_PLATFORM: prospero-clang defines __FreeBSD__, which selects libsmb2's FreeBSD headers. Its fcntl and
+# getaddrinfo calls reach the console shims through the --wrap list above.
+LIBSMB2 := third_party/libsmb2
+LIBNFS := third_party/libnfs
+LIBSMB2_SRC := $(sort $(wildcard $(LIBSMB2)/lib/*.c))
+LIBNFS_SRC := $(sort $(foreach d,lib mount nfs nfs4 portmap nlm nsm rquota,$(wildcard $(LIBNFS)/$(d)/*.c)))
+LIBSMB2_INC := -I$(LIBSMB2)/include -I$(LIBSMB2)/include/smb2 -I$(LIBSMB2)/lib
+LIBSMB2_FLAGS := -I$(LIBSMB2) $(LIBSMB2_INC) -DHAVE_CONFIG_H -D_FILE_OFFSET_BITS=64 '-D_U_=__attribute__((unused))'
+LIBNFS_FLAGS := -DHAVE_CONFIG_H -I$(LIBNFS) -I$(LIBNFS)/include -I$(LIBNFS)/include/nfsc \
+	$(addprefix -I$(LIBNFS)/,mount nfs nfs4 nlm nsm portmap rquota)
+# netfs/backend_smb.cpp includes libsmb2's headers as system headers (they are not ours to keep -Werror clean)
+%/port/netfs/backend_smb.o: EXTRA_FLAGS = $(patsubst -I%,-isystem %,$(LIBSMB2_INC))
+%/port/netfs/backend_nfs.o: EXTRA_FLAGS = $(LIBNFS_FLAGS)
+%/port/tests/test_netfs.o: EXTRA_FLAGS = -Inetfs
+
 # the app (eboot.bin): the emulator and its frontend
 EMU_SRC := coreorbis/main-boot.cpp \
 	coreorbis/orbis-shims/orbis_paths.cpp coreorbis/orbis-shims/ProsperoNotify.cpp \
 	coreorbis/orbis-shims/ProsperoVideo.cpp coreorbis/orbis-shims/ProsperoAudio.cpp \
 	coreorbis/orbis-shims/ProsperoInput.cpp coreorbis/orbis-shims/ProsperoJailbreak.cpp \
 	coreorbis/orbis-shims/ProsperoCrash.cpp coreorbis/orbis-shims/ProsperoCrt.cpp coreorbis/orbis-shims/ProsperoUpdate.cpp \
-	frontend/fe_emu.cpp frontend/fe_menu.cpp frontend/fe_settings.cpp frontend/fe_i18n.cpp frontend/fe_text.cpp \
-	frontend/fe_games.cpp frontend/fe_http.cpp frontend/fe_covers.cpp frontend/fe_shelf.cpp \
-	frontend/fe_prefetch.cpp frontend/fe_coverfetch.cpp frontend/fe_coverworker.cpp
+	frontend/fe_emu.cpp frontend/fe_menu.cpp frontend/fe_netscreen.cpp frontend/fe_osk.cpp frontend/fe_ui.cpp frontend/fe_settings.cpp frontend/fe_i18n.cpp frontend/fe_text.cpp \
+	frontend/fe_games.cpp frontend/fe_http.cpp frontend/fe_covers.cpp frontend/fe_shelf.cpp frontend/fe_border.cpp frontend/fe_borderimg.cpp frontend/fe_borderfetch.cpp \
+	frontend/fe_prefetch.cpp frontend/fe_coverfetch.cpp frontend/fe_coverworker.cpp $(NETFS_SRC)
 # the payloads: the helper, and the installer (= helper + install)
 # (the helper also downloads the covers in the background: fe_coverworker.cpp, with the app's HTTPS code)
 HELPER_SRC := coreorbis/orbis-shims/orbis_paths.cpp coreorbis/orbis-shims/ProsperoNotify.cpp \
@@ -62,7 +99,7 @@ INSTALLER_SRC := installer/installer_main.cpp $(HELPER_SRC) coreorbis/orbis-shim
 
 ZLIB_SRC := $(wildcard $(ZLIB)/*.c)
 
-INCS := -I$(ROOT) -I$(ROOT)/apu -I$(ROOT)/apu/bapu -I$(ROOT)/unzip -I$(ZLIB) \
+INCS := -Inetfs -I$(ROOT) -I$(ROOT)/apu -I$(ROOT)/apu/bapu -I$(ROOT)/unzip -I$(ZLIB) \
 	-Icoreorbis/include-orbis -Icoreorbis/orbis-shims -Ifrontend
 DEFS := -DRIGHTSHIFT_IS_SAR -DZLIB -DUNZIP_SUPPORT -DSNES9X_PS5_VERSION='"$(VERSION)"' -DSNES9X_TITLE_ID='"$(TITLE_ID)"' -DSNES9X_UPDATE_REPO='"$(UPDATE_REPO)"'
 WARN := -Wall -Wno-unused-function -Wno-unused-variable -Wno-unused-but-set-variable -Wno-missing-braces \
@@ -71,11 +108,18 @@ WARN := -Wall -Wno-unused-function -Wno-unused-variable -Wno-unused-but-set-vari
 PORT_WARN := -Wall -Wextra -Werror -Wno-unused-parameter -Wno-missing-field-initializers
 
 # the No-Intro name table built into fe_games.o; stb_image in fe_covers.o has warnings of its own
-GAMEDB_DEFS := -DGAMEDB_TSV='"$(abspath frontend/data/snes-nointro.tsv)"'
+GAMEDB_DEFS := -DGAMEDB_TSV='"$(abspath frontend/data/snes-nointro.tsv)"' -DEXTRACRC_TSV='"$(abspath frontend/data/snes-extra-crc.tsv)"' -DDBART_TSV='"$(abspath frontend/data/snes-db-art.tsv)"'
 %/port/frontend/fe_games.o: EXTRA_FLAGS = $(GAMEDB_DEFS)
 %/port/frontend/fe_covers.o: EXTRA_FLAGS = -Wno-error -Wno-sign-compare -Wno-unused-but-set-variable -Wno-implicit-fallthrough -DCOVER_MANIFEST_TXT='"$(abspath frontend/data/snes-cover-index.txt)"' -DTITLE_MANIFEST_TXT='"$(abspath frontend/data/snes-title-index.txt)"' -DSNAP_MANIFEST_TXT='"$(abspath frontend/data/snes-snap-index.txt)"'
 %/port/frontend/fe_covers.o: frontend/data/snes-cover-index.txt frontend/data/snes-title-index.txt frontend/data/snes-snap-index.txt
-%/port/frontend/fe_games.o: frontend/data/snes-nointro.tsv
+%/port/frontend/fe_games.o: frontend/data/snes-nointro.tsv frontend/data/snes-extra-crc.tsv frontend/data/snes-db-art.tsv
+# the border pack code: the built-in frame is embedded in fe_border.o; stb_image in fe_borderimg.o has warnings of its own
+%/port/frontend/fe_border.o: EXTRA_FLAGS = -DBORDER_DEFAULT_PNG='"$(abspath frontend/assets/borders/default.png)"'
+%/port/frontend/fe_border.o: frontend/assets/borders/default.png
+# the names of the borders The Bezel Project has are embedded in fe_borderfetch.o (the pictures are downloaded, ADR 006)
+%/port/frontend/fe_borderfetch.o: EXTRA_FLAGS = -DBORDER_INDEX_TXT='"$(abspath frontend/data/snes-border-index.txt)"'
+%/port/frontend/fe_borderfetch.o: frontend/data/snes-border-index.txt
+%/port/frontend/fe_borderimg.o: EXTRA_FLAGS = -Wno-error -Wno-sign-compare -Wno-unused-but-set-variable -Wno-implicit-fallthrough
 # the UI fonts (PS5SX2's: PCSX2's Roboto Regular and PromptFont) built into fe_text.o
 %/port/frontend/fe_text.o: EXTRA_FLAGS = -DFE_FONT_DIR='"$(abspath frontend/assets/fonts)"' -Wno-error -Wno-sign-compare -Wno-unused-function
 %/port/frontend/fe_text.o: frontend/assets/fonts/Roboto-Regular.ttf frontend/assets/fonts/promptfont.otf \
@@ -102,6 +146,8 @@ PS5_MBEDTLS_OBJ := $(patsubst $(MBEDTLS)/library/%.c,$(PS5_OUT)/mbedtls/%.o,$(MB
 PS5_HELPER_OBJ := $(PS5_OUT)/port/installer/helper_main.o $(patsubst %.cpp,$(PS5_OUT)/port/%.o,$(HELPER_SRC)) $(PS5_MBEDTLS_OBJ)
 PS5_INSTALLER_OBJ := $(patsubst %.cpp,$(PS5_OUT)/port/%.o,$(INSTALLER_SRC)) $(PS5_MBEDTLS_OBJ)
 PS5_ZLIB_OBJ := $(patsubst $(ZLIB)/%.c,$(PS5_OUT)/zlib/%.o,$(ZLIB_SRC))
+PS5_LIBSMB2_OBJ := $(patsubst $(LIBSMB2)/%.c,$(PS5_OUT)/libsmb2/%.o,$(LIBSMB2_SRC))
+PS5_LIBNFS_OBJ := $(patsubst $(LIBNFS)/%.c,$(PS5_OUT)/libnfs/%.o,$(LIBNFS_SRC))
 
 ps5: $(PS5_OUT)/Snes9xPS5.elf
 
@@ -117,7 +163,7 @@ $(PS5_OUT)/mbedtls/%.o: $(MBEDTLS)/library/%.c frontend/fe_mbedtls_config.h
 	@mkdir -p $(dir $@)
 	$(PS5_CC) -Os -fPIC -march=znver2 $(MBEDTLS_FLAGS) -c -o $@ $<
 
-$(PS5_OUT)/port/%.o: %.cpp coreorbis/include-orbis/*.h coreorbis/orbis-shims/*.h frontend/*.h
+$(PS5_OUT)/port/%.o: %.cpp coreorbis/include-orbis/*.h coreorbis/orbis-shims/*.h frontend/*.h netfs/*.h
 	@mkdir -p $(dir $@)
 	$(PS5_CXX) -std=c++17 $(PS5_OPT) $(DEFS) $(INCS) $(PORT_WARN) $(EXTRA_FLAGS) -c -o $@ $<
 
@@ -128,6 +174,14 @@ $(PS5_OUT)/port/installer/helper_main.o: installer/installer_main.cpp coreorbis/
 $(PS5_OUT)/zlib/%.o: $(ZLIB)/%.c
 	@mkdir -p $(dir $@)
 	$(PS5_CC) -O2 -fPIC -march=znver2 -DHAVE_UNISTD_H -I$(ZLIB) -w -c -o $@ $<
+
+$(PS5_OUT)/libsmb2/%.o: $(LIBSMB2)/%.c
+	@mkdir -p $(dir $@)
+	$(PS5_CC) -O2 -fPIC -march=znver2 $(LIBSMB2_FLAGS) -w -c -o $@ $<
+
+$(PS5_OUT)/libnfs/%.o: $(LIBNFS)/%.c
+	@mkdir -p $(dir $@)
+	$(PS5_CC) -O2 -fPIC -march=znver2 $(LIBNFS_FLAGS) -w -c -o $@ $<
 
 # 1. the helper payload (built into the app, which sends it to the ELF loader when no helper answers)
 $(PS5_OUT)/Snes9xPS5-helper.elf: $(PS5_HELPER_OBJ)
@@ -220,13 +274,13 @@ build/app/app_crt.o build/app/app_cpp_runtime.o: build/app/%.o: $(NATIVE)/toolin
 		-c -o $@ $<
 
 EBOOT_OBJS = build/app/app_crt.o build/app/app_cpp_runtime.o $(PS5_CORE_OBJ) $(PS5_EMU_OBJ) $(PS5_ZLIB_OBJ) \
-	$(PS5_OUT)/helper_data.o
+	$(PS5_LIBSMB2_OBJ) $(PS5_LIBNFS_OBJ) $(PS5_OUT)/helper_data.o
 build/app/snes9x-pie.elf: $(EBOOT_OBJS) $(NATIVE)/tooling/native/ps5-pie.ld $(NATIVE)/tooling/native/ehframe.ld \
 		$(NATIVE)/tooling/native/app-symbols.map $(NATIVE)/tooling/native/localize.map
 	$(LLD) -m elf_x86_64 -pie -z max-page-size=0x4000 --hash-style=gnu \
 		-T $(NATIVE)/tooling/native/ps5-pie.ld -T $(NATIVE)/tooling/native/ehframe.ld --eh-frame-hdr \
 		--version-script $(NATIVE)/tooling/native/app-symbols.map --version-script $(NATIVE)/tooling/native/localize.map \
-		-e _start --no-dynamic-linker -o $@ $(EBOOT_OBJS) \
+		$(NETFS_WRAP_LLD) -e _start --no-dynamic-linker -o $@ $(EBOOT_OBJS) \
 		--as-needed $(APP_STUBS) -L $(SDK_LIB) \
 		$(SDK_LIB)/libc++.a $(SDK_LIB)/libc++abi.a $(SDK_LIB)/libunwind.a $(SDK_LIB)/libc.a -lpthread
 
@@ -260,17 +314,20 @@ HOST_CC ?= gcc
 HOST_CXX ?= g++
 HOST_OUT := build/host
 HOST_SAN ?= -fsanitize=address,undefined -fno-omit-frame-pointer
-HOST_OPT := -O1 -g -mavx2 -fno-strict-aliasing
+# no _FORTIFY_SOURCE: it turns fread/fgets/read into __fread_chk/..., which --wrap (netfs) does not see
+HOST_OPT := -O1 -g -mavx2 -fno-strict-aliasing -U_FORTIFY_SOURCE
 # The Snes9x core reads unaligned words and shifts by negative amounts on purpose (x86 only): not our bugs.
 HOST_CORE_NOSAN := -fno-sanitize=alignment,shift
 
 HOST_CORE_OBJ := $(patsubst %.cpp,$(HOST_OUT)/core/%.o,$(CORE_SRC)) $(patsubst %.c,$(HOST_OUT)/core/%.o,$(CORE_C_SRC))
-HOST_EMU_OBJ := $(patsubst %.cpp,$(HOST_OUT)/port/%.o,$(EMU_SRC) host/sce_host.cpp)
+HOST_EMU_OBJ := $(patsubst %.cpp,$(HOST_OUT)/port/%.o,$(EMU_SRC) host/sce_host.cpp host/netfs_dirbackend.cpp)
 HOST_MBEDTLS_OBJ := $(patsubst $(MBEDTLS)/library/%.c,$(HOST_OUT)/mbedtls/%.o,$(MBEDTLS_SRC))
 HOST_HELPER_OBJ := $(HOST_OUT)/port/installer/helper_main.o $(patsubst %.cpp,$(HOST_OUT)/port/%.o,$(HELPER_SRC) host/sce_host.cpp) \
 	$(HOST_MBEDTLS_OBJ)
 HOST_INSTALLER_OBJ := $(patsubst %.cpp,$(HOST_OUT)/port/%.o,$(INSTALLER_SRC) host/sce_host.cpp) $(HOST_MBEDTLS_OBJ)
 HOST_ZLIB_OBJ := $(patsubst $(ZLIB)/%.c,$(HOST_OUT)/zlib/%.o,$(ZLIB_SRC))
+HOST_LIBSMB2_OBJ := $(patsubst $(LIBSMB2)/%.c,$(HOST_OUT)/libsmb2/%.o,$(LIBSMB2_SRC))
+HOST_LIBNFS_OBJ := $(patsubst $(LIBNFS)/%.c,$(HOST_OUT)/libnfs/%.o,$(LIBNFS_SRC))
 
 host: $(HOST_OUT)/snes9x-ps5-host $(HOST_OUT)/snes9x-ps5-installer $(HOST_OUT)/snes9x-ps5-helper
 
@@ -286,7 +343,7 @@ $(HOST_OUT)/mbedtls/%.o: $(MBEDTLS)/library/%.c frontend/fe_mbedtls_config.h
 	@mkdir -p $(dir $@)
 	$(HOST_CC) -O2 -g1 $(MBEDTLS_FLAGS) -c -o $@ $<
 
-$(HOST_OUT)/port/%.o: %.cpp coreorbis/include-orbis/*.h coreorbis/orbis-shims/*.h frontend/*.h
+$(HOST_OUT)/port/%.o: %.cpp coreorbis/include-orbis/*.h coreorbis/orbis-shims/*.h frontend/*.h netfs/*.h
 	@mkdir -p $(dir $@)
 	$(HOST_CXX) -std=c++17 $(HOST_OPT) $(HOST_SAN) $(DEFS) $(INCS) $(PORT_WARN) $(EXTRA_FLAGS) -c -o $@ $<
 
@@ -297,6 +354,14 @@ $(HOST_OUT)/port/installer/helper_main.o: installer/installer_main.cpp coreorbis
 $(HOST_OUT)/zlib/%.o: $(ZLIB)/%.c
 	@mkdir -p $(dir $@)
 	$(HOST_CC) -O2 -DHAVE_UNISTD_H -I$(ZLIB) -w -c -o $@ $<
+
+$(HOST_OUT)/libsmb2/%.o: $(LIBSMB2)/%.c
+	@mkdir -p $(dir $@)
+	$(HOST_CC) -O2 -g1 -D_GNU_SOURCE $(LIBSMB2_FLAGS) -w -c -o $@ $<
+
+$(HOST_OUT)/libnfs/%.o: $(LIBNFS)/%.c
+	@mkdir -p $(dir $@)
+	$(HOST_CC) -O2 -g1 $(LIBNFS_FLAGS) -w -c -o $@ $<
 
 # The host installer carries a stand-in app folder (tests/fake-eboot.bin, tests/fake-libc.prx + the real
 # param/icon/pic); the host app carries the host helper, which it hands to a fake ELF loader in the tests.
@@ -320,14 +385,101 @@ $(HOST_OUT)/snes9x-ps5-helper: $(HOST_HELPER_OBJ)
 $(HOST_OUT)/snes9x-ps5-installer: $(HOST_INSTALLER_OBJ) $(HOST_OUT)/install_data.o
 	$(HOST_CXX) $(HOST_SAN) -o $@ $^ -lpthread
 
-$(HOST_OUT)/snes9x-ps5-host: $(HOST_CORE_OBJ) $(HOST_EMU_OBJ) $(HOST_ZLIB_OBJ) $(HOST_OUT)/helper_data.o
+$(HOST_OUT)/snes9x-ps5-host: $(HOST_CORE_OBJ) $(HOST_EMU_OBJ) $(HOST_ZLIB_OBJ) $(HOST_LIBSMB2_OBJ) $(HOST_LIBNFS_OBJ) $(HOST_OUT)/helper_data.o
+	$(HOST_CXX) $(HOST_SAN) -o $@ $^ $(NETFS_WRAP_GCC) -lpthread
+
+# netfs's own test: the netfs code, the stub backends and an in-memory share, linked with the same --wrap list
+HOST_NETFS_TEST_OBJ := $(patsubst %.cpp,$(HOST_OUT)/port/%.o,$(NETFS_CORE_SRC) netfs/backend_smb_stub.cpp netfs/backend_nfs_stub.cpp \
+	tests/test_netfs.cpp)
+# minizip and zlib go into it too: the test opens a .zip and a .gz on the fake share
+HOST_NETFS_TEST_EXTRA := $(HOST_OUT)/core/unzip/unzip.o $(HOST_OUT)/core/unzip/ioapi.o $(HOST_ZLIB_OBJ)
+$(HOST_OUT)/test-netfs: $(HOST_NETFS_TEST_OBJ) $(HOST_NETFS_TEST_EXTRA) tests/netfs_fake.h
+	$(HOST_CXX) $(HOST_SAN) -o $@ $(HOST_NETFS_TEST_OBJ) $(HOST_NETFS_TEST_EXTRA) $(NETFS_WRAP_GCC) -lpthread
+
+test: host $(HOST_OUT)/test-netfs
+	bash tests/run-tests.sh
+
+# NFS backend unit test: backend_nfs.cpp against an in-memory libnfs (tests/libnfs_mock.cpp), no network
+NFS_TEST := $(HOST_OUT)/nfs-backend-test
+$(NFS_TEST): tests/nfs_backend_test.cpp tests/libnfs_mock.cpp tests/libnfs_mock.h netfs/backend_nfs.cpp netfs/backend_nfs.h netfs/netfs_backend.h
+	@mkdir -p $(dir $@)
+	$(HOST_CXX) -std=c++17 $(HOST_OPT) $(HOST_SAN) $(PORT_WARN) $(LIBNFS_FLAGS) -Inetfs -Itests -o $@ \
+		tests/nfs_backend_test.cpp tests/libnfs_mock.cpp netfs/backend_nfs.cpp -lpthread
+
+# the same backend on real libnfs (the objects of the host build), against loopback sockets that misbehave
+NFS_LOOP_TEST := $(HOST_OUT)/nfs-loopback-test
+$(NFS_LOOP_TEST): tests/nfs_loopback_test.cpp netfs/backend_nfs.cpp netfs/backend_nfs.h netfs/netfs_backend.h $(HOST_LIBNFS_OBJ)
+	@mkdir -p $(dir $@)
+	$(HOST_CXX) -std=c++17 $(HOST_OPT) $(HOST_SAN) $(PORT_WARN) $(LIBNFS_FLAGS) -Inetfs -o $@ \
+		tests/nfs_loopback_test.cpp netfs/backend_nfs.cpp $(HOST_LIBNFS_OBJ) -lpthread
+
+# the same backend against a real NFSv3 server (unfs3): not part of `make test`, needs rpcbind and unfsd
+NFS_SERVER_TEST := $(HOST_OUT)/nfs-server-test
+$(NFS_SERVER_TEST): tests/nfs_server_test.cpp netfs/backend_nfs.cpp netfs/backend_nfs.h netfs/netfs_backend.h $(HOST_LIBNFS_OBJ)
+	@mkdir -p $(dir $@)
+	$(HOST_CXX) -std=c++17 $(HOST_OPT) $(HOST_SAN) $(PORT_WARN) $(LIBNFS_FLAGS) -Inetfs -o $@ \
+		tests/nfs_server_test.cpp netfs/backend_nfs.cpp $(HOST_LIBNFS_OBJ) -lpthread
+
+test-nfs-server: $(NFS_SERVER_TEST)
+	bash tests/nfs_server_test.sh $(NFS_SERVER_TEST)
+
+test-nfs: $(NFS_TEST) $(NFS_LOOP_TEST)
+	ASAN_OPTIONS=detect_leaks=1 $(NFS_TEST)
+	ASAN_OPTIONS=detect_leaks=1 $(NFS_LOOP_TEST)
+
+# the shelf's tab rules (frontend/fe_tabs.h): header only, so no app code is linked
+TABS_TEST := $(HOST_OUT)/tabs-test
+$(TABS_TEST): tests/test_tabs.cpp frontend/fe_tabs.h frontend/fe_games.h
+	@mkdir -p $(dir $@)
+	$(HOST_CXX) -std=c++17 $(HOST_OPT) $(HOST_SAN) $(PORT_WARN) -Ifrontend -o $@ tests/test_tabs.cpp
+
+test-tabs: $(TABS_TEST)
+	$(TABS_TEST)
+
+# the border pack code (fe_border.cpp, fe_borderimg.cpp) with the renderer, the cover matcher and the game naming
+# stood in for by the test: generated PNGs through the lookup order, the window, the backdrop and the rim
+BORDER_TEST := $(HOST_OUT)/border-pack-test
+BORDER_TEST_OBJ := $(patsubst %.cpp,$(HOST_OUT)/port/%.o,tests/test_border_pack.cpp frontend/fe_border.cpp frontend/fe_borderimg.cpp \
+	frontend/fe_borderfetch.cpp frontend/fe_coverfetch.cpp frontend/fe_settings.cpp coreorbis/orbis-shims/orbis_paths.cpp)
+$(BORDER_TEST): $(BORDER_TEST_OBJ) $(HOST_ZLIB_OBJ)
 	$(HOST_CXX) $(HOST_SAN) -o $@ $^ -lpthread
 
-test: host
-	bash tests/run-tests.sh
+test-border: $(BORDER_TEST)
+	ASAN_OPTIONS=detect_leaks=1 $(BORDER_TEST)
+
+test: test-nfs test-tabs test-border
+
+# the border in the renderer (ProsperoVideo.cpp): picture rectangle in a window, backdrop restore, rim blend; runs against the host's stub video output
+BORDER_RENDER_TEST := $(HOST_OUT)/border-render-test
+$(BORDER_RENDER_TEST): tests/test_border_render.cpp coreorbis/orbis-shims/ProsperoVideo.h \
+	$(addprefix $(HOST_OUT)/port/,coreorbis/orbis-shims/ProsperoVideo.o coreorbis/orbis-shims/ProsperoCrt.o coreorbis/orbis-shims/ProsperoCrash.o coreorbis/orbis-shims/orbis_paths.o host/sce_host.o)
+	@mkdir -p $(dir $@)
+	$(HOST_CXX) -std=c++17 $(HOST_OPT) $(HOST_SAN) $(PORT_WARN) $(INCS) -o $@ $(filter-out %.h,$^) -lpthread
+
+test-border-render: $(BORDER_RENDER_TEST)
+	$(BORDER_RENDER_TEST)
+
+test: test-border-render
+.PHONY: test-border-render
+
+# the helper's download loop with its covers and borders lanes (fe_coverworker.cpp), against a fake HTTP client
+DOWNLOAD_WORKER_TEST := $(HOST_OUT)/download-worker-test
+DOWNLOAD_WORKER_OBJ := $(patsubst %.cpp,$(HOST_OUT)/port/%.o,tests/test_download_worker.cpp frontend/fe_coverworker.cpp frontend/fe_coverfetch.cpp \
+	frontend/fe_http.cpp coreorbis/orbis-shims/orbis_paths.cpp coreorbis/orbis-shims/ProsperoCrash.cpp host/sce_host.cpp)
+$(DOWNLOAD_WORKER_TEST): $(DOWNLOAD_WORKER_OBJ)
+	$(HOST_CXX) $(HOST_SAN) -o $@ $^ -lpthread
+
+test-download-worker: $(DOWNLOAD_WORKER_TEST)
+	ASAN_OPTIONS=detect_leaks=1 $(DOWNLOAD_WORKER_TEST)
+
+test: test-download-worker
+.PHONY: test-download-worker
 
 clean:
 	rm -rf build
 
-.PHONY: ps5 host test send strip app dist clean
+# the SMB backend against a real Samba (adds `smb-test`, run before the other tests; skipped without smbd)
+include tests/smb/smb.mk
+
+.PHONY: ps5 host test test-nfs test-nfs-server test-tabs test-border test-download-worker send strip app dist clean
 .SECONDARY:

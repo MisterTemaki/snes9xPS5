@@ -4,6 +4,7 @@
 #include "fe_covers.h"
 #include "fe_titlematch.h"
 #include "fe_artaliases.h"
+#include "fe_artmatch.h"
 
 #include "fe_coverworker.h"
 #include "fe_text.h"
@@ -24,6 +25,7 @@
 #include <ctime>
 #include <mutex>
 #include <unordered_map>
+#include <unordered_set>
 
 #define STB_IMAGE_IMPLEMENTATION
 #define STB_IMAGE_STATIC
@@ -88,7 +90,8 @@ const std::vector<std::string>& SnapArtNames()
     static const auto names = ParseArtIndex(s9x_snap_index_begin, s9x_snap_index_end);
     return names;
 }
-std::string MatchArtName(const std::vector<std::string>& names, const GameInfo& game)
+std::string MatchArtName(const std::vector<std::string>& names, const titles::Index& index, const artmatch::Index& words,
+    const GameInfo& game, bool usa_on_tie = false)
 {
     if (artaliases::DistinctBootleg(game.file_base))
     {
@@ -106,14 +109,34 @@ std::string MatchArtName(const std::vector<std::string>& names, const GameInfo& 
         ? game.file_base : game.nointro;
     auto exact = std::find(names.begin(), names.end(), requested);
     if (exact != names.end()) return *exact; // preserve revisions and git symlinks
-    const titles::Index& index = titles::IndexOf(names); // names: one of the built-in art lists
-    std::string result = titles::Best(index, requested);
+    // What the ROM's CRC is called in the extra table (a fan translation, a hack): the database knows this very file.
+    std::string result;
+    if (!game.crc_name.empty())
+        result = artmatch::Resolve(words, game.crc_name, "", usa_on_tie);
+    // Close in spelling, unless the numbers disagree ("Dragon Quest III" is not "Dragon Quest I & II").
+    if (result.empty())
+    {
+        result = titles::Best(index, requested);
+        if (artmatch::NumbersConflict(requested, result)) result.clear();
+    }
     if (result.empty())
     {
         const std::string cleaned = artaliases::TrimFrontendSuffix(game.file_base);
         result = titles::Best(index, cleaned);
+        if (artmatch::NumbersConflict(cleaned, result)) result.clear();
     }
+    // A renamed or fan-translated ROM: the same words as an art name ("Super Robot Wars 4 (English)" is
+    // "Dai-4-ji Super Robot Taisen (Japan)"), then the title inside the ROM itself (fe_artmatch.h).
+    if (result.empty())
+        result = artmatch::Resolve(words, requested, "", usa_on_tie);
+    if (result.empty() && !game.header_title.empty())
+        result = artmatch::ResolveHeader(words, game.header_title, game.header_japan, usa_on_tie);
     return result;
+}
+// names: one of the built-in art lists, which live as long as the program (their indexes are cached by address)
+std::string MatchArtName(const std::vector<std::string>& names, const GameInfo& game)
+{
+    return MatchArtName(names, titles::IndexOf(names), artmatch::IndexOf(names), game);
 }
 std::string MatchFallbackArt(const std::vector<std::string>& names, const GameInfo& game)
 {
@@ -122,7 +145,7 @@ std::string MatchFallbackArt(const std::vector<std::string>& names, const GameIn
     static std::mutex match_mutex;
     static std::unordered_map<std::string, std::string> cache;
     // The lookup cache is shared safely by the cover thread and the menu.
-    const std::string key = (&names == &TitleArtNames() ? "T:" : "S:") + requested + "|" + game.file_base;
+    const std::string key = (&names == &TitleArtNames() ? "T:" : "S:") + requested + "|" + game.file_base + "|" + game.crc_name + "|" + game.header_title;
     {
         std::lock_guard<std::mutex> lock(match_mutex);
         auto it = cache.find(key);
@@ -404,7 +427,7 @@ std::string CoverNameFor(const GameInfo& game)
 {
     const std::string requested = artaliases::DistinctBootleg(game.file_base) || game.nointro.empty()
         ? game.file_base : game.nointro;
-    const std::string cache_key = requested + "|" + game.file_base;
+    const std::string cache_key = requested + "|" + game.file_base + "|" + game.crc_name + "|" + game.header_title;
     static std::mutex mutex;
     static std::unordered_map<std::string,std::string> cache;
     {
@@ -421,6 +444,36 @@ std::string CoverNameFor(const GameInfo& game)
         cache.emplace(cache_key,best);
     }
     return best;
+}
+
+struct PackMatcher::Impl
+{
+    std::vector<std::string> names;
+    titles::Index index;
+    artmatch::Index words;
+    bool usa_on_tie = false;
+};
+
+PackMatcher::PackMatcher(const std::vector<std::string>& names, bool usa_on_tie) : m_i(new Impl)
+{
+    m_i->names = names;
+    m_i->usa_on_tie = usa_on_tie;
+    titles::Build(m_i->index, m_i->names);
+    artmatch::Build(m_i->words, m_i->names);
+}
+
+PackMatcher::~PackMatcher() = default;
+
+std::string PackMatcher::Match(const GameInfo& game) const
+{
+    return MatchArtName(m_i->names, m_i->index, m_i->words, game, m_i->usa_on_tie);
+}
+
+std::string MatchPackName(const std::vector<std::string>& names, const GameInfo& game)
+{
+    // a list that changes between calls: its indexes are made here and thrown away (IndexOf would hand back a stale
+    // one for a different list of the same size at the same address)
+    return PackMatcher(names).Match(game);
 }
 
 std::string ThumbnailName(const std::string& nointro)
@@ -461,10 +514,40 @@ std::string CoverUrlFor(const std::string& nointro)
         root + "Named_Snaps/" + encoded + ".png";
 }
 
+namespace
+{
+// Where an online database has the box art of a game libretro-thumbnails has none of (fe_dbart.h), or "". Asked once per game.
+std::string DatabaseUrls(const GameInfo& game, const std::string& box)
+{
+    static const std::unordered_set<std::string> libretro(BoxArtNames().begin(), BoxArtNames().end());
+    if (libretro.count(box)) return "";
+    static std::mutex mutex;
+    static std::unordered_map<std::string, std::string> cache;
+    const std::string key = game.file_base + "|" + game.nointro + "|" + std::to_string(game.crc) + "|" + game.crc_name;
+    std::lock_guard<std::mutex> guard(mutex);
+    auto it = cache.find(key);
+    if (it == cache.end())
+    {
+        it = cache.emplace(key, gamedb::DatabaseCoverUrls(game)).first;
+        if (!it->second.empty())
+            OrbisLog("[covers] a database has art for %s: %s", game.file_base.c_str(), it->second.c_str());
+    }
+    return it->second;
+}
+// The boxart address stays first, the database's follow it, then the title screen and the snapshot.
+std::string WithDatabaseUrls(const std::string& urls, const std::string& database)
+{
+    if (database.empty()) return urls;
+    const size_t tab = urls.find('\t');
+    return tab == std::string::npos ? urls + "\t" + database : urls.substr(0, tab) + "\t" + database + urls.substr(tab);
+}
+} // namespace
+
 std::string CoverUrlForGame(const GameInfo& game)
 {
     const std::string box = CoverNameFor(game);
-    const std::string default_url = CoverUrlFor(box);
+    const std::string database = DatabaseUrls(game, box);
+    const std::string default_url = WithDatabaseUrls(CoverUrlFor(box), database);
     if (getenv("SNES9X_COVER_URL")) return default_url;
     const std::string root =
         "https://raw.githubusercontent.com/libretro-thumbnails/Nintendo_-_Super_Nintendo_Entertainment_System/master/";
@@ -478,8 +561,8 @@ std::string CoverUrlForGame(const GameInfo& game)
         url.replace(p, 7, UrlEncode(ThumbnailName(box)));
     const std::string title_name = title.empty() ? box : title;
     const std::string snap_name = snap.empty() ? box : snap;
-    return url + "\t" + root + "Named_Titles/" + UrlEncode(ThumbnailName(title_name)) +
-        ".png\t" + root + "Named_Snaps/" + UrlEncode(ThumbnailName(snap_name)) + ".png";
+    return WithDatabaseUrls(url + "\t" + root + "Named_Titles/" + UrlEncode(ThumbnailName(title_name)) +
+        ".png\t" + root + "Named_Snaps/" + UrlEncode(ThumbnailName(snap_name)) + ".png", database);
 }
 
 std::string WantedListPath()

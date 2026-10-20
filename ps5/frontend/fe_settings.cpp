@@ -56,6 +56,10 @@ void Settings::Load()
 			shader = Clamp(atoi(val), 0, kShaderCount - 1);
 		else if (key == "aspect")
 			aspect = Clamp(atoi(val), 0, 3);
+		else if (key == "border")
+			border = Clamp(atoi(val), 0, 2);
+		else if (key == "border_download")
+			border_download = atoi(val) != 0;
 		else if (key == "scanlines")
 			scanlines = atoi(val) != 0;
 		else if (key == "show_fps")
@@ -84,6 +88,8 @@ void Settings::Load()
 			last_dir = val;
 		else if (key == "last_rom")
 			last_rom = val;
+		else if (key == "last_tab")
+			last_tab = Clamp(atoi(val), 0, 2);
 	}
 	fclose(f);
 	// If manually-edited ini values conflict, restore distinct, reachable defaults.
@@ -108,6 +114,8 @@ void Settings::Save() const
 	fprintf(f, "# Snes9x PS5\n");
 	fprintf(f, "shader=%d\n", shader);
 	fprintf(f, "aspect=%d\n", aspect);
+	fprintf(f, "border=%d\n", border);
+	fprintf(f, "border_download=%d\n", border_download ? 1 : 0);
 	fprintf(f, "scanlines=%d\n", scanlines ? 1 : 0);
 	fprintf(f, "show_fps=%d\n", show_fps ? 1 : 0);
 	fprintf(f, "audio=%d\n", audio ? 1 : 0);
@@ -122,6 +130,7 @@ void Settings::Save() const
 	fprintf(f, "language=%d\n", language);
 	fprintf(f, "last_dir=%s\n", last_dir.c_str());
 	fprintf(f, "last_rom=%s\n", last_rom.c_str());
+	fprintf(f, "last_tab=%d\n", last_tab);
 	bool ok = ferror(f) == 0;
 	ok = fflush(f) == 0 && ok;
 	ok = fsync(fileno(f)) == 0 && ok;
