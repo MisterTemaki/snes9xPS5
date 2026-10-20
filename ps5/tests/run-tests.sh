@@ -420,7 +420,9 @@ kill $OLDPID $SRVPID 2>/dev/null
 stop_helpers
 
 echo "== 16. CRT shaders: CRT Easymode style by default, every shader draws, the choice is kept"
-QUITAT() { echo "$1:$L3R3;$(($1 + 5)):0;$(($1 + 20)):$UP;$(($1 + 22)):0;$(($1 + 30)):$CROSS;$(($1 + 32)):0"; }
+# (Up held for one flip only: under a slow shader (the host's sanitizer build), the pause menu redraws the game through it
+# at every flip, two flips pass the key repeat's 0.4 s and Up would move twice)
+QUITAT() { echo "$1:$L3R3;$(($1 + 5)):0;$(($1 + 20)):$UP;$(($1 + 21)):0;$(($1 + 30)):$CROSS;$(($1 + 31)):0"; }
 SHADERS=("Off" "CRT Easymode style" "crt-lottes" "crt-lottes-fast" "crt-1tap" "crt-2tap" "crt-hyllian-fast" "crt-nobody" "newpixie-mini" "crt-blurPi-sharp" "crt-blurPi-soft" "monoCRT" "ScaleFX + rAA + AA style")
 T=$(newroot t16)
 rm -f "$T/root/snes9x-ps5.ini" # a first start: no settings file yet
