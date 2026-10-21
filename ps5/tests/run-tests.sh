@@ -1443,7 +1443,7 @@ for L in 1 2 3 4; do
 	pad="0:0;20:$TRIANGLE;22:0"; f=30
 	key $DOWN; key $DOWN
 	key $RIGHT; key $RIGHT; key $RIGHT 10 # Border: Off -> Auto -> Default frame -> Off (as group 35 d)
-	for i in $(seq 1 10); do key $DOWN; done
+	for i in $(seq 1 11); do key $DOWN; done
 	# Network shares (as group 31): Add a share, Cross on Server opens the keyboard, Circle closes it; Up to the
 	# share type, Right (NFS: its rows), Circle asks to discard, Up + Cross discards; Connect again; Circle back
 	key $CROSS 20; key $CROSS 20; key $CROSS 20; key $CIRCLE 20
@@ -1460,7 +1460,7 @@ for L in 1 2 3 4; do
 	pad="$pad;$f:$DOWN;$((f + 2)):0;$((f + 8)):$CROSS;$((f + 10)):0"; f=$((f + 20))
 	for i in $(seq 1 3); do pad="$pad;$f:$DOWN;$((f + 2)):0"; f=$((f + 6)); done
 	pad="$pad;$f:$CROSS;$((f + 2)):0;$((f + 20)):$CIRCLE;$((f + 22)):0"; f=$((f + 30))
-	for i in $(seq 1 15); do pad="$pad;$f:$DOWN;$((f + 2)):0"; f=$((f + 6)); done # to Quit Snes9x
+	for i in $(seq 1 16); do pad="$pad;$f:$DOWN;$((f + 2)):0"; f=$((f + 6)); done # to Quit Snes9x
 	pad="$pad;$((f + 4)):$CROSS;$((f + 6)):0"
 	rm -f $T/missing.txt
 	rc=$(SNES9X_HOST_I18N_MISSING=$T/missing.txt run "$T" "$pad" "")
@@ -1495,6 +1495,31 @@ for i in $(seq 1 8); do pad="$pad;$f:$UP;$((f + 2)):0"; f=$((f + 8)); done
 pad="$pad;$f:$RIGHT;$((f + 2)):0;$((f + 20)):$CIRCLE;$((f + 22)):0;$((f + 40)):$OPTIONS;$((f + 42)):0;$((f + 50)):$CROSS;$((f + 52)):0"
 rc=$(run "$T" "$pad" "")
 expect "[ $rc = 0 ] && grep -q '^language=1$' $T/root/snes9x-ps5.ini" "Settings, Language, Right: Spanish (language=1) saved"
+
+echo "== 38. Smooth picture (2.8): bilinear scaling when the picture isn't a whole multiple, shader Off; the Settings row"
+# a. the Settings row (Triangle, Down four times: Shader, Aspect ratio, Border, Scanlines, Smooth picture), Right: on, saved
+T=$(newroot t38a)
+python3 tests/make_test_rom.py "$T/root/roms/test.sfc" ntsc >/dev/null
+pad="0:0;30:$TRIANGLE;32:0"; f=50
+for i in 1 2 3 4; do pad="$pad;$f:$DOWN;$((f + 2)):0"; f=$((f + 8)); done
+pad="$pad;$f:$RIGHT;$((f + 2)):0;$((f + 20)):$CIRCLE;$((f + 22)):0;$((f + 40)):$OPTIONS;$((f + 42)):0;$((f + 50)):$CROSS;$((f + 52)):0"
+rc=$(run "$T" "$pad" "")
+expect "[ $rc = 0 ] && grep -q '^smooth=1$' $T/root/snes9x-ps5.ini" "Settings, Smooth picture, Right: on (smooth=1) saved"
+# b. 4:3 with smooth=1: the picture is filtered (boot.log says so) and still fills 240..1680 in the game's colour, edges included
+T=$(newroot t38b)
+python3 tests/make_test_rom.py "$T/root/roms/test.sfc" ntsc >/dev/null
+echo "smooth=1" >>"$T/root/snes9x-ps5.ini"
+rc=$(run "$T" "0:0;$(QUITAT 100)" "60" "$T/root/roms/test.sfc")
+expect "[ $rc = 0 ] && grep -q '\[video\] picture 256x224, 4:3, smooth -> 240,0 1440x1080' $T/root/logs/boot.log" "4:3 with Smooth picture: boot.log says smooth"
+expect "$CHECK $T/dump/flip00060.ppm 236 540 0 0 0 >/dev/null && $CHECK $T/dump/flip00060.ppm 241 540 255 0 0 >/dev/null && $CHECK $T/dump/flip00060.ppm 1678 1079 255 0 0 >/dev/null && $CHECK $T/dump/flip00060.ppm 1683 540 0 0 0 >/dev/null" "the picture keeps its place and colour up to its edges"
+expect "! grep -q 'runtime error\|AddressSanitizer' $T/out.txt" "no sanitizer reports"
+# c. Integer scale (a whole multiple): sharp as before, even with smooth=1
+T=$(newroot t38c)
+python3 tests/make_test_rom.py "$T/root/roms/test.sfc" ntsc >/dev/null
+printf 'smooth=1\naspect=2\nscanlines=1\n' >>"$T/root/snes9x-ps5.ini"
+rc=$(run "$T" "0:0;$(QUITAT 100)" "60" "$T/root/roms/test.sfc")
+expect "[ $rc = 0 ] && grep -q '\[video\] picture 256x224, Integer[^,]*, scanlines -> 448,92' $T/root/logs/boot.log" "Integer scale: not filtered (a whole multiple)"
+expect "$CHECK $T/dump/flip00060.ppm 960 95 127 0 0 >/dev/null && $CHECK $T/dump/flip00060.ppm 960 93 255 0 0 >/dev/null" "scanlines as before"
 
 echo
 echo "passed $PASS, failed $FAIL  (work dir $WORK)"

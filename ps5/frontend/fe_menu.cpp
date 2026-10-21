@@ -152,6 +152,7 @@ enum SettingRow
 	S_ASPECT,
 	S_BORDER,
 	S_SCANLINES,
+	S_SMOOTH,
 	S_FPS,
 	S_AUDIO,
 	S_TRANSPARENCY,
@@ -277,6 +278,7 @@ std::string SettingLabel(int s)
 		case S_ASPECT: return T("Aspect ratio");
 		case S_BORDER: return T("Border");
 		case S_SCANLINES: return T("Scanlines (shader Off)");
+		case S_SMOOTH: return T("Smooth picture (shader Off)");
 		case S_FPS: return T("Show FPS");
 		case S_AUDIO: return T("Sound");
 		case S_TRANSPARENCY: return T("Transparency");
@@ -299,6 +301,7 @@ std::string SettingValue(int s)
 		case S_ASPECT: return T(ps5video::AspectName(ps5video::Aspect(c.aspect)));
 		case S_BORDER: return T(BorderName(c.border));
 		case S_SCANLINES: return YesNo(c.scanlines);
+		case S_SMOOTH: return YesNo(c.smooth);
 		case S_FPS: return YesNo(c.show_fps);
 		case S_AUDIO: return YesNo(c.audio);
 		case S_TRANSPARENCY: return YesNo(c.transparency);
@@ -326,6 +329,7 @@ void ChangeSetting(int s, int dir)
 		case S_ASPECT: c.aspect = (c.aspect + dir + n) % n; break;
 		case S_BORDER: c.border = (c.border + dir + 3) % 3; break;
 		case S_SCANLINES: c.scanlines = !c.scanlines; break;
+		case S_SMOOTH: c.smooth = !c.smooth; break;
 		case S_FPS: c.show_fps = !c.show_fps; break;
 		case S_AUDIO: c.audio = !c.audio; break;
 		case S_TRANSPARENCY: c.transparency = !c.transparency; break;

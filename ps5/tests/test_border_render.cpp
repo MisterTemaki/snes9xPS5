@@ -344,6 +344,65 @@ static void TestRim()
 	SetBorder(nullptr);
 }
 
+// Smooth picture (2.8): bilinear between source pixels when the scale isn't whole; nearest (sharp) otherwise
+static void TestSmooth()
+{
+	SetBorder(nullptr);
+	// columns alternating black / white (RGB565 0x0000 / 0xffff): the nearest scaler only ever writes those two
+	std::vector<uint16_t> stripes(256 * 224);
+	for (int y = 0; y < 224; y++)
+		for (int x = 0; x < 256; x++)
+			stripes[size_t(y) * 256 + x] = (x & 1) ? 0xffff : 0x0000;
+	auto between = [](uint32_t p) {
+		const int r = p & 0xff;
+		return r > 20 && r < 235;
+	};
+	auto count_between = [&](const Rect& d) {
+		int n = 0;
+		for (int x = d.x; x < d.x + d.w; x++)
+			n += between(Px(x, d.y + d.h / 2)) ? 1 : 0;
+		return n;
+	};
+	// 4:3 on 1080 lines: 1440 x 1080 for 256 x 224, not a whole multiple: sharp without Smooth, blended with it
+	InvalidateSnes();
+	DrawSnes(stripes.data(), 256 * 2, 256, 224, Aspect::Ratio4x3, false, 0, false);
+	const Rect d = LastSnesRect();
+	CHECK(d.w == 1440 && d.h == 1080);
+	CHECK(count_between(d) == 0);
+	DrawSnes(stripes.data(), 256 * 2, 256, 224, Aspect::Ratio4x3, false, 0, true);
+	CHECK(count_between(d) > d.w / 4);
+	// the colours stay the source's: grey in between, never outside black..white, alpha kept
+	for (int x = d.x; x < d.x + d.w; x += 7)
+	{
+		const uint32_t p = Px(x, d.y + d.h / 2);
+		CHECK((p >> 24) == 0xff);
+		CHECK((p & 0xff) == ((p >> 8) & 0xff) && (p & 0xff) == ((p >> 16) & 0xff));
+	}
+	// a flat picture stays flat (no darkening at the edges or anywhere)
+	const std::vector<uint16_t> flat(256 * 224, 0x7bef);
+	DrawSnes(flat.data(), 256 * 2, 256, 224, Aspect::Ratio4x3, false, 0, true);
+	CHECK(Px(d.x, d.y) == Expand565(0x7bef) && Px(d.x + d.w - 1, d.y + d.h - 1) == Expand565(0x7bef) &&
+		  Px(960, 540) == Expand565(0x7bef));
+	// Integer scale (4x): whole multiples, so sharp even with Smooth on
+	DrawSnes(stripes.data(), 256 * 2, 256, 224, Aspect::Integer, false, 0, true);
+	const Rect di = LastSnesRect();
+	CHECK(di.w == 1024 && di.h == 896);
+	CHECK(count_between(di) == 0);
+	// a shader draws as before (Smooth is for the plain scaler only): the same picture with Smooth on and off
+	DrawSnes(stripes.data(), 256 * 2, 256, 224, Aspect::Ratio4x3, false, 3, false);
+	const uint32_t a = Px(960, 540), b = Px(700, 300);
+	DrawSnes(stripes.data(), 256 * 2, 256, 224, Aspect::Ratio4x3, false, 3, true);
+	CHECK(Px(960, 540) == a && Px(700, 300) == b);
+	// hi-res (512 wide) and interlaced (448 lines) pictures go through it too
+	std::vector<uint16_t> hires(512 * 448);
+	for (int y = 0; y < 448; y++)
+		for (int x = 0; x < 512; x++)
+			hires[size_t(y) * 512 + x] = (x & 1) ? 0xffff : 0x0000;
+	DrawSnes(hires.data(), 512 * 2, 512, 448, Aspect::Ratio4x3, false, 0, true);
+	CHECK(count_between(LastSnesRect()) > 0);
+	InvalidateSnes();
+}
+
 int main()
 {
 	TestComputeRect();
@@ -354,6 +413,7 @@ int main()
 	}
 	TestBorderFrames();
 	TestRim();
+	TestSmooth();
 	Shutdown();
 	if (g_fail)
 		return 1;

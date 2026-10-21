@@ -78,12 +78,15 @@ void SetBorder(std::shared_ptr<const Border> border);
 // Stretch fills 'bounds'. src_w / src_h are the picture's size as the core draws it.
 Rect ComputeRect(int src_w, int src_h, Aspect aspect, const Rect& bounds);
 
-// Scales a w x h RGB565 picture (pitch in bytes) into the surface (nearest neighbour); returns the
+// Scales a w x h RGB565 picture (pitch in bytes) into the surface (nearest neighbour, or bilinear: smooth); returns the
 // rectangle that changed so the caller can Present just that. 'scanlines' darkens the last output row of
 // every source line, CRT style, when the scale is 3x or more.
 // shader: a ps5crt::Shader (0 = none: the plain scaler, with 'scanlines'); with one, the CRT shader draws the picture
-// instead (ProsperoCrt.h).
-Rect DrawSnes(const uint16_t* src, int pitch_bytes, int w, int h, Aspect aspect, bool scanlines, int shader = 0);
+// instead (ProsperoCrt.h). smooth (shader 0 only): bilinear filtering instead of nearest neighbour, when a source pixel
+// doesn't cover a whole number of screen pixels both ways (at a whole multiple the picture stays sharp, as in the
+// other ports).
+Rect DrawSnes(const uint16_t* src, int pitch_bytes, int w, int h, Aspect aspect, bool scanlines, int shader = 0,
+	bool smooth = false);
 // The shader's average drawing time since the last call, in ms (0 when no shader drew).
 double TakeShaderMs();
 // The last rectangle DrawSnes covered (to darken it for the menu, or to clear around it).

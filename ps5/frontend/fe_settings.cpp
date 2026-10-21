@@ -62,6 +62,8 @@ void Settings::Load()
 			border_download = atoi(val) != 0;
 		else if (key == "scanlines")
 			scanlines = atoi(val) != 0;
+		else if (key == "smooth")
+			smooth = atoi(val) != 0;
 		else if (key == "show_fps")
 			show_fps = atoi(val) != 0;
 		else if (key == "audio")
@@ -117,6 +119,7 @@ void Settings::Save() const
 	fprintf(f, "border=%d\n", border);
 	fprintf(f, "border_download=%d\n", border_download ? 1 : 0);
 	fprintf(f, "scanlines=%d\n", scanlines ? 1 : 0);
+	fprintf(f, "smooth=%d\n", smooth ? 1 : 0);
 	fprintf(f, "show_fps=%d\n", show_fps ? 1 : 0);
 	fprintf(f, "audio=%d\n", audio ? 1 : 0);
 	fprintf(f, "state_slot=%d\n", state_slot);

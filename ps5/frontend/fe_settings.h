@@ -13,6 +13,7 @@ struct Settings
 	int border = 0; // art around the picture: 0 Off, 1 Auto (the game's own, else default), 2 Default frame
 	bool border_download = true; // Auto also downloads the game's border from The Bezel Project (border_download=0 turns it off)
 	bool scanlines = false; // with the shader Off
+	bool smooth = false; // Smooth picture: bilinear filtering, with the shader Off, when the scale isn't whole
 	bool show_fps = false;
 	bool audio = true;
 	int state_slot = 0; // 0..9

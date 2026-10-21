@@ -461,7 +461,7 @@ bool8 S9xDeinitUpdate(int width, int height)
 {
 	const fe::Settings& cfg = fe::Config();
 	const ps5video::Rect r = ps5video::DrawSnes(GFX.Screen, GFX.Pitch, width, height,
-		ps5video::Aspect(cfg.aspect), cfg.scanlines, cfg.shader);
+		ps5video::Aspect(cfg.aspect), cfg.scanlines, cfg.shader, cfg.smooth);
 	// keep a copy for the pause menu
 	g.last_w = width;
 	g.last_h = height;
@@ -935,7 +935,7 @@ void RedrawLastFrame()
 	const fe::Settings& cfg = fe::Config();
 	ps5video::InvalidateSnes();
 	ps5video::DrawSnes(g.last.data(), g.last_w * 2, g.last_w, g.last_h, ps5video::Aspect(cfg.aspect), cfg.scanlines,
-		cfg.shader);
+		cfg.shader, cfg.smooth);
 }
 
 FrameResult RunFrame()

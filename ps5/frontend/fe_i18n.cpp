@@ -33,6 +33,8 @@ const Entry kTable[] = {
 	{"Off", "No", "Não", "Non", "Aus"},
 	{"Shader", "Shader", "Shader", "Shader", "Shader"},
 	{"Aspect ratio", "Relación de aspecto", "Proporção da tela", "Format d'image", "Seitenverhältnis"},
+	{"Smooth picture (shader Off)", "Imagen suavizada (shader desactivado)", "Imagem suavizada (shader desligado)",
+		"Image lissée (shader désactivé)", "Geglättetes Bild (Shader aus)"},
 	{"Scanlines (shader Off)", "Scanlines (shader desactivado)", "Scanlines (shader desligado)",
 		"Lignes de balayage (shader désactivé)", "Scanlines (Shader aus)"},
 	{"Show FPS", "Mostrar FPS", "Mostrar FPS", "Afficher les FPS", "FPS anzeigen"},

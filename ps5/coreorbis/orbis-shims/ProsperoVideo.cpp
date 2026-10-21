@@ -500,12 +500,50 @@ struct SnesGeom
 	Aspect aspect = Aspect::Count;
 	bool scanlines = false;
 	int shader = 0;
+	bool smooth = false; // asked for (Smooth picture)
+	bool lerp = false;   // and used: bilinear, as the scale isn't whole both ways
 	uint64_t border_gen = 0; // s_border_gen when the surface was last prepared
 	Rect dst = {0, 0, 0, 0};
 	std::vector<uint16_t> xlut; // dst column -> src column
 	std::vector<uint16_t> ylut; // dst row -> src row
 	std::vector<uint8_t> dark; // dst row is a scanline row
+	// bilinear (lerp): for each dst column / row, the left / upper source pixel and the weight of the next one (0..256)
+	std::vector<uint16_t> xs, ys;
+	std::vector<uint16_t> xw, yw;
+	std::vector<uint32_t> row_a, row_b; // two source rows, filtered across, for the current dst row
+	int row_a_src = -1, row_b_src = -1;
 };
+
+// a and b blended, b weighing w/256 (each 8-bit channel; the alpha bytes are both 0xff)
+inline uint32_t Lerp(uint32_t a, uint32_t b, uint32_t w)
+{
+	const uint32_t iw = 256 - w;
+	const uint32_t rb = (((a & 0x00ff00ffu) * iw + (b & 0x00ff00ffu) * w) >> 8) & 0x00ff00ffu;
+	const uint32_t g = (((a & 0x0000ff00u) * iw + (b & 0x0000ff00u) * w) >> 8) & 0x0000ff00u;
+	return 0xff000000u | rb | g;
+}
+
+// the fixed-point source position of each output pixel (centres matched), as a pixel and the next one's weight
+void BilinearMap(int src, int dst, std::vector<uint16_t>& pos, std::vector<uint16_t>& weight)
+{
+	pos.resize(dst);
+	weight.resize(dst);
+	for (int i = 0; i < dst; i++)
+	{
+		// (i + 0.5) * src / dst - 0.5, in 1/256 of a source pixel
+		int64_t f = ((2 * int64_t(i) + 1) * src * 256) / (2 * int64_t(dst)) - 128;
+		if (f < 0)
+			f = 0;
+		int p = int(f >> 8), w = int(f & 255);
+		if (p >= src - 1)
+		{
+			p = src - 1;
+			w = 0;
+		}
+		pos[i] = uint16_t(p);
+		weight[i] = uint16_t(w);
+	}
+}
 SnesGeom s_geom;
 uint32_t* s_rgb565 = nullptr; // RGB565 -> A8B8G8R8 (the surface's format)
 uint32_t* s_argb565 = nullptr; // RGB565 -> A8R8G8B8 (what the CRT shaders read)
@@ -662,7 +700,7 @@ double TakeShaderMs()
 	return ms;
 }
 
-Rect DrawSnes(const uint16_t* src, int pitch_bytes, int w, int h, Aspect aspect, bool scanlines, int shader)
+Rect DrawSnes(const uint16_t* src, int pitch_bytes, int w, int h, Aspect aspect, bool scanlines, int shader, bool smooth)
 {
 	if (shader < 0 || shader >= int(ps5crt::Shader::Count))
 		shader = 0;
@@ -688,7 +726,7 @@ Rect DrawSnes(const uint16_t* src, int pitch_bytes, int w, int h, Aspect aspect,
 
 	bool cleared = false;
 	if (w != s_geom.src_w || h != s_geom.src_h || aspect != s_geom.aspect || scanlines != s_geom.scanlines ||
-		shader != s_geom.shader || border_gen != s_geom.border_gen)
+		shader != s_geom.shader || smooth != s_geom.smooth || border_gen != s_geom.border_gen)
 	{
 		const bool surface_known = s_geom.src_w != 0; // InvalidateSnes() or the first frame: unknown contents
 		const bool border_changed = border_gen != s_geom.border_gen;
@@ -698,6 +736,7 @@ Rect DrawSnes(const uint16_t* src, int pitch_bytes, int w, int h, Aspect aspect,
 		s_geom.src_h = h;
 		s_geom.aspect = aspect;
 		s_geom.scanlines = scanlines;
+		s_geom.smooth = smooth;
 		s_geom.border_gen = border_gen;
 		s_geom.dst = ComputeRect(w, h, aspect, border ? border->window : Rect{0, 0, kWidth, kHeight});
 		const Rect& d = s_geom.dst;
@@ -706,6 +745,16 @@ Rect DrawSnes(const uint16_t* src, int pitch_bytes, int w, int h, Aspect aspect,
 			s_geom.xlut[x] = uint16_t((int64_t(x) * w) / d.w);
 		s_geom.ylut.resize(d.h);
 		s_geom.dark.assign(d.h, 0);
+		// Smooth picture: bilinear only when a source pixel doesn't land on a whole number of screen pixels both ways
+		s_geom.lerp = smooth && shader == 0 && !(d.w % w == 0 && d.h % h == 0);
+		if (s_geom.lerp)
+		{
+			BilinearMap(w, d.w, s_geom.xs, s_geom.xw);
+			BilinearMap(h, d.h, s_geom.ys, s_geom.yw);
+			s_geom.row_a.resize(d.w);
+			s_geom.row_b.resize(d.w);
+		}
+		s_geom.row_a_src = s_geom.row_b_src = -1;
 		const int lines = h > 256 ? h / 2 : h; // scanlines follow the 224/239-line grid, even interlaced
 		for (int y = 0; y < d.h; y++)
 		{
@@ -730,9 +779,9 @@ Rect DrawSnes(const uint16_t* src, int pitch_bytes, int w, int h, Aspect aspect,
 		}
 		const Rect& r = s_geom.dst;
 		// logged when it changes (the pause menu redraws the frame, with InvalidateSnes, every time it draws)
-		static int logged[9] = {-1, -1, -1, -1, -1, -1, -1, -1, -1};
+		static int logged[10] = {-1, -1, -1, -1, -1, -1, -1, -1, -1, -1};
 		const Rect win = border ? border->window : Rect{0, 0, 0, 0};
-		const int now[9] = {w, h, int(aspect), scanlines ? 1 : 0, shader, win.x, win.y, win.w, win.h};
+		const int now[10] = {w, h, int(aspect), scanlines ? 1 : 0, shader, win.x, win.y, win.w, win.h, s_geom.lerp ? 1 : 0};
 		if (memcmp(logged, now, sizeof(now)) != 0)
 		{
 			memcpy(logged, now, sizeof(now));
@@ -743,8 +792,8 @@ Rect DrawSnes(const uint16_t* src, int pitch_bytes, int w, int h, Aspect aspect,
 				OrbisLog("[video] picture %dx%d, %s, shader %s -> %d,%d %dx%d%s", w, h, AspectName(aspect),
 					ps5crt::Name(ps5crt::Shader(shader)), r.x, r.y, r.w, r.h, in_border);
 			else
-				OrbisLog("[video] picture %dx%d, %s%s -> %d,%d %dx%d%s", w, h, AspectName(aspect),
-					scanlines ? ", scanlines" : "", r.x, r.y, r.w, r.h, in_border);
+				OrbisLog("[video] picture %dx%d, %s%s%s -> %d,%d %dx%d%s", w, h, AspectName(aspect),
+					s_geom.lerp ? ", smooth" : "", scanlines ? ", scanlines" : "", r.x, r.y, r.w, r.h, in_border);
 		}
 	}
 
@@ -768,6 +817,56 @@ Rect DrawSnes(const uint16_t* src, int pitch_bytes, int w, int h, Aspect aspect,
 		clock_gettime(CLOCK_MONOTONIC, &t1);
 		s_shader_ms += (t1.tv_sec - t0.tv_sec) * 1e3 + (t1.tv_nsec - t0.tv_nsec) / 1e6;
 		s_shader_frames++;
+		if (border)
+			BlendRim(*border, d);
+		return cleared ? Rect{0, 0, kWidth, kHeight} : d;
+	}
+	if (s_geom.lerp)
+	{
+		// bilinear: each source row filtered across once (kept while the next output rows use it), then the two rows
+		// around each output row blended; the scanline rows darkened as below
+		auto filtered = [&](int sy, std::vector<uint32_t>& row, int& row_src) {
+			if (row_src == sy)
+				return;
+			const uint16_t* in = reinterpret_cast<const uint16_t*>(src8 + size_t(sy) * pitch_bytes);
+			const uint16_t* xs = s_geom.xs.data();
+			const uint16_t* xw = s_geom.xw.data();
+			for (int x = 0; x < d.w; x++)
+			{
+				const int sx = xs[x];
+				const uint32_t a = s_rgb565[in[sx]];
+				row[x] = xw[x] ? Lerp(a, s_rgb565[in[sx + 1]], xw[x]) : a;
+			}
+			row_src = sy;
+		};
+		for (int y = 0; y < d.h; y++)
+		{
+			uint32_t* out = g.surface + size_t(d.y + y) * kWidth + d.x;
+			const int sy = s_geom.ys[y];
+			const uint32_t wy = s_geom.yw[y];
+			// the upper row in row_a, the lower in row_b (swapped rather than filtered again when moving down)
+			if (s_geom.row_a_src != sy && s_geom.row_b_src == sy)
+			{
+				std::swap(s_geom.row_a, s_geom.row_b);
+				std::swap(s_geom.row_a_src, s_geom.row_b_src);
+			}
+			filtered(sy, s_geom.row_a, s_geom.row_a_src);
+			const uint32_t* a = s_geom.row_a.data();
+			if (wy == 0)
+				memcpy(out, a, size_t(d.w) * 4);
+			else
+			{
+				filtered(sy + 1, s_geom.row_b, s_geom.row_b_src);
+				const uint32_t* b = s_geom.row_b.data();
+				for (int x = 0; x < d.w; x++)
+					out[x] = Lerp(a[x], b[x], wy);
+			}
+			if (s_geom.dark[y])
+				for (int x = 0; x < d.w; x++)
+					out[x] = ((out[x] >> 1) & 0x007f7f7fu) | 0xff000000u;
+		}
+		// the rows depend on this frame: filtered again next time
+		s_geom.row_a_src = s_geom.row_b_src = -1;
 		if (border)
 			BlendRim(*border, d);
 		return cleared ? Rect{0, 0, kWidth, kHeight} : d;

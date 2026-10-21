@@ -21,7 +21,7 @@
 PS5_PAYLOAD_SDK ?= /opt/ps5-payload-sdk
 PS5_HOST ?= ps5
 PS5_PORT ?= 9021
-VERSION ?= 2.7
+VERSION ?= 2.8
 TITLE_ID ?= PPSA99922
 # where the app looks for its updates (Settings, Updates): this repository's GitHub releases
 UPDATE_REPO ?= MisterTemaki/snes9xPS5

@@ -17,9 +17,10 @@ own icon and background. The PS5 layer follows the layout of PS5SX2 (the PCSX2 p
 Everything outside `ps5/` is the original Snes9x source, unchanged, apart from this README (the original one is
 [README-Snes9x.md](README-Snes9x.md)).
 
-> **Status (2.7):** 2.6 runs on the console: the app opens from its icon, the shelf, the controller, video and sound
-> work, and games play. 2.7's new parts (network shares, shelf tabs, borders) have **not been run on a PS5 yet**. It
-> builds with the ps5-payload-dev SDK and passes 379 host tests (one, the sound-queue timing, depends on the test
+> **Status (2.8):** 2.6 runs on the console: the app opens from its icon, the shelf, the controller, video and sound
+> work, and games play. 2.7's new parts (network shares, shelf tabs, borders) and 2.8's Smooth picture have **not been
+> run on a PS5 yet**. It
+> builds with the ps5-payload-dev SDK and passes 385 host tests (one, the sound-queue timing, depends on the test
 > machine's load), which run the same code on Linux with the PS5 calls simulated, plus the network-share unit and
 > loopback tests. If something fails, turn on Settings, Debug logs: the logs in `/data/snes9x/logs/` say where.
 
@@ -50,9 +51,15 @@ written to PS5SX2's folders (`/data/PCSX2`, `/data/homebrew/PPSA99203`).
 
 ## Versions
 
-Every release carries its version in the file name: `Snes9xPS5-v2.7.elf` and `snes9x-ps5-v2.7-src.zip`
+Every release carries its version in the file name: `Snes9xPS5-v2.8.elf` and `snes9x-ps5-v2.8-src.zip`
 (`make dist`). When updating, replace the old ELF with the new one in your autoload or Payload Manager. In this
 README, "`Snes9xPS5.elf`" always means the current release's ELF.
+
+**2.8:** **Smooth picture** (Settings, and the pause menu: "Smooth picture (shader Off)"; `smooth=1` in the settings
+file), asked for in [#4](https://github.com/MisterTemaki/snes9xPS5/issues/4): with the shader Off, the picture is
+scaled with bilinear filtering instead of sharp pixels, as in FBNeo, Genesis Plus GX and FCEUmm PS5. It applies when
+the picture isn't a whole multiple of the game's (4:3, 8:7, 16:9); Integer scale stays sharp. It works with the
+Scanlines option and inside borders.
 
 **2.7:** **Games on network shares (SMB and NFS)**, **shelf tabs** (Internal, USB, Network), **borders around the
 picture** (per game, from The Bezel Project, or a built-in frame), **covers for more games** (fan translations and
@@ -168,10 +175,10 @@ notification of the app to Spanish (Español), Portuguese (Brazil) (Português (
 
 1. **Send `Snes9xPS5.elf`** with PS5 Payload Manager, or from a PC on the same network:
    ```sh
-   nc -q0 PS5_IP 9021 < Snes9xPS5-v2.7.elf
+   nc -q0 PS5_IP 9021 < Snes9xPS5-v2.8.elf
    ```
    It installs the app in `/data/homebrew/PPSA99922/` (`eboot.bin`, `sce_module/libc.prx`, `param.json`, the
-   icon and the backgrounds), shows **"Snes9x PS5 2.7 installed. Open it from the Snes9x PS5 icon on the home
+   icon and the backgrounds), shows **"Snes9x PS5 2.8 installed. Open it from the Snes9x PS5 icon on the home
    screen."** and stays running as the helper.
 2. **Open the Snes9x PS5 icon.** The game shelf appears and the controller works.
 3. **Copy your ROMs** (`.sfc .smc .swc .fig .bs .st .zip .gz`) to `/data/snes9x/roms`, over FTP for example, or
@@ -386,7 +393,8 @@ and only while a game is running (the shelf is drawn without them).
 1. **In a game:** press **L3 + R3**; **Shader** is the row after "State slot". **Left / Right** (or **Cross**) go
    through the list, and the paused game behind the menu shows each one at once. **Circle** goes back to the game.
 2. **On the shelf:** **Triangle** opens the settings; **Shader** is the first row.
-3. The choice is saved and used for every game. **Off** gives the plain picture, with the "Scanlines" option.
+3. The choice is saved and used for every game. **Off** gives the plain picture, with the "Scanlines" and "Smooth
+   picture" options.
 4. It is kept in `/data/snes9x/snes9x-ps5.ini` as `shader=<number>` (the numbers below): you can also set it there
    by hand.
 
@@ -505,7 +513,8 @@ Use the server's IP address. Inside a user name, password or folder, write `& = 
 - 1920x1080 output through `libSceVideoOut`, flipping on vsync. With little video memory it falls back to
   1280x720.
 - Aspect ratio: **4:3** (default), **8:7** (square pixels), **integer scale** (4x, 1024x896) or **16:9**.
-- A CRT shader on top (CRT Easymode style by default, see below); with the shader Off, optional plain scanlines.
+- A CRT shader on top (CRT Easymode style by default, see below); with the shader Off, optional plain scanlines and
+  optional smoothing (bilinear filtering, Smooth picture; off by default, sharp pixels).
 - Sound through `libSceAudioOut` at 48 kHz, on its own thread.
   - Snes9x's *dynamic rate control* adjusts the sound by up to 0.5% to follow the TV's 60 Hz without crackles.
   - PAL (50 Hz) games follow the audio clock.
