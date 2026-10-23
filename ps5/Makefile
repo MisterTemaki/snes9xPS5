@@ -21,7 +21,7 @@
 PS5_PAYLOAD_SDK ?= /opt/ps5-payload-sdk
 PS5_HOST ?= ps5
 PS5_PORT ?= 9021
-VERSION ?= 2.8
+VERSION ?= 2.9
 TITLE_ID ?= PPSA99922
 # where the app looks for its updates (Settings, Updates): this repository's GitHub releases
 UPDATE_REPO ?= MisterTemaki/snes9xPS5
@@ -85,7 +85,7 @@ EMU_SRC := coreorbis/main-boot.cpp \
 	coreorbis/orbis-shims/ProsperoCrash.cpp coreorbis/orbis-shims/ProsperoCrt.cpp coreorbis/orbis-shims/ProsperoUpdate.cpp \
 	frontend/fe_emu.cpp frontend/fe_menu.cpp frontend/fe_netscreen.cpp frontend/fe_osk.cpp frontend/fe_ui.cpp frontend/fe_settings.cpp frontend/fe_i18n.cpp frontend/fe_text.cpp \
 	frontend/fe_games.cpp frontend/fe_http.cpp frontend/fe_covers.cpp frontend/fe_shelf.cpp frontend/fe_border.cpp frontend/fe_borderimg.cpp frontend/fe_borderfetch.cpp \
-	frontend/fe_prefetch.cpp frontend/fe_coverfetch.cpp frontend/fe_coverworker.cpp $(NETFS_SRC)
+	frontend/fe_prefetch.cpp frontend/fe_coverfetch.cpp frontend/fe_coverworker.cpp frontend/fe_7z.cpp $(NETFS_SRC)
 # the payloads: the helper, and the installer (= helper + install)
 # (the helper also downloads the covers in the background: fe_coverworker.cpp, with the app's HTTPS code)
 HELPER_SRC := coreorbis/orbis-shims/orbis_paths.cpp coreorbis/orbis-shims/ProsperoNotify.cpp \
@@ -100,9 +100,20 @@ INSTALLER_SRC := installer/installer_main.cpp $(HELPER_SRC) coreorbis/orbis-shim
 
 ZLIB_SRC := $(wildcard $(ZLIB)/*.c)
 
+# .7z archives (frontend/fe_7z.cpp): the LZMA SDK's 7z decoder (public domain, third_party/lzma7z/README.snes9xps5),
+# single-threaded, no AES (an archive with a password is refused), no assembler. Every external symbol it defines is
+# renamed s9x7z_* (s9x7z_prefix.h, forced into each of its files and included first by fe_7z.cpp), so it can't meet
+# another LZMA SDK copy in the same link.
+LZMA7Z := third_party/lzma7z
+LZMA7Z_SRC := $(addprefix $(LZMA7Z)/,7zAlloc.c 7zArcIn.c 7zBuf.c 7zCrc.c 7zCrcOpt.c 7zDec.c 7zStream.c Bcj2.c Bra.c \
+	Bra86.c BraIA64.c CpuArch.c Delta.c Lzma2Dec.c LzmaDec.c Ppmd7.c Ppmd7Dec.c)
+LZMA7Z_FLAGS := -DZ7_ST -DZ7_PPMD_SUPPORT -DZ7_EXTRACT_ONLY -I$(LZMA7Z) -include $(LZMA7Z)/s9x7z_prefix.h
+%/port/frontend/fe_7z.o: EXTRA_FLAGS = -I$(LZMA7Z)
+%/port/frontend/fe_7z.o: $(wildcard $(LZMA7Z)/*.h)
+
 INCS := -Inetfs -I$(ROOT) -I$(ROOT)/apu -I$(ROOT)/apu/bapu -I$(ROOT)/unzip -I$(ZLIB) \
 	-Icoreorbis/include-orbis -Icoreorbis/orbis-shims -Ifrontend
-DEFS := -DRIGHTSHIFT_IS_SAR -DZLIB -DUNZIP_SUPPORT -DSNES9X_PS5_VERSION='"$(VERSION)"' -DSNES9X_TITLE_ID='"$(TITLE_ID)"' -DSNES9X_UPDATE_REPO='"$(UPDATE_REPO)"'
+DEFS := -DRIGHTSHIFT_IS_SAR -DZLIB -DUNZIP_SUPPORT -DSEVENZIP_SUPPORT -DSNES9X_PS5_VERSION='"$(VERSION)"' -DSNES9X_TITLE_ID='"$(TITLE_ID)"' -DSNES9X_UPDATE_REPO='"$(UPDATE_REPO)"'
 WARN := -Wall -Wno-unused-function -Wno-unused-variable -Wno-unused-but-set-variable -Wno-missing-braces \
 	-Wno-char-subscripts -Wno-deprecated-declarations -Wno-sign-compare -Wno-unused-value \
 	-Wno-parentheses -Wno-unknown-warning-option
@@ -149,6 +160,7 @@ PS5_INSTALLER_OBJ := $(patsubst %.cpp,$(PS5_OUT)/port/%.o,$(INSTALLER_SRC)) $(PS
 PS5_ZLIB_OBJ := $(patsubst $(ZLIB)/%.c,$(PS5_OUT)/zlib/%.o,$(ZLIB_SRC))
 PS5_LIBSMB2_OBJ := $(patsubst $(LIBSMB2)/%.c,$(PS5_OUT)/libsmb2/%.o,$(LIBSMB2_SRC))
 PS5_LIBNFS_OBJ := $(patsubst $(LIBNFS)/%.c,$(PS5_OUT)/libnfs/%.o,$(LIBNFS_SRC))
+PS5_LZMA7Z_OBJ := $(patsubst $(LZMA7Z)/%.c,$(PS5_OUT)/lzma7z/%.o,$(LZMA7Z_SRC))
 
 ps5: $(PS5_OUT)/Snes9xPS5.elf
 
@@ -183,6 +195,10 @@ $(PS5_OUT)/libsmb2/%.o: $(LIBSMB2)/%.c
 $(PS5_OUT)/libnfs/%.o: $(LIBNFS)/%.c
 	@mkdir -p $(dir $@)
 	$(PS5_CC) -O2 -fPIC -march=znver2 $(LIBNFS_FLAGS) -w -c -o $@ $<
+
+$(PS5_OUT)/lzma7z/%.o: $(LZMA7Z)/%.c $(wildcard $(LZMA7Z)/*.h)
+	@mkdir -p $(dir $@)
+	$(PS5_CC) -O2 -fPIC -march=znver2 $(LZMA7Z_FLAGS) -w -c -o $@ $<
 
 # 1. the helper payload (built into the app, which sends it to the ELF loader when no helper answers)
 $(PS5_OUT)/Snes9xPS5-helper.elf: $(PS5_HELPER_OBJ)
@@ -275,7 +291,7 @@ build/app/app_crt.o build/app/app_cpp_runtime.o: build/app/%.o: $(NATIVE)/toolin
 		-c -o $@ $<
 
 EBOOT_OBJS = build/app/app_crt.o build/app/app_cpp_runtime.o $(PS5_CORE_OBJ) $(PS5_EMU_OBJ) $(PS5_ZLIB_OBJ) \
-	$(PS5_LIBSMB2_OBJ) $(PS5_LIBNFS_OBJ) $(PS5_OUT)/helper_data.o
+	$(PS5_LIBSMB2_OBJ) $(PS5_LIBNFS_OBJ) $(PS5_LZMA7Z_OBJ) $(PS5_OUT)/helper_data.o
 build/app/snes9x-pie.elf: $(EBOOT_OBJS) $(NATIVE)/tooling/native/ps5-pie.ld $(NATIVE)/tooling/native/ehframe.ld \
 		$(NATIVE)/tooling/native/app-symbols.map $(NATIVE)/tooling/native/localize.map
 	$(LLD) -m elf_x86_64 -pie -z max-page-size=0x4000 --hash-style=gnu \
@@ -329,6 +345,7 @@ HOST_INSTALLER_OBJ := $(patsubst %.cpp,$(HOST_OUT)/port/%.o,$(INSTALLER_SRC) hos
 HOST_ZLIB_OBJ := $(patsubst $(ZLIB)/%.c,$(HOST_OUT)/zlib/%.o,$(ZLIB_SRC))
 HOST_LIBSMB2_OBJ := $(patsubst $(LIBSMB2)/%.c,$(HOST_OUT)/libsmb2/%.o,$(LIBSMB2_SRC))
 HOST_LIBNFS_OBJ := $(patsubst $(LIBNFS)/%.c,$(HOST_OUT)/libnfs/%.o,$(LIBNFS_SRC))
+HOST_LZMA7Z_OBJ := $(patsubst $(LZMA7Z)/%.c,$(HOST_OUT)/lzma7z/%.o,$(LZMA7Z_SRC))
 
 host: $(HOST_OUT)/snes9x-ps5-host $(HOST_OUT)/snes9x-ps5-installer $(HOST_OUT)/snes9x-ps5-helper
 
@@ -364,6 +381,11 @@ $(HOST_OUT)/libnfs/%.o: $(LIBNFS)/%.c
 	@mkdir -p $(dir $@)
 	$(HOST_CC) -O2 -g1 $(LIBNFS_FLAGS) -w -c -o $@ $<
 
+# (the SDK reads unaligned words on x86 on purpose, as the core does)
+$(HOST_OUT)/lzma7z/%.o: $(LZMA7Z)/%.c $(wildcard $(LZMA7Z)/*.h)
+	@mkdir -p $(dir $@)
+	$(HOST_CC) $(HOST_OPT) $(HOST_SAN) -fno-sanitize=alignment $(LZMA7Z_FLAGS) -w -c -o $@ $<
+
 # The host installer carries a stand-in app folder (tests/fake-eboot.bin, tests/fake-libc.prx + the real
 # param/icon/pic); the host app carries the host helper, which it hands to a fake ELF loader in the tests.
 HOST_APP_DEFS = -DAPP_EBOOT='"$(abspath tests/fake-eboot.bin)"' -DAPP_PARAM='"$(abspath app/sce_sys/param.json)"' \
@@ -386,14 +408,15 @@ $(HOST_OUT)/snes9x-ps5-helper: $(HOST_HELPER_OBJ)
 $(HOST_OUT)/snes9x-ps5-installer: $(HOST_INSTALLER_OBJ) $(HOST_OUT)/install_data.o
 	$(HOST_CXX) $(HOST_SAN) -o $@ $^ -lpthread
 
-$(HOST_OUT)/snes9x-ps5-host: $(HOST_CORE_OBJ) $(HOST_EMU_OBJ) $(HOST_ZLIB_OBJ) $(HOST_LIBSMB2_OBJ) $(HOST_LIBNFS_OBJ) $(HOST_OUT)/helper_data.o
+$(HOST_OUT)/snes9x-ps5-host: $(HOST_CORE_OBJ) $(HOST_EMU_OBJ) $(HOST_ZLIB_OBJ) $(HOST_LIBSMB2_OBJ) $(HOST_LIBNFS_OBJ) $(HOST_LZMA7Z_OBJ) $(HOST_OUT)/helper_data.o
 	$(HOST_CXX) $(HOST_SAN) -o $@ $^ $(NETFS_WRAP_GCC) -lpthread
 
 # netfs's own test: the netfs code, the stub backends and an in-memory share, linked with the same --wrap list
 HOST_NETFS_TEST_OBJ := $(patsubst %.cpp,$(HOST_OUT)/port/%.o,$(NETFS_CORE_SRC) netfs/backend_smb_stub.cpp netfs/backend_nfs_stub.cpp \
 	tests/test_netfs.cpp)
-# minizip and zlib go into it too: the test opens a .zip and a .gz on the fake share
-HOST_NETFS_TEST_EXTRA := $(HOST_OUT)/core/unzip/unzip.o $(HOST_OUT)/core/unzip/ioapi.o $(HOST_ZLIB_OBJ)
+# minizip, zlib and the 7z reader go into it too: the test opens a .zip, a .gz and a .7z on the fake share
+HOST_NETFS_TEST_EXTRA := $(HOST_OUT)/core/unzip/unzip.o $(HOST_OUT)/core/unzip/ioapi.o $(HOST_ZLIB_OBJ) \
+	$(HOST_OUT)/port/frontend/fe_7z.o $(HOST_LZMA7Z_OBJ)
 $(HOST_OUT)/test-netfs: $(HOST_NETFS_TEST_OBJ) $(HOST_NETFS_TEST_EXTRA) tests/netfs_fake.h
 	$(HOST_CXX) $(HOST_SAN) -o $@ $(HOST_NETFS_TEST_OBJ) $(HOST_NETFS_TEST_EXTRA) $(NETFS_WRAP_GCC) -lpthread
 
@@ -475,6 +498,19 @@ test-download-worker: $(DOWNLOAD_WORKER_TEST)
 
 test: test-download-worker
 .PHONY: test-download-worker
+
+# the 7z reader (frontend/fe_7z.cpp) on the archives in tests/7z (made by tests/make_7z_fixtures.py); test-netfs reads
+# one of them from its in-memory share
+SEVENZIP_TEST := $(HOST_OUT)/test-7z
+SEVENZIP_TEST_OBJ := $(patsubst %.cpp,$(HOST_OUT)/port/%.o,tests/test_7z.cpp frontend/fe_7z.cpp)
+$(SEVENZIP_TEST): $(SEVENZIP_TEST_OBJ) $(HOST_LZMA7Z_OBJ)
+	$(HOST_CXX) $(HOST_SAN) -o $@ $^ -lpthread
+
+test-7z: $(SEVENZIP_TEST)
+	ASAN_OPTIONS=detect_leaks=1 $(SEVENZIP_TEST) tests/7z
+
+test: test-7z
+.PHONY: test-7z
 
 clean:
 	rm -rf build

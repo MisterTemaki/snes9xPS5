@@ -22,7 +22,7 @@ struct CMemory
 	{ MAX_ROM_SIZE = 0x1000000 };
 
 	enum file_formats
-	{ FILE_ZIP, FILE_JMA, FILE_DEFAULT };
+	{ FILE_ZIP, FILE_JMA, FILE_7Z, FILE_DEFAULT };
 
 	enum
 	{ NOPE, YEAH, BIGFIRST, SMALLFIRST };
@@ -210,6 +210,10 @@ inline bool S9xInterlaceField()
 
 void S9xAutoSaveSRAM (void);
 bool8 LoadZip(const char *, uint32 *, uint8 *, uint32);
+#ifdef SEVENZIP_SUPPORT
+// a .7z: its ROM unpacked into buffer, copier header removed (the port supplies it: ps5/frontend/fe_emu.cpp)
+bool8 Load7z(const char *, uint32 *, uint8 *, uint32);
+#endif
 
 enum s9xwrap_t
 {

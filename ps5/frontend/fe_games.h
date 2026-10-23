@@ -2,7 +2,7 @@
 //
 // SNES ROMs carry no serial (PS5SX2 names discs by theirs), so a game is identified the way libretro does:
 //   1. its file name, when it is already a No-Intro name ("Super Mario World (USA).sfc");
-//   2. otherwise the CRC32 of the ROM (without a 512-byte copier header; for a .zip, the CRC its directory
+//   2. otherwise the CRC32 of the ROM (without a 512-byte copier header; for a .zip or a .7z, the CRC the archive
 //      stores), looked up in the No-Intro table built into the ELF (data/snes-nointro.tsv, 4268 games);
 //   3. otherwise the file name, loosely: "super mario world.smc" -> the best No-Intro entry with that title
 //      (USA first, then World, Europe, Japan).
@@ -28,7 +28,7 @@ struct GameInfo
 {
 	std::string path; // full path
 	std::string file_base; // file name without extension
-	std::string ext; // ".sfc", ".zip"... lower case
+	std::string ext; // ".sfc", ".zip", ".7z"... lower case
 	std::string nointro; // official name, "" until known (or unknown)
 	std::string title; // what the shelf shows
 	std::string region; // "USA", "Europe"... from the name's tags
@@ -72,10 +72,10 @@ GameInfo DescribeGame(const std::string& path, uint32_t rom_crc);
 // The folders to look for ROMs in: OrbisRomRoots() plus the network shares that are connected (in memory, no I/O).
 std::vector<std::string> RomRoots();
 
-// The internal header of a ROM file (a .zip or .gz is read through); false if there is none to find.
+// The internal header of a ROM file (a .zip, .7z or .gz is read through); false if there is none to find.
 bool ReadRomHeader(const std::string& path, romheader::Info* info);
 
-// The headerless CRC32 of a ROM file (or the CRC a .zip stores for its ROM); false if it can't be read.
+// The headerless CRC32 of a ROM file (or the CRC a .zip or .7z stores for its ROM); false if it can't be read.
 bool RomCrc32(const std::string& path, uint32_t* crc, const std::atomic<bool>* cancel = nullptr);
 
 // Names the games on shares by their ROM's CRC, in the background. A scan does not read network ROMs (it would

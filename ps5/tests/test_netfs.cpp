@@ -18,6 +18,7 @@
 #include <thread>
 
 #include "ProsperoCrash.h"
+#include "fe_7z.h"
 #include "netfs.h"
 #include "netfs_cache.h"
 #include "netfs_fake.h"
@@ -463,6 +464,18 @@ static void TestArchives()
 	}
 	unlink(tmpl);
 	rig.srv[0]->Put("game.gz", gz);
+	// a .7z (one of the 7z reader's own test archives, read here from the source tree: tests/7z)
+	std::string sz;
+	if (FILE* r = fopen("tests/7z/solid.7z", "rb"))
+	{
+		char b[4096];
+		size_t n;
+		while ((n = fread(b, 1, sizeof b, r)) > 0)
+			sz.append(b, n);
+		fclose(r);
+	}
+	CHECK(!sz.empty(), "tests/7z/solid.7z is there to put on the share");
+	rig.srv[0]->Put("game.7z", sz);
 	rig.Mount();
 
 	for (int variant = 0; variant < 2; variant++)
@@ -497,6 +510,20 @@ static void TestArchives()
 	if (g)
 		gzclose(g);
 	CHECK(g != nullptr && out == rom, "gzopen/gzread of a .gz on the share is byte-identical");
+
+	// the 7z reader reads through the same libc calls: the ROM of a solid .7z on the share, as from the local copy
+	std::vector<uint8_t> local, shared;
+	std::string lname, sname;
+	fe::sevenzip::Error lerr, serr;
+	const uint64_t before = rig.srv[0]->bytes_read.load();
+	const bool lok = fe::sevenzip::ExtractRom("tests/7z/solid.7z", 0x1000200, &local, &lerr, &lname);
+	const bool sok = fe::sevenzip::ExtractRom(std::string(kBase) + "/game.7z", 0x1000200, &shared, &serr, &sname);
+	CHECK(lok && sok && !shared.empty() && shared == local && sname == lname && sname == "Game (USA).sfc",
+		"a .7z on the share: its ROM unpacks as from the local copy");
+	CHECK(rig.srv[0]->bytes_read.load() > before, "and it was read from the share");
+	std::vector<fe::sevenzip::Entry> entries;
+	CHECK(!fe::sevenzip::List(std::string(kBase) + "/missing.7z", &entries, &serr) && serr == fe::sevenzip::Error::Open,
+		"a .7z missing from the share: can't be read");
 }
 
 // ---------------------------------------------------------------- failures

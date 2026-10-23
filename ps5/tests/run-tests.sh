@@ -1521,6 +1521,92 @@ rc=$(run "$T" "0:0;$(QUITAT 100)" "60" "$T/root/roms/test.sfc")
 expect "[ $rc = 0 ] && grep -q '\[video\] picture 256x224, Integer[^,]*, scanlines -> 448,92' $T/root/logs/boot.log" "Integer scale: not filtered (a whole multiple)"
 expect "$CHECK $T/dump/flip00060.ppm 960 95 127 0 0 >/dev/null && $CHECK $T/dump/flip00060.ppm 960 93 255 0 0 >/dev/null" "scanlines as before"
 
+echo "== 39. 7-Zip archives (2.9): a .7z is named by the CRC it stores and covered like its .zip twin, plays the same picture, finds its cheats, works on a share; a CD image, a password and a cut archive are refused with the reason"
+# (tests/make_7z.py packs with the standard library; the 7z reader's own test, test-7z, reads py7zr's archives)
+# a. the shelf: one ROM (forged to Donkey Kong Country (USA) (Rev 2)) as a/twin.7z and as b/twin.zip; a ROM behind a
+#    512-byte copier header in hdr.7z (forged to Chrono Trigger (USA)). Shelf order: Chrono Trigger, DKC (7z), DKC (zip).
+T=$(newroot t39a)
+T39A=$T
+SRV=$T/srv/Named_Boxarts; mkdir -p "$SRV" "$T/root/roms/a" "$T/root/roms/b"
+python3 - "$SRV" <<'PY'
+import sys
+from PIL import Image
+Image.new('RGB', (512, 357), (0, 255, 0)).save(sys.argv[1] + '/Donkey Kong Country (USA) (Rev 2).png')
+PY
+python3 tests/make_test_rom.py "$T/dkc.sfc" ntsc >/dev/null
+python3 tests/forge_crc.py "$T/dkc.sfc" $(grep -P "\tDonkey Kong Country \(USA\) \(Rev 2\)$" frontend/data/snes-nointro.tsv | cut -f1) >/dev/null
+python3 tests/make_7z.py "$T/root/roms/a/twin.7z" "dkc.sfc=$T/dkc.sfc"
+python3 -c "import zipfile,sys; z=zipfile.ZipFile(sys.argv[1],'w',zipfile.ZIP_DEFLATED); z.write(sys.argv[2],'dkc.sfc'); z.close()" "$T/root/roms/b/twin.zip" "$T/dkc.sfc"
+python3 tests/make_test_rom.py "$T/ct.sfc" ntsc >/dev/null
+head -c 1020 /dev/zero >>"$T/ct.sfc" # forged below to 33 KiB: with the header, 512 past a whole KiB
+python3 tests/forge_crc.py "$T/ct.sfc" $(grep -P "\tChrono Trigger \(USA\)$" frontend/data/snes-nointro.tsv | cut -f1) >/dev/null
+(head -c 512 /dev/zero; cat "$T/ct.sfc") >"$T/ct.smc"
+python3 tests/make_7z.py "$T/root/roms/hdr.7z" "readme.txt=$PWD/tests/make_7z.py" "ct.smc=$T/ct.smc"
+PORT=18082
+(cd "$T/srv" && exec python3 -m http.server $PORT --bind 127.0.0.1 >/dev/null 2>&1) &
+SRVPID=$!
+sleep 1
+RIGHT=20
+rc=$(OFFLINE= COVER_URL="http://127.0.0.1:$PORT/Named_Boxarts/\${name}.png" SNES9X_HOST_REALTIME=1 run "$T" \
+	"0:0;180:$RIGHT;182:0;230:$RIGHT;232:0;280:$OPTIONS;282:0;290:$CROSS;292:0" "220,270")
+kill $SRVPID 2>/dev/null
+expect "[ $rc = 0 ]" "exit code 0 (got $rc)"
+expect "grep -q 'a/twin.7z -> \"Donkey Kong Country (USA) (Rev 2)\" (by CRC)' $T/root/logs/boot.log && grep -q 'b/twin.zip -> \"Donkey Kong Country (USA) (Rev 2)\" (by CRC)' $T/root/logs/boot.log" "the .7z is named by its stored CRC, as its .zip twin"
+c7=$(grep -F "$T/root/roms/a/twin.7z" "$T/root/covers/crc-cache.txt" | cut -f4); cz=$(grep -F "$T/root/roms/b/twin.zip" "$T/root/covers/crc-cache.txt" | cut -f4)
+expect "[ -n '$c7' ] && [ '$c7' = '$cz' ]" "the CRC cache keeps the same CRC for both ($c7 / $cz)"
+expect "grep -q 'hdr.7z -> \"Chrono Trigger (USA)\" (by CRC)' $T/root/logs/boot.log" "a ROM with a copier header in a .7z: named by the CRC of its data (header left out)"
+expect "[ -f '$T/root/covers/Donkey Kong Country (USA) (Rev 2).png' ]" "the cover was downloaded"
+expect "$CHECK $T/dump/flip00220.ppm 960 420 0 255 0 >/dev/null && $CHECK $T/dump/flip00270.ppm 960 420 0 255 0 >/dev/null" "the .7z and the .zip show the same (green) cover"
+expect "! grep -q 'runtime error\|AddressSanitizer' $T/out.txt" "no sanitizer reports"
+# b. played: EarthBound.7z and its EarthBound.zip twin give the same picture; the .7z finds EarthBound (USA).cht
+pic() { # dir archive -> plays it, flip 90 dumped
+	mkdir -p "$1/root/cheats"
+	printf 'cheats = 2\ncheat0_desc = "Infinite Health"\ncheat0_code = "8251-57D6"\ncheat0_enable = false\ncheat1_desc = "Raw Action Replay"\ncheat1_code = "7E0DBE63"\ncheat1_enable = false\n' >"$1/root/cheats/EarthBound (USA).cht"
+	run "$1" "0:0;$(QUITAT 120)" "90" "$2"
+}
+T=$(newroot t39b)
+python3 tests/make_test_rom.py "$T/eb.sfc" ntsc >/dev/null
+python3 tests/make_7z.py "$T/root/roms/EarthBound.7z" "EarthBound.sfc=$T/eb.sfc"
+rc=$(pic "$T" "$T/root/roms/EarthBound.7z")
+T2=$(newroot t39b2)
+python3 -c "import zipfile,sys; z=zipfile.ZipFile(sys.argv[1],'w',zipfile.ZIP_DEFLATED); z.write(sys.argv[2],'EarthBound.sfc'); z.close()" "$T2/root/roms/EarthBound.zip" "$T/eb.sfc"
+rc2=$(pic "$T2" "$T2/root/roms/EarthBound.zip")
+expect "[ $rc = 0 ] && [ $rc2 = 0 ]" "both launched and quit (got $rc, $rc2)"
+expect "grep -q '\[emu\] 7z .*EarthBound.7z: EarthBound.sfc, 32768 bytes' $T/root/logs/boot.log" "the ROM was unpacked from the .7z"
+expect "$CHECK $T/dump/flip00090.ppm 960 540 255 0 0 >/dev/null && cmp -s $T/dump/flip00090.ppm $T2/dump/flip00090.ppm" "the game runs: the same picture as the .zip's"
+expect "grep -q 'Loaded 2 cheats from EarthBound (USA).cht' $T/root/logs/boot.log" "EarthBound.7z finds EarthBound (USA).cht"
+expect "! grep -q 'runtime error\|AddressSanitizer' $T/out.txt $T2/out.txt" "no sanitizer reports"
+# c. refused, the reason in the notification and the message (Spanish for the password, to see it translated)
+refuse() { # dir archive -> exit code; the message is dismissed with Cross, then the shelf quits
+	run "$1" "0:0;60:$CROSS;62:0;100:$OPTIONS;102:0;110:$CROSS;112:0" "50" "$2"
+}
+T=$(newroot t39c)
+printf 'FILE "Game.bin" BINARY\n  TRACK 01 MODE1/2352\n    INDEX 01 00:00:00\n' >"$T/game.cue"
+python3 tests/make_7z.py "$T/root/roms/Disc Game.7z" "Game.cue=$T/game.cue" "Game.bin=$T39A/dkc.sfc"
+rc=$(refuse "$T" "$T/root/roms/Disc Game.7z")
+expect "[ $rc = 0 ] && grep -q 'notify.*could not open .*Disc Game.7z - The 7z archive holds a CD image' $T/root/logs/boot.log" "a CD image in a .7z: refused, and the notification says why"
+expect "! $CHECK $T/dump/flip00050.ppm 960 540 0 0 0 >/dev/null 2>&1" "the message box is up (flip 50)"
+T=$(newroot t39d)
+echo "language=1" >>"$T/root/snes9x-ps5.ini"
+cp tests/7z/enc-header.7z "$T/root/roms/Locked.7z"
+rc=$(refuse "$T" "$T/root/roms/Locked.7z")
+expect "[ $rc = 0 ] && grep -q 'Locked.7z - El archivo 7z tiene contraseña' $T/root/logs/boot.log" "a password: refused, the reason in Spanish"
+T=$(newroot t39e)
+head -c 200 "$T39A/root/roms/a/twin.7z" >"$T/root/roms/Cut.7z"
+rc=$(refuse "$T" "$T/root/roms/Cut.7z")
+expect "[ $rc = 0 ] && grep -q 'Cut.7z - The 7z archive is damaged' $T/root/logs/boot.log" "a cut archive: refused as damaged"
+expect "! grep -q 'runtime error\|AddressSanitizer' $WORK/t39c/out.txt $WORK/t39d/out.txt $T/out.txt" "no sanitizer reports"
+# d. on a share: a .7z there is listed, named in the background by the CRC it stores, and plays (read through netfs)
+T=$(newroot t39f)
+mkdir -p "$T/share"
+cp "$T39A/root/roms/a/twin.7z" "$T/share/twin.7z"
+echo "smb://10.0.0.5/games" >"$T/root/shares.txt"
+rc=$(SNES9X_HOST_REALTIME=1 MAXFLIPS=700 SNES9X_HOST_NETFS_DIR="$T/share" run "$T" "0:0;150:$CROSS;152:0;$(QUITAT 450)" "300")
+expect "[ $rc = 0 ] && grep -q '\[emu\] 7z /smb/10.0.0.5/games/twin.7z: dkc.sfc, 32772 bytes' $T/root/logs/boot.log" "the .7z on the share was launched from the shelf and unpacked"
+expect "$CHECK $T/dump/flip00300.ppm 960 540 255 0 0 >/dev/null" "and it runs"
+expect "grep -q '/smb/10.0.0.5/games/twin.7z.*$c7' $T/root/covers/crc-cache.txt" "its stored CRC was read over the share and kept"
+expect "! grep -q 'runtime error\|AddressSanitizer' $T/out.txt" "no sanitizer reports"
+
 echo
 echo "passed $PASS, failed $FAIL  (work dir $WORK)"
 [ $FAIL = 0 ]

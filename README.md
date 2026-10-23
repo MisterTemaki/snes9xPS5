@@ -15,12 +15,13 @@ own icon and background. The PS5 layer follows the layout of PS5SX2 (the PCSX2 p
 - `ps5/installer` is the installer and helper payload.
 
 Everything outside `ps5/` is the original Snes9x source, unchanged, apart from this README (the original one is
-[README-Snes9x.md](README-Snes9x.md)).
+[README-Snes9x.md](README-Snes9x.md)) and, since 2.9, a `.7z` case in the ROM loader (`memmap.cpp`, `memmap.h`: the
+archive is unpacked by the port, `ps5/frontend/fe_7z.cpp`).
 
-> **Status (2.8):** 2.6 runs on the console: the app opens from its icon, the shelf, the controller, video and sound
-> work, and games play. 2.7's new parts (network shares, shelf tabs, borders) and 2.8's Smooth picture have **not been
-> run on a PS5 yet**. It
-> builds with the ps5-payload-dev SDK and passes 385 host tests (one, the sound-queue timing, depends on the test
+> **Status (2.9):** 2.6 runs on the console: the app opens from its icon, the shelf, the controller, video and sound
+> work, and games play. 2.7's new parts (network shares, shelf tabs, borders), 2.8's Smooth picture and 2.9's `.7z`
+> games have **not been run on a PS5 yet**. It
+> builds with the ps5-payload-dev SDK and passes 406 host tests (one, the sound-queue timing, depends on the test
 > machine's load), which run the same code on Linux with the PS5 calls simulated, plus the network-share unit and
 > loopback tests. If something fails, turn on Settings, Debug logs: the logs in `/data/snes9x/logs/` say where.
 
@@ -51,9 +52,15 @@ written to PS5SX2's folders (`/data/PCSX2`, `/data/homebrew/PPSA99203`).
 
 ## Versions
 
-Every release carries its version in the file name: `Snes9xPS5-v2.8.elf` and `snes9x-ps5-v2.8-src.zip`
+Every release carries its version in the file name: `Snes9xPS5-v2.9.elf` and `snes9x-ps5-v2.9-src.zip`
 (`make dist`). When updating, replace the old ELF with the new one in your autoload or Payload Manager. In this
 README, "`Snes9xPS5.elf`" always means the current release's ELF.
+
+**2.9:** **7-Zip archives (`.7z`)**, asked for by CroCop86: a `.7z` holding a ROM is a game, as a `.zip` is, on the
+console's drive, USB drives and network shares. It is named by the CRC the archive stores (so it gets its No-Intro
+name, cover, border and cheats as the same ROM in a zip does) and unpacked into memory when it starts. Encrypted
+archives, CD images and very big solid archives are refused with a message saying why: see
+[7-Zip archives](#7-zip-archives-7z).
 
 **2.8:** **Smooth picture** (Settings, and the pause menu: "Smooth picture (shader Off)"; `smooth=1` in the settings
 file), asked for in [#4](https://github.com/MisterTemaki/snes9xPS5/issues/4): with the shader Off, the picture is
@@ -175,13 +182,13 @@ notification of the app to Spanish (Español), Portuguese (Brazil) (Português (
 
 1. **Send `Snes9xPS5.elf`** with PS5 Payload Manager, or from a PC on the same network:
    ```sh
-   nc -q0 PS5_IP 9021 < Snes9xPS5-v2.8.elf
+   nc -q0 PS5_IP 9021 < Snes9xPS5-v2.9.elf
    ```
    It installs the app in `/data/homebrew/PPSA99922/` (`eboot.bin`, `sce_module/libc.prx`, `param.json`, the
-   icon and the backgrounds), shows **"Snes9x PS5 2.8 installed. Open it from the Snes9x PS5 icon on the home
+   icon and the backgrounds), shows **"Snes9x PS5 2.9 installed. Open it from the Snes9x PS5 icon on the home
    screen."** and stays running as the helper.
 2. **Open the Snes9x PS5 icon.** The game shelf appears and the controller works.
-3. **Copy your ROMs** (`.sfc .smc .swc .fig .bs .st .zip .gz`) to `/data/snes9x/roms`, over FTP for example, or
+3. **Copy your ROMs** (`.sfc .smc .swc .fig .bs .st .zip .7z .gz`) to `/data/snes9x/roms`, over FTP for example, or
    to a `snes9x/roms` folder on a USB drive. Subfolders work.
 
 Tip: put `Snes9xPS5.elf` in your autoload, as PS5SX2 recommends for its payloads.
@@ -250,7 +257,7 @@ author's line with the GitHub mark: **github.com/MisterTemaki** (PS5SX2 shows it
   you used last.
 - **Official names:** SNES ROMs have no serial. A game is identified by its file name or, when that doesn't
   match, by the ROM's CRC32, looked up in a No-Intro table of 4268 games built into the app.
-  - The CRC is taken without a copier header; for a `.zip`, the CRC stored in the zip is used.
+  - The CRC is taken without a copier header; for a `.zip` or a `.7z`, the CRC stored in the archive is used.
   - Loose names (`super mario world.smc`) are recognised too.
   - CRCs are cached in `covers/crc-cache.txt`, so each ROM is read once.
   - **Fan translations and renamed ROMs** (`Super Robot Wars 4 (English).sfc`) find the cover of the game they come
@@ -473,6 +480,26 @@ Good to know:
 - The host tests play an MSU-1 track from a test ROM through to the console's sound output (files beside the ROM
   and a `.msu1` pack); it has not yet been tried with a real MSU-1 hack on a console.
 
+## 7-Zip archives (.7z)
+
+A `.7z` with a SNES ROM in it is a game like a `.zip` (2.9): on the shelf, from the console's drive, a USB drive or
+a network share (read through the share like any other file).
+
+- **Which file is the ROM:** the biggest file in the archive that is at most 16 MiB (+ a 512-byte copier header),
+  as Snes9x picks it in a zip. Other files beside it (a readme, a patch) are ignored. One game per archive.
+- **Name, cover, border, cheats:** the archive stores each file's CRC32, so the game is named without unpacking
+  anything (only a ROM with a copier header is unpacked once, to leave the header out). The cheats file is found by
+  the archive's name or the game's, as for a zip (`EarthBound.7z` finds `EarthBound (USA).cht`); saves and states
+  are named after the archive.
+- **Methods:** what 7-Zip writes for a 7z: LZMA, LZMA2, PPMd and stored, with the branch filters (BCJ, BCJ2, ARM,
+  ARM64, PowerPC, SPARC, IA-64, RISC-V) and Delta (the tests cover LZMA, LZMA2, PPMd, BCJ, ARM, Delta and stored).
+  Other methods (BZip2, Deflate, Zstandard...) are refused.
+- **Not supported**, each with a message saying so when the game is opened: archives with a password
+  (encrypted), CD images (`.cue`, `.iso`, `.chd`...: a disc would have to be unpacked whole; Snes9x has no CD games
+  anyway), a ROM over 16 MiB, and a ROM packed solid with other files into a block of more than 64 MiB (a 7z unpacks
+  a whole solid block at a time: pack the ROM in an archive of its own). A damaged or cut archive is refused too.
+- The archive is unpacked into memory when the game starts; nothing is written to the drive.
+
 ## Network shares (SMB and NFS)
 
 Games can be read from a Windows, Samba, NAS or router share instead of a drive. Add one on the console:
@@ -672,7 +699,7 @@ The build has three stages:
 - **`ps5/frontend/`**: the 3D shelf (`fe_shelf.cpp`), covers (`fe_covers.cpp`, `fe_prefetch.cpp`), the library
   and No-Intro names (`fe_games.cpp`, `data/snes-nointro.tsv`), HTTPS (`fe_http.cpp`; the helper's own: `fe_tlshttp.cpp`, `fe_mbedtls_config.h`, `data/cacert.pem`, with
   Mbed TLS 3.6.7 in `third_party/mbedtls`), the helper's background downloads (`fe_coverworker.cpp`,
-  `fe_coverfetch.cpp`), text with PS5SX2's fonts
+  `fe_coverfetch.cpp`), `.7z` archives (`fe_7z.cpp`, over the LZMA SDK in `third_party/lzma7z`), text with PS5SX2's fonts
   (`fe_text.cpp`), menus, settings, the borders around the picture (`fe_border.cpp`, `fe_borderfetch.cpp` for the downloads, and `assets/borders/default.png`,
   made by `ps5/tools/make_default_border.py`), and `fe_emu.cpp`, which connects the Snes9x core to the PS5 layer.
 - **`ps5/proto/native/`**: ps5-native-app-boilerplate's tools (BlackBearReloaded, GPL-3.0), taken from PS5SX2
@@ -683,7 +710,7 @@ The build has three stages:
   - `libc_builder.cpp` and its manifests.
 - **`ps5/app/sce_sys/`**: param.json, icon and backgrounds.
 - **`ps5/host/sce_host.cpp`** and **`ps5/tests/`**: the PS5 functions implemented on Linux, and the tests. They
-  check the picture, controller, save states, PAL, zip, sound, covers, install, helper and sandbox request, and
+  check the picture, controller, save states, PAL, zip, 7z, sound, covers, install, helper and sandbox request, and
   the helper's HTTPS against a local server with a test certificate authority (a certificate from another
   authority or for another name refused, chunked answers, redirects, the connection kept).
 
@@ -701,6 +728,8 @@ The build has three stages:
   the cover prefetch and exiting through the system).
 - The VideoOut tiling and setup follow the SDK's SDL2 port (zlib license).
 - **zlib** (Jean-loup Gailly and Mark Adler): zlib license.
+- **LZMA SDK** 26.05 (Igor Pavlov, [7-zip.org](https://www.7-zip.org)): its 7z decoder (`ps5/third_party/lzma7z/`,
+  the C files of the 7z decoder only), placed in the public domain by its author, as each of those files states.
 - **libsmb2** (Ronnie Sahlberg and contributors, [github.com/sahlberg/libsmb2](https://github.com/sahlberg/libsmb2))
   and **libnfs** (Ronnie Sahlberg and contributors, [github.com/sahlberg/libnfs](https://github.com/sahlberg/libnfs)):
   LGPL-2.1-or-later, linked statically into the app for the network shares. Their full source, with the port's few

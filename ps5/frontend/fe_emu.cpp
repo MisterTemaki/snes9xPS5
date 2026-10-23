@@ -13,6 +13,7 @@
 
 #include "fe_emu.h"
 
+#include "fe_7z.h"
 #include "fe_border.h"
 #include "fe_games.h"
 #include "fe_i18n.h"
@@ -518,6 +519,27 @@ void S9xMessage(int type, int number, const char* message)
 	OrbisLog("[s9x%s] %s", type == S9X_ERROR ? " error" : (type == S9X_WARNING ? " warning" : ""), message);
 }
 
+// The core's loader for a .7z (memmap.cpp, FileLoader): the archive's ROM (fe_7z.h: the biggest file that fits) unpacked
+// into the ROM buffer, its copier header dropped, as LoadZip does for a .zip. Why it failed is kept for the message.
+bool8 Load7z(const char* path, uint32* total, uint8* buffer, uint32 buffer_size)
+{
+	*total = 0;
+	std::vector<uint8_t> rom;
+	std::string name;
+	fe::sevenzip::Error err = fe::sevenzip::Error::None;
+	const bool ok = fe::sevenzip::ExtractRom(path, buffer_size, &rom, &err, &name) && !rom.empty() && rom.size() <= buffer_size;
+	fe::sevenzip::SetLastLoadError(ok ? fe::sevenzip::Error::None : err == fe::sevenzip::Error::None ? fe::sevenzip::Error::NoRom : err);
+	if (!ok)
+	{
+		OrbisLog("[emu] 7z %s: %s", path, fe::sevenzip::Message(fe::sevenzip::LastLoadError()));
+		return FALSE;
+	}
+	OrbisLog("[emu] 7z %s: %s, %zu bytes", path, name.c_str(), rom.size());
+	memcpy(buffer, rom.data(), rom.size());
+	*total = Memory.HeaderRemove(uint32(rom.size()), buffer);
+	return TRUE;
+}
+
 const char* S9xStringInput(const char*)
 {
 	return nullptr;
@@ -697,6 +719,7 @@ bool LoadGame(const std::string& path)
 	g.rom_path = path;
 	OrbisLog("[emu] loading %s", path.c_str());
 	netfs_prepare_game(path); // a ROM on a share: its MSU-1 files first (nothing for any other path)
+	fe::sevenzip::SetLastLoadError(fe::sevenzip::Error::None);
 	if (!Memory.LoadROM(path.c_str()))
 	{
 		OrbisLog("[emu] LoadROM failed");

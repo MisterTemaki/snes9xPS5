@@ -1231,6 +1231,8 @@ uint32 CMemory::FileLoader (uint8 *buffer, const char *filename, uint32 maxsize)
 		nFormat = FILE_ZIP;
 	else if (path.ext_is(".jma"))
 		nFormat = FILE_JMA;
+	else if (path.ext_is(".7z"))
+		nFormat = FILE_7Z;
 
 	switch (nFormat)
 	{
@@ -1266,6 +1268,23 @@ uint32 CMemory::FileLoader (uint8 *buffer, const char *filename, uint32 maxsize)
 			ROMFilename = filename;
 		#else
 			S9xMessage(S9X_ERROR, S9X_ROM_INFO, "This binary was not created with JMA support.");
+			return (0);
+		#endif
+			break;
+		}
+
+		case FILE_7Z:
+		{
+		#ifdef SEVENZIP_SUPPORT
+			if (!Load7z(filename, &totalSize, buffer, maxsize + 0x200))
+			{
+			 	S9xMessage(S9X_ERROR, S9X_ROM_INFO, "Invalid 7z archive.");
+				return (0);
+			}
+
+			ROMFilename = filename;
+		#else
+			S9xMessage(S9X_ERROR, S9X_ROM_INFO, "This binary was not created with 7z support.");
 			return (0);
 		#endif
 			break;

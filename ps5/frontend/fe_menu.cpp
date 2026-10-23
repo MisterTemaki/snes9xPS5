@@ -65,7 +65,7 @@ std::string Fmt(const char* fmt, ...)
 
 bool HasRomExtension(const char* name)
 {
-	static const char* const exts[] = {".sfc", ".smc", ".swc", ".fig", ".bs", ".st", ".zip", ".gz", ".bin", ".mgd"};
+	static const char* const exts[] = {".sfc", ".smc", ".swc", ".fig", ".bs", ".st", ".zip", ".gz", ".7z", ".bin", ".mgd"};
 	const size_t n = strlen(name);
 	for (const char* e : exts)
 	{
@@ -494,7 +494,7 @@ std::string RomBrowser()
 			const char* lines[] = {
 				T("No games found here."),
 				"",
-				T("Copy your SNES ROMs (.sfc .smc .swc .fig .bs .zip) to:"),
+				T("Copy your SNES ROMs (.sfc .smc .swc .fig .bs .zip .7z) to:"),
 				"    /data/snes9x/roms",
 				T("or, on a USB drive, to the folder  snes9x/roms"),
 				"",

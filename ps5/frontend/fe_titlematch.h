@@ -20,7 +20,7 @@ inline std::string Key(const std::string& name)
     std::string out;
     int depth = 0;
     std::string stem = name;
-    for (const char* ext : {".cht", ".png", ".sfc", ".smc", ".zip"})
+    for (const char* ext : {".cht", ".png", ".sfc", ".smc", ".zip", ".7z"})
     {
         const size_t n = std::char_traits<char>::length(ext);
         if (stem.size()>n && stem.compare(stem.size()-n,n,ext)==0)

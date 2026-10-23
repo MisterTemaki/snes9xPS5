@@ -1,0 +1,22 @@
+LZMA SDK 7z decoder, for Snes9x PS5's .7z archives (ps5/frontend/fe_7z.cpp)
+============================================================================
+
+Source:  the official 7-Zip repository (https://github.com/ip7z/7zip), tag 26.05, commit
+         b88c6bc09339de32f7d18bbab900686b244f42ba, folder C/ (7zVersion.h says 26.05).
+Taken:   only the C files the 7z decoder needs, unchanged:
+           7zAlloc 7zArcIn 7zBuf 7zCrc 7zCrcOpt 7zDec 7zStream Bcj2 Bra Bra86 BraIA64 CpuArch Delta Lzma2Dec LzmaDec
+           Ppmd7 Ppmd7Dec (.c), their headers, 7zTypes.h 7zWindows.h Compiler.h Precomp.h RotateDefs.h 7zVersion.h,
+         and from DOC/: License.txt (7-Zip's licence overview) and 7zC.txt (the 7z decoder's description).
+         Not taken: the encoders, AES (an encrypted archive is refused), multithreading, the assembler decoders,
+         7zFile.c (fe_7z.cpp reads the archive with the libc calls, so netfs answers for a share).
+
+Licence: every file taken states "Public domain" in its first lines ("Igor Pavlov : Public domain"; Ppmd7 also
+         "based on PPMd var.H (2001): Dmitry Shkarin : Public domain"). 7zC.txt: "LZMA SDK is written and placed in
+         the public domain by Igor Pavlov." License.txt says the same rule: a 7-Zip source file is public domain
+         when it states so (the rest of 7-Zip, not taken here, is LGPL, and some of it BSD).
+
+Build:   ps5/Makefile (LZMA7Z_*): -DZ7_ST -DZ7_PPMD_SUPPORT -DZ7_EXTRACT_ONLY, no assembler.
+         s9x7z_prefix.h (written by make_prefix.sh) renames every external symbol these files define to s9x7z_*,
+         and is forced into each of them (-include) and included first by fe_7z.cpp: another LZMA SDK copy linked
+         into the app (a libchdr's, say) can then never be mixed with this one. Today the app links no other.
+         Run `sh make_prefix.sh > s9x7z_prefix.h` here after updating the files.

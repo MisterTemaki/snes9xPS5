@@ -27,6 +27,7 @@
 #include "fe_emu.h"
 #include "fe_i18n.h"
 #include "fe_covers.h"
+#include "fe_7z.h"
 #include "fe_menu.h"
 #include "fe_prefetch.h"
 #include "fe_shelf.h"
@@ -61,7 +62,11 @@ bool PlayGame(const std::string& rom)
 	if (!emu::LoadGame(rom))
 	{
 		// a ROM on a share says why (no answer, wrong password...); netfs's sentences carry no password
-		const std::string why = netfs_is_network_path(rom.c_str()) ? netfs_last_error() : std::string();
+		std::string why = netfs_is_network_path(rom.c_str()) ? netfs_last_error() : std::string();
+		// a .7z says what is wrong with it (encrypted, too big...)
+		const fe::sevenzip::Error zerr = fe::sevenzip::LastLoadError();
+		if (zerr != fe::sevenzip::Error::None)
+			why = std::string(fe::T(fe::sevenzip::Message(zerr))) + (why.empty() ? "" : " " + why);
 		ProsperoNotify(fe::T("Snes9x: could not open %s"), (rom + (why.empty() ? "" : " - " + why)).c_str());
 		fe::MessageBox(fe::T("Could not open the game"), why.empty() ? rom : rom + "\n\n" + why);
 		return true;

@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: MIT
 
 #include "fe_games.h"
+#include "fe_7z.h"
 #include "fe_titlematch.h"
 #include "fe_artmatch.h"
 #include "fe_dbart.h"
@@ -159,9 +160,13 @@ const Db& D()
 	return db;
 }
 
+// The biggest ROM file Snes9x takes (CMemory::MAX_ROM_SIZE, 16 MiB, and a 512-byte copier header): the ROM of a .7z is
+// the biggest file up to this size, as the core's loader picks it (fe_emu.cpp, Load7z).
+constexpr uint64_t kMaxRomFile = 0x1000000 + 512;
+
 bool HasRomExt(const std::string& ext)
 {
-	static const char* const exts[] = {".sfc", ".smc", ".swc", ".fig", ".bs", ".st", ".zip", ".gz", ".bin", ".mgd"};
+	static const char* const exts[] = {".sfc", ".smc", ".swc", ".fig", ".bs", ".st", ".zip", ".gz", ".7z", ".bin", ".mgd"};
 	for (const char* e : exts)
 		if (ext == e)
 			return true;
@@ -556,6 +561,29 @@ bool RomCrc32(const std::string& path, uint32_t* crc, const std::atomic<bool>* c
 		unzClose(z);
 		return ok && !stopped();
 	}
+	if (ext == ".7z")
+	{
+		// the CRC the archive stores for its ROM (nothing unpacked), unless a copier header is in it: then the data's
+		std::vector<sevenzip::Entry> entries;
+		sevenzip::Error err;
+		if (!sevenzip::List(path, &entries, &err))
+			return false;
+		const int k = sevenzip::PickRom(entries, kMaxRomFile, &err);
+		if (k < 0 || stopped())
+			return false;
+		const sevenzip::Entry& e = entries[size_t(k)];
+		if (e.has_crc && (e.size & 0x3ff) != 0x200)
+		{
+			*crc = e.crc;
+			return true;
+		}
+		std::vector<uint8_t> data;
+		if (!sevenzip::Extract(path, e.index, &data, &err) || stopped())
+			return false;
+		const size_t skip = (data.size() & 0x3ff) == 0x200 ? 512 : 0;
+		*crc = uint32_t(crc32(crc32(0L, Z_NULL, 0), data.data() + skip, uInt(data.size() - skip)));
+		return true;
+	}
 	if (ext == ".gz")
 		return false;
 	FILE* f = fopen(path.c_str(), "rb");
@@ -745,7 +773,7 @@ bool ReadRomHeader(const std::string& path, romheader::Info* info)
 {
 	const size_t dot = path.find_last_of('.');
 	const std::string ext = Lower(dot == std::string::npos ? std::string() : path.substr(dot));
-	std::vector<uint8_t> prefix; // a .zip or .gz is unpacked as far as the last header place
+	std::vector<uint8_t> prefix; // a .zip or .gz is unpacked as far as the last header place (a .7z whole)
 	uint64_t total = 0;
 	if (ext == ".zip")
 	{
@@ -781,6 +809,15 @@ bool ReadRomHeader(const std::string& path, romheader::Info* info)
 		if (!found)
 			return false;
 	}
+	else if (ext == ".7z")
+	{
+		sevenzip::Error err;
+		if (!sevenzip::ExtractRom(path, kMaxRomFile, &prefix, &err))
+			return false;
+		total = prefix.size();
+		if (prefix.size() > kHeaderPrefix)
+			prefix.resize(kHeaderPrefix);
+	}
 	else if (ext == ".gz")
 	{
 		gzFile gz = gzopen(path.c_str(), "rb");
@@ -795,7 +832,7 @@ bool ReadRomHeader(const std::string& path, romheader::Info* info)
 		prefix.resize(got);
 		total = got < kHeaderPrefix ? got : 0; // the size is known only when the whole ROM fit
 	}
-	if (ext == ".zip" || ext == ".gz")
+	if (ext == ".zip" || ext == ".gz" || ext == ".7z")
 		return romheader::Read(
 			[&prefix](uint64_t at, uint8_t* out, size_t n) {
 				if (at + n > prefix.size())

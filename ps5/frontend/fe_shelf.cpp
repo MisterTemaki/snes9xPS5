@@ -1133,7 +1133,7 @@ std::string Shelf()
 		else
 		{
 			CenterText(300, T("No games found."), 5, Rgb(240, 240, 250));
-			CenterText(420, T("Copy your SNES ROMs (.sfc .smc .zip ...) to"), 3, Rgb(200, 200, 220));
+			CenterText(420, T("Copy your SNES ROMs (.sfc .smc .zip .7z ...) to"), 3, Rgb(200, 200, 220));
 			CenterText(470, T("/data/snes9x/roms   or   snes9x/roms  on a USB drive"), 4, Rgb(200, 190, 255));
 			CenterText(560, T("and open Snes9x PS5 again."), 3, Rgb(200, 200, 220));
 			CenterText(660, std::string(T("Games on a NAS or PC?")) + "  " + icon::Triangle + "  " + T("Settings > Network shares"), 3, Rgb(200, 190, 255));
