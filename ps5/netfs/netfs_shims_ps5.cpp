@@ -1,8 +1,8 @@
 // Snes9x PS5 netfs: what libsmb2 and libnfs need from the console's libc and a native title cannot give them.
 // Linked in with --wrap (NETFS_WRAPPED_PS5 in the Makefile), PS5 build only:
 //
-//  - fcntl(fd, F_SETFL, O_NONBLOCK) is refused on a socket on the console. It becomes setsockopt(SO_NBIO), the
-//    console's own switch; F_GETFL reads it back. Anything that is not a socket goes to the real fcntl.
+//  - fcntl(fd, F_SETFL/F_GETFL) on a socket: the console's own fcntl first (it works in SwanStationPS5's libnfs on
+//    a console); if it refuses, setsockopt(SO_NBIO), the console's own switch, and getsockopt to read it back.
 //  - getaddrinfo jumps to address 0 in a native title (the module that holds it is not loaded). This one takes
 //    IPv4 literals itself and asks libSceNet's resolver for names, as fe_tlshttp.cpp does in the helper.
 //    IPv4 only, one result. Its results are freed by the freeaddrinfo below.
@@ -45,20 +45,25 @@ int __wrap_fcntl(int fd, int cmd, ...)
 	va_start(ap, cmd);
 	long arg = va_arg(ap, long); // an int or a pointer; both travel in the same register
 	va_end(ap);
+	// The console's own fcntl first (SwanStationPS5's libnfs sets O_NONBLOCK on its sockets with it, and works);
+	// SO_NBIO only if that is refused.
+	const int r = __real_fcntl(fd, cmd, arg);
+	if (r != -1 || (cmd != F_SETFL && cmd != F_GETFL))
+		return r;
 	if (cmd == F_SETFL)
 	{
 		int on = (arg & O_NONBLOCK) != 0;
 		if (setsockopt(fd, SOL_SOCKET, SO_NBIO, &on, sizeof on) == 0)
 			return 0;
 	}
-	else if (cmd == F_GETFL)
+	else
 	{
 		int on = 0;
 		socklen_t len = sizeof on;
 		if (getsockopt(fd, SOL_SOCKET, SO_NBIO, &on, &len) == 0)
 			return O_RDWR | (on ? O_NONBLOCK : 0);
 	}
-	return __real_fcntl(fd, cmd, arg);
+	return r;
 }
 }
 
@@ -130,6 +135,7 @@ int __wrap_getaddrinfo(const char* node, const char* service, const addrinfo* hi
 	Result* r = (Result*)calloc(1, sizeof(Result));
 	if (!r)
 		return EAI_MEMORY;
+	r->sa.sin_len = sizeof r->sa; // FreeBSD's sockaddr_in has a length
 	r->sa.sin_family = AF_INET;
 	r->sa.sin_port = htons(port);
 	r->sa.sin_addr = addr;
