@@ -255,6 +255,45 @@ CrcCache& SharedCrcCache()
 	return *c;
 }
 
+// Whether a file that could not be used (no ROM in an archive, a CRC or a header that could not be taken) may be
+// remembered as such. A local file: yes. A file on a share: only when it reads whole, without an error, from a share
+// that is still connected. A read error (the share dropped, the watchdog cut a slow request, Settings > Network shares
+// connected the shares again) is not the file's fault, and a remembered failure would keep the game unnamed until the
+// file changes; it is tried again at the next visit of the shelf instead.
+bool FailureIsTheFiles(const std::string& path, const struct stat& st, const std::atomic<bool>* cancel = nullptr)
+{
+	if (!netfs_is_network_path(path.c_str()))
+		return true;
+	if (st.st_size > 64LL * 1024 * 1024)
+		return false; // too big to read through each time it fails
+	FILE* f = fopen(path.c_str(), "rb");
+	if (!f)
+		return false;
+	std::vector<char> buf(1 << 20);
+	long long total = 0;
+	bool ok = true;
+	for (;;)
+	{
+		if (cancel && cancel->load())
+		{
+			ok = false;
+			break;
+		}
+		const size_t got = fread(buf.data(), 1, buf.size(), f);
+		total += (long long)got;
+		if (got < buf.size())
+			break;
+	}
+	ok = ok && ferror(f) == 0 && total == (long long)st.st_size;
+	fclose(f);
+	if (!ok)
+		return false;
+	for (const std::string& m : netfs_mount_points())
+		if (path.size() > m.size() && path.compare(0, m.size(), m) == 0 && path[m.size()] == '/')
+			return true;
+	return false;
+}
+
 // read: false for a ROM on a share, where only a CRC already in the cache is used (reading every ROM over the
 // network is what makes a scan slow). known (if given): the cache holds an answer for this file as it is now,
 // "could not be read" included.
@@ -289,8 +328,10 @@ bool CachedCrc(CrcCache& cache, const std::string& path, uint32_t* crc, bool rea
 	char val[96];
 	if (!RomCrc32(path, crc))
 	{
-		// unreadable (or an empty zip): remembered, so the next scans don't read it again until it changes
-		cache.Put(path, key, "fail");
+		// unreadable (or an empty zip): remembered, so the next scans don't read it again until it changes (unless the
+		// read itself failed on a share: FailureIsTheFiles)
+		if (FailureIsTheFiles(path, st))
+			cache.Put(path, key, "fail");
 		return false;
 	}
 	snprintf(val, sizeof(val), "%08X", *crc);
@@ -329,7 +370,11 @@ bool HeaderHint(CrcCache& cache, const std::string& path, bool read, std::string
 	if (found)
 		val = info.title + "\t" + std::to_string(int(info.country));
 	else
+	{
 		val = "none";
+		if (!FailureIsTheFiles(path, st, cancel))
+			return false; // a read error on a share: not remembered, tried again at the next visit
+	}
 	cache.Put(key, stamp, val.c_str());
 	return true;
 }
@@ -600,10 +645,16 @@ bool RomCrc32(const std::string& path, uint32_t* crc, const std::atomic<bool>* c
 	uLong c = crc32(0L, Z_NULL, 0);
 	std::vector<uint8_t> buf(1 << 16);
 	size_t n;
+	long got = 0;
 	while (!stopped() && (n = fread(buf.data(), 1, buf.size(), f)) > 0)
+	{
 		c = crc32(c, buf.data(), uInt(n));
+		got += long(n);
+	}
+	// a read cut short (an error on a share) is not the file's CRC
+	const bool whole = ferror(f) == 0 && size >= 0 && got == size - ((size & 0x3ff) == 0x200 ? 512 : 0);
 	fclose(f);
-	if (stopped())
+	if (stopped() || !whole)
 		return false;
 	*crc = uint32_t(c);
 	return true;
@@ -640,20 +691,45 @@ struct NetNaming::Impl
 			}
 			struct stat st = {};
 			if (stat(path.c_str(), &st) != 0)
-				continue; // the share went away; the next scan will list it again
+			{
+				// the share went away: the next scan lists it again once it is back, and Add queues it then
+				std::lock_guard<std::mutex> g(lock);
+				tried.erase(path);
+				continue;
+			}
+			auto requeue = [&] {
+				// cancelled half way: nothing more recorded, and it is the first to be read when the pass starts again
+				std::lock_guard<std::mutex> g(lock);
+				todo.push_front(path);
+			};
 			char key[64];
 			snprintf(key, sizeof(key), "%lld\t%lld\t", (long long)st.st_size, (long long)st.st_mtime);
 			uint32_t crc = 0;
 			const bool ok = RomCrc32(path, &crc, &stop);
 			if (stop.load())
-				break; // cancelled half way: nothing recorded
+			{
+				requeue();
+				break;
+			}
 			char val[16];
 			snprintf(val, sizeof(val), "%08X", crc);
-			cache.Put(path, key, ok ? val : "fail");
+			// a read error is not remembered as "fail" (FailureIsTheFiles): the next visit of the shelf tries it again
+			// (not this one: it stays in `tried`, or every scan the pass's results bring would read it once more)
+			if (ok || FailureIsTheFiles(path, st, &stop))
+				cache.Put(path, key, ok ? val : "fail");
+			else if (stop.load())
+			{
+				requeue(); // cancelled while it was being checked
+				break;
+			}
 			if (ok && gamedb::ByCrc(crc).empty() && gamedb::ByExtraCrc(crc).empty())
 			{
 				std::string hint; // nothing names it: its header's title is the last hint for the cover
-				HeaderHint(cache, path, true, hint, &stop);
+				if (!HeaderHint(cache, path, true, hint, &stop) && stop.load())
+				{
+					requeue(); // its CRC is kept; the header is read when the pass starts again
+					break;
+				}
 			}
 			named++;
 			resolved++;
@@ -678,7 +754,7 @@ NetNaming::~NetNaming()
 
 void NetNaming::Add(const std::vector<GameInfo>& games)
 {
-	size_t added = 0;
+	size_t added = 0, queued = 0;
 	{
 		std::lock_guard<std::mutex> g(m_i->lock);
 		for (const GameInfo& game : games)
@@ -687,10 +763,13 @@ void NetNaming::Add(const std::vector<GameInfo>& games)
 				m_i->todo.push_back(game.path);
 				added++;
 			}
+		queued = m_i->todo.size();
 	}
-	if (!added)
+	if (added)
+		OrbisLog("[games] naming %zu network ROM(s) by CRC in the background", added);
+	// nothing new may still leave work: what a Stop() cut short, or what was queued when a game started (netfs_realtime)
+	if (!queued)
 		return;
-	OrbisLog("[games] naming %zu network ROM(s) by CRC in the background", added);
 	if (m_i->busy.load())
 		return; // the running pass takes the new ones too
 	m_i->thread.join();

@@ -21,7 +21,7 @@ archive is unpacked by the port, `ps5/frontend/fe_7z.cpp`).
 > **Status (2.9):** 2.6 runs on the console: the app opens from its icon, the shelf, the controller, video and sound
 > work, and games play. 2.7's new parts (network shares, shelf tabs, borders), 2.8's Smooth picture and 2.9's `.7z`
 > games have **not been run on a PS5 yet**. It
-> builds with the ps5-payload-dev SDK and passes 406 host tests (one, the sound-queue timing, depends on the test
+> builds with the ps5-payload-dev SDK and passes 415 host tests (one, the sound-queue timing, depends on the test
 > machine's load), which run the same code on Linux with the PS5 calls simulated, plus the network-share unit and
 > loopback tests. If something fails, turn on Settings, Debug logs: the logs in `/data/snes9x/logs/` say where.
 
@@ -60,7 +60,9 @@ README, "`Snes9xPS5.elf`" always means the current release's ELF.
 console's drive, USB drives and network shares. It is named by the CRC the archive stores (so it gets its No-Intro
 name, cover, border and cheats as the same ROM in a zip does) and unpacked into memory when it starts. Encrypted
 archives, CD images and very big solid archives are refused with a message saying why: see
-[7-Zip archives](#7-zip-archives-7z).
+[7-Zip archives](#7-zip-archives-7z). Network shares: a read error is no longer remembered as a broken ROM (the
+game is named at the next visit), Settings pauses the background naming while it is open, and the covers no longer
+reload every minute while games on a share are being named.
 
 **2.8:** **Smooth picture** (Settings, and the pause menu: "Smooth picture (shader Off)"; `smooth=1` in the settings
 file), asked for in [#4](https://github.com/MisterTemaki/snes9xPS5/issues/4): with the shader Off, the picture is

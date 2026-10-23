@@ -710,6 +710,31 @@ int DownloadBorders()
 	return int(wanted.size());
 }
 
+namespace
+{
+bool SamePaths(const std::vector<GameInfo>& a, const std::vector<GameInfo>& b)
+{
+	if (a.size() != b.size())
+		return false;
+	for (size_t i = 0; i < a.size(); i++)
+		if (a[i].path != b[i].path)
+			return false;
+	return true;
+}
+
+// the same names, for every game (the covers are looked up by these)
+bool SameNames(const std::vector<GameInfo>& a, const std::vector<GameInfo>& b)
+{
+	if (a.size() != b.size())
+		return false;
+	for (size_t i = 0; i < a.size(); i++)
+		if (a[i].nointro != b[i].nointro || a[i].title != b[i].title || a[i].crc != b[i].crc || a[i].crc_name != b[i].crc_name ||
+			a[i].header_title != b[i].header_title || a[i].header_japan != b[i].header_japan)
+			return false;
+	return true;
+}
+} // namespace
+
 void ShelfShutdown()
 {
 	S().covers.Stop();
@@ -741,10 +766,9 @@ std::string Shelf()
 		LoadingProgress(text, stage == 0 ? -1.0f : total ? float(done) / float(total) : 0.f);
 	});
 	tabs::OrderByTab(games);
-	bool same = games.size() == st.games.size();
-	for (size_t i = 0; same && i < games.size(); i++)
-		same = games[i].path == st.games[i].path;
-	if (!ShelfDownloads() && (!same || !st.started))
+	const bool same_paths = SamePaths(games, st.games);
+	const bool same = same_paths && SameNames(games, st.games);
+	if (!ShelfDownloads() && (!same_paths || !st.started))
 	{
 		// the console: covers come from the prefetch at start (fe_prefetch.h); new ones restart the app
 		S9X_STAGE(Shelf, "wanted covers");
@@ -864,9 +888,15 @@ std::string Shelf()
 				tabs::OrderByTab(fresh);
 				if (!ShelfDownloads()) // the console: covers of games that came late are fetched by the prefetch of a restart
 					CoversRestartIfNeeded(fresh, cfg.covers_download, false, Loading);
+				// the covers start again only when the games or the names their covers are looked up by changed (a
+				// rescan every minute of the CRC pass would otherwise make every cover flicker)
+				const bool unchanged = SamePaths(fresh, st.games) && SameNames(fresh, st.games);
 				st.games = std::move(fresh);
-				st.slots.assign(st.games.size(), nullptr);
-				st.covers.Start(st.games, cfg.covers_download && ShelfDownloads(), cfg.covers_download && BackgroundCovers());
+				if (!unchanged)
+				{
+					st.slots.assign(st.games.size(), nullptr);
+					st.covers.Start(st.games, cfg.covers_download && ShelfDownloads(), cfg.covers_download && BackgroundCovers());
+				}
 				naming.Add(st.games);
 				OpenTab(tab, keep);
 				dirty = true;
@@ -921,7 +951,11 @@ std::string Shelf()
 		}
 		if (down & SCE_PAD_BUTTON_TRIANGLE)
 		{
+			// Settings > Network shares connects the shares again (netfs_reload), which needs no other netfs call
+			// running: the naming pass waits, and goes on (with what it had left) afterwards
+			naming.Stop();
 			SettingsMenu();
+			naming.Add(st.games);
 			if (st.downloads != cfg.covers_download)
 			{
 				st.downloads = cfg.covers_download;

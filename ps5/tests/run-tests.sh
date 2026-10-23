@@ -1607,6 +1607,37 @@ expect "$CHECK $T/dump/flip00300.ppm 960 540 255 0 0 >/dev/null" "and it runs"
 expect "grep -q '/smb/10.0.0.5/games/twin.7z.*$c7' $T/root/covers/crc-cache.txt" "its stored CRC was read over the share and kept"
 expect "! grep -q 'runtime error\|AddressSanitizer' $T/out.txt" "no sanitizer reports"
 
+echo "== 40. network naming (2.9): a read error on a share is not remembered as a failure; Settings pauses the CRC pass; a rescan that changes nothing leaves the covers alone"
+# a. every read of the two ROMs fails with EIO while the share stays connected (SNES9X_HOST_NETFS_EIO): the pass tries both,
+#    remembers no failure, and the rescan its end brings (nothing changed) does not start the covers again
+T=$(newroot t40a)
+mkdir -p "$T/share"
+python3 tests/make_test_rom.py "$T/share/dkc.sfc" ntsc >/dev/null
+python3 tests/forge_crc.py "$T/share/dkc.sfc" $(grep -P "\tDonkey Kong Country \(USA\) \(Rev 2\)$" frontend/data/snes-nointro.tsv | cut -f1) >/dev/null
+python3 tests/make_7z.py "$T/share/twin.7z" "dkc.sfc=$T/share/dkc.sfc"
+echo "smb://10.0.0.5/games" >"$T/root/shares.txt"
+rc=$(SNES9X_HOST_NETFS_EIO=dkc.sfc,twin.7z SNES9X_HOST_REALTIME=1 MAXFLIPS=420 SNES9X_HOST_NETFS_DIR="$T/share" run "$T" "0:0" "")
+expect "grep -q 'network CRC pass: 2 ROM(s) read\$' $T/root/logs/boot.log" "read errors: the pass tried both"
+expect "! grep -qs 'dkc.sfc.*fail' $T/root/covers/crc-cache.txt && ! grep -qs 'twin.7z.*fail' $T/root/covers/crc-cache.txt" "and remembered no failure"
+after=$(sed -n '/network CRC pass/,$p' "$T/root/logs/boot.log")
+expect "echo \"\$after\" | grep -q '\[games\] [0-9]* ROM(s)' && ! echo \"\$after\" | grep -q '\[covers\] [0-9]* game(s)'" "the rescan after the pass changed nothing: the covers were not started again"
+expect "! grep -q 'runtime error\|AddressSanitizer' $T/out.txt" "no sanitizer reports"
+rc=$(SNES9X_HOST_REALTIME=1 MAXFLIPS=420 SNES9X_HOST_NETFS_DIR="$T/share" run "$T" "0:0" "")
+expect "grep -q 'dkc.sfc -> \"Donkey Kong Country (USA) (Rev 2)\" (by CRC)' $T/root/logs/boot.log && grep -q 'twin.7z -> \"Donkey Kong Country (USA) (Rev 2)\" (by CRC)' $T/root/logs/boot.log" "the next start reads both again and names them"
+expect "! grep -q 'runtime error\|AddressSanitizer' $T/out.txt" "no sanitizer reports"
+# b. Settings (Triangle) while the pass reads a ROM (3 s a read): the pass stops first (Settings > Network shares may connect the
+#    shares again, which needs no other netfs call running); the ROM it was reading is read again once Settings is left
+T=$(newroot t40b)
+mkdir -p "$T/share"
+python3 tests/make_test_rom.py "$T/share/dkc.sfc" ntsc >/dev/null
+python3 tests/forge_crc.py "$T/share/dkc.sfc" $(grep -P "\tDonkey Kong Country \(USA\) \(Rev 2\)$" frontend/data/snes-nointro.tsv | cut -f1) >/dev/null
+echo "smb://10.0.0.5/games" >"$T/root/shares.txt"
+TRIANGLE=1000
+rc=$(SNES9X_HOST_NETFS_DELAY_MS=3000 SNES9X_HOST_REALTIME=1 MAXFLIPS=900 SNES9X_HOST_NETFS_DIR="$T/share" run "$T" "0:0;60:$TRIANGLE;62:0;90:$CIRCLE;92:0" "")
+expect "grep -q 'network CRC pass: 0 ROM(s) read (stopped)' $T/root/logs/boot.log" "Settings stops the pass while it reads"
+expect "grep -q 'dkc.sfc -> \"Donkey Kong Country (USA) (Rev 2)\" (by CRC)' $T/root/logs/boot.log" "and, once Settings is left, the ROM it was reading is read again and named"
+expect "! grep -q 'runtime error\|AddressSanitizer' $T/out.txt" "no sanitizer reports"
+
 echo
 echo "passed $PASS, failed $FAIL  (work dir $WORK)"
 [ $FAIL = 0 ]
