@@ -48,6 +48,14 @@ int __wrap_fcntl(int fd, int cmd, ...)
 	// The console's own fcntl first (SwanStationPS5's libnfs sets O_NONBLOCK on its sockets with it, and works);
 	// SO_NBIO only if that is refused.
 	const int r = __real_fcntl(fd, cmd, arg);
+	if (r != -1 && cmd == F_GETFL && !(r & O_NONBLOCK))
+	{
+		// an earlier F_SETFL may have gone through SO_NBIO (the real fcntl refused it then): its flag is the truth
+		int on = 0;
+		socklen_t len = sizeof on;
+		if (getsockopt(fd, SOL_SOCKET, SO_NBIO, &on, &len) == 0 && on)
+			return r | O_NONBLOCK;
+	}
 	if (r != -1 || (cmd != F_SETFL && cmd != F_GETFL))
 		return r;
 	if (cmd == F_SETFL)

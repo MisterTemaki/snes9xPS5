@@ -67,13 +67,14 @@ def num(n):
 
 def write_raw(name, fname, data, method, props, packed):
     """A 7z with one file in one folder of one coder, the header not packed: py7zr writes PPMd with 7 bytes of
-    properties, which 7-Zip's own decoder (5 bytes) refuses, so the PPMd archive is put together here."""
+    properties, which 7-Zip's own decoder (5 bytes) refuses, so the PPMd archive is put together here (and a name
+    py7zr can't write: a lone UTF-16 surrogate)."""
     header = bytes([0x01, 0x04, 0x06]) + num(0) + num(1) + bytes([0x09]) + num(len(packed)) + bytes([0x00])
     header += bytes([0x07, 0x0B]) + num(1) + bytes([0x00]) + num(1)
-    header += bytes([len(method) | 0x20]) + method + num(len(props)) + props
+    header += bytes([len(method) | (0x20 if props else 0)]) + method + (num(len(props)) + props if props else b"")
     header += bytes([0x0C]) + num(len(data)) + bytes([0x00])
     header += bytes([0x08, 0x0A, 0x01]) + struct.pack("<I", zlib.crc32(data)) + bytes([0x00, 0x00])
-    names = (fname + "\0").encode("utf-16-le")
+    names = (fname + "\0").encode("utf-16-le", "surrogatepass")
     header += bytes([0x05]) + num(1) + bytes([0x11]) + num(len(names) + 1) + bytes([0x00]) + names + bytes([0x00, 0x00])
     start = struct.pack("<QQI", len(packed), len(header), zlib.crc32(header))
     sig = b"7z\xbc\xaf\x27\x1c\x00\x04" + struct.pack("<I", zlib.crc32(start)) + start
@@ -113,3 +114,7 @@ write("too-big.7z", [("huge.sfc", bytes(17 << 20))], [{"id": py7zr.FILTER_LZMA2,
 # a small ROM packed solid with 65 MiB more: its block is over the 64 MiB cap
 write("big-block.7z", [("game.sfc", rom(4096, 16)), ("filler.bin", bytes(65 << 20))],
       [{"id": py7zr.FILTER_LZMA2, "preset": 9}])
+# a name with a lone UTF-16 surrogate (shown as U+FFFD), stored
+write_raw("surrogate.7z", "bad\ud800name.sfc", rom(1000, 17), bytes([0x00]), b"", rom(1000, 17))
+# a password on a solid archive whose block is over the cap: the password is what is said
+write("enc-big.7z", [("game.sfc", rom(4096, 18)), ("filler.bin", bytes(65 << 20))], password="snes", header_encryption=False)

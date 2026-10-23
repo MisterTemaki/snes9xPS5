@@ -72,8 +72,9 @@ GameInfo DescribeGame(const std::string& path, uint32_t rom_crc);
 // The folders to look for ROMs in: OrbisRomRoots() plus the network shares that are connected (in memory, no I/O).
 std::vector<std::string> RomRoots();
 
-// The internal header of a ROM file (a .zip, .7z or .gz is read through); false if there is none to find.
-bool ReadRomHeader(const std::string& path, romheader::Info* info);
+// The internal header of a ROM file (a .zip, .7z or .gz is read through); false if there is none to find. cancel
+// (when given): a .7z's decode stops when it turns true.
+bool ReadRomHeader(const std::string& path, romheader::Info* info, const std::atomic<bool>* cancel = nullptr);
 
 // The headerless CRC32 of a ROM file (or the CRC a .zip or .7z stores for its ROM); false if it can't be read.
 bool RomCrc32(const std::string& path, uint32_t* crc, const std::atomic<bool>* cancel = nullptr);

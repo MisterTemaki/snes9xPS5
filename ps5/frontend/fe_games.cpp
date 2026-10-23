@@ -301,7 +301,8 @@ bool CachedCrc(CrcCache& cache, const std::string& path, uint32_t* crc, bool rea
 // A ROM no name or CRC identified keeps its header's title for the cover lookup. Cached like the CRC (under the path
 // plus "|hdr", with the size and mtime), so each such ROM is opened once: "size\tmtime\tTITLE\tCOUNTRY" or "...\tnone".
 // read: false for a ROM on a share, where a scan uses only what is cached (NetNaming reads the header with the CRC).
-bool HeaderHint(CrcCache& cache, const std::string& path, bool read, std::string& val)
+// cancel (the naming pass's stop flag): a read cut short records nothing.
+bool HeaderHint(CrcCache& cache, const std::string& path, bool read, std::string& val, const std::atomic<bool>* cancel = nullptr)
 {
 	struct stat st = {};
 	if (stat(path.c_str(), &st) != 0)
@@ -322,7 +323,10 @@ bool HeaderHint(CrcCache& cache, const std::string& path, bool read, std::string
 	if (!read)
 		return false;
 	romheader::Info info;
-	if (ReadRomHeader(path, &info))
+	const bool found = ReadRomHeader(path, &info, cancel);
+	if (cancel && cancel->load())
+		return false;
+	if (found)
 		val = info.title + "\t" + std::to_string(int(info.country));
 	else
 		val = "none";
@@ -564,21 +568,22 @@ bool RomCrc32(const std::string& path, uint32_t* crc, const std::atomic<bool>* c
 	if (ext == ".7z")
 	{
 		// the CRC the archive stores for its ROM (nothing unpacked), unless a copier header is in it: then the data's
-		std::vector<sevenzip::Entry> entries;
-		sevenzip::Error err;
-		if (!sevenzip::List(path, &entries, &err))
+		// (the archive opened once; a cancel stops the decode at its next read)
+		sevenzip::Reader z;
+		sevenzip::Error err = z.Open(path, cancel);
+		if (err != sevenzip::Error::None)
 			return false;
-		const int k = sevenzip::PickRom(entries, kMaxRomFile, &err);
+		const int k = sevenzip::PickRom(z.Entries(), kMaxRomFile, &err);
 		if (k < 0 || stopped())
 			return false;
-		const sevenzip::Entry& e = entries[size_t(k)];
+		const sevenzip::Entry& e = z.Entries()[size_t(k)];
 		if (e.has_crc && (e.size & 0x3ff) != 0x200)
 		{
 			*crc = e.crc;
 			return true;
 		}
 		std::vector<uint8_t> data;
-		if (!sevenzip::Extract(path, e.index, &data, &err) || stopped())
+		if (!z.Extract(e.index, &data, &err) || stopped())
 			return false;
 		const size_t skip = (data.size() & 0x3ff) == 0x200 ? 512 : 0;
 		*crc = uint32_t(crc32(crc32(0L, Z_NULL, 0), data.data() + skip, uInt(data.size() - skip)));
@@ -648,7 +653,7 @@ struct NetNaming::Impl
 			if (ok && gamedb::ByCrc(crc).empty() && gamedb::ByExtraCrc(crc).empty())
 			{
 				std::string hint; // nothing names it: its header's title is the last hint for the cover
-				HeaderHint(cache, path, true, hint);
+				HeaderHint(cache, path, true, hint, &stop);
 			}
 			named++;
 			resolved++;
@@ -769,7 +774,7 @@ GameInfo DescribeGame(const std::string& path, uint32_t rom_crc)
 // How much of a ROM holds every place a header can be: ExHiROM's ($40FFC0), behind a copier header, and its 64 bytes.
 constexpr size_t kHeaderPrefix = 0x410000 + 512 + 64;
 
-bool ReadRomHeader(const std::string& path, romheader::Info* info)
+bool ReadRomHeader(const std::string& path, romheader::Info* info, const std::atomic<bool>* cancel)
 {
 	const size_t dot = path.find_last_of('.');
 	const std::string ext = Lower(dot == std::string::npos ? std::string() : path.substr(dot));
@@ -812,7 +817,8 @@ bool ReadRomHeader(const std::string& path, romheader::Info* info)
 	else if (ext == ".7z")
 	{
 		sevenzip::Error err;
-		if (!sevenzip::ExtractRom(path, kMaxRomFile, &prefix, &err))
+		// a 7z unpacks a whole solid block at a time: the ROM comes out whole (a cancel stops it at its next read)
+		if (!sevenzip::ExtractRom(path, kMaxRomFile, &prefix, &err, nullptr, cancel))
 			return false;
 		total = prefix.size();
 		if (prefix.size() > kHeaderPrefix)

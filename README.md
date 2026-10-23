@@ -485,8 +485,9 @@ Good to know:
 A `.7z` with a SNES ROM in it is a game like a `.zip` (2.9): on the shelf, from the console's drive, a USB drive or
 a network share (read through the share like any other file).
 
-- **Which file is the ROM:** the biggest file in the archive that is at most 16 MiB (+ a 512-byte copier header),
-  as Snes9x picks it in a zip. Other files beside it (a readme, a patch) are ignored. One game per archive.
+- **Which file is the ROM:** the biggest file with a SNES ROM's name (`.sfc .smc .swc .fig .bs .st .bin .mgd`) that
+  is at most 16 MiB (+ a 512-byte copier header); in an archive with no such name, its biggest file. Other files
+  beside it (a readme, a patch) are ignored. One game per archive.
 - **Name, cover, border, cheats:** the archive stores each file's CRC32, so the game is named without unpacking
   anything (only a ROM with a copier header is unpacked once, to leave the header out). The cheats file is found by
   the archive's name or the game's, as for a zip (`EarthBound.7z` finds `EarthBound (USA).cht`); saves and states
@@ -498,7 +499,8 @@ a network share (read through the share like any other file).
   (encrypted), CD images (`.cue`, `.iso`, `.chd`...: a disc would have to be unpacked whole; Snes9x has no CD games
   anyway), a ROM over 16 MiB, and a ROM packed solid with other files into a block of more than 64 MiB (a 7z unpacks
   a whole solid block at a time: pack the ROM in an archive of its own). A damaged or cut archive is refused too.
-- The archive is unpacked into memory when the game starts; nothing is written to the drive.
+- The archive is unpacked into memory when the game starts; nothing is written to the drive. The decoder gets at most
+  136 MiB for one archive (the 64 MiB block included); an archive listing more than 65536 files is refused.
 
 ## Network shares (SMB and NFS)
 

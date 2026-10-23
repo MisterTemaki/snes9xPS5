@@ -1,7 +1,8 @@
 // Snes9x PS5 host test of the 7z reader (frontend/fe_7z.cpp) on the archives in tests/7z (tests/make_7z_fixtures.py):
 // every method the fixtures use, a solid archive with several files and a folder, a UTF-16 name, a copier header,
 // an empty archive, a cue sheet, a cut and a damaged archive, a password (header and data), an unsupported method,
-// a ROM over the size limit and a solid block over the 64 MiB cap.
+// a ROM over the size limit and a solid block over the 64 MiB cap, an archive listing 70000 files, a cancel, which
+// file is picked, a lone UTF-16 surrogate.
 //
 //   test-7z <fixture dir>
 //
@@ -10,6 +11,7 @@
 
 #include <unistd.h>
 
+#include <atomic>
 #include <cstdint>
 #include <cstdio>
 #include <string>
@@ -229,6 +231,94 @@ int main(int argc, char** argv)
 		CHECK(!t.empty() && List(t, &e, &err) && !ExtractRom(t, kMaxRom, &out, &err) && err == Error::Damaged && out.empty(),
 			"a changed byte in the data: the CRC check refuses it");
 		unlink(t.c_str());
+	}
+
+	// a header listing 70000 (empty) files: refused before its list is copied (the same header with 100 files lists)
+	{
+		auto empties = [](uint32_t n) {
+			std::vector<uint8_t> h = {0x01, 0x05, uint8_t(0xC0 | (n >> 16)), uint8_t(n), uint8_t(n >> 8)}; // Header, FilesInfo, n
+			const size_t bits = (n + 7) / 8;
+			h.push_back(0x0E); // EmptyStream: every file
+			h.push_back(uint8_t(0x80 | (bits >> 8)));
+			h.push_back(uint8_t(bits));
+			h.insert(h.end(), bits, 0xFF);
+			h.push_back(0x00);
+			h.push_back(0x00);
+			std::vector<uint8_t> a = {'7', 'z', 0xBC, 0xAF, 0x27, 0x1C, 0, 4, 0, 0, 0, 0};
+			uint8_t start[20] = {};
+			const uint64_t hs = h.size();
+			for (int i = 0; i < 8; i++)
+				start[8 + i] = uint8_t(hs >> (8 * i));
+			const uint32_t hc = Crc32(h);
+			for (int i = 0; i < 4; i++)
+				start[16 + i] = uint8_t(hc >> (8 * i));
+			const uint32_t sc = Crc32(std::vector<uint8_t>(start, start + 20));
+			for (int i = 0; i < 4; i++)
+				a[8 + i] = uint8_t(sc >> (8 * i));
+			a.insert(a.end(), start, start + 20);
+			a.insert(a.end(), h.begin(), h.end());
+			return WriteTemp(a);
+		};
+		std::vector<Entry> e;
+		Error err = Error::None;
+		std::string t = empties(100);
+		CHECK(!t.empty() && List(t, &e, &err) && e.size() == 100, "100 empty files: listed");
+		unlink(t.c_str());
+		t = empties(70000);
+		CHECK(!t.empty() && !List(t, &e, &err) && err == Error::Damaged && e.empty(), "70000 files listed: refused as damaged");
+		unlink(t.c_str());
+	}
+
+	// a cancel: before the open, and between the open and the unpacking
+	{
+		std::atomic<bool> stop{true};
+		std::vector<Entry> e;
+		std::vector<uint8_t> out;
+		Error err = Error::None;
+		CHECK(!List(P("lzma2.7z"), &e, &err, &stop) && err == Error::Cancelled, "cancelled before the open");
+		stop = false;
+		Reader r;
+		const bool opened = r.Open(P("solid.7z"), &stop) == Error::None;
+		stop = true;
+		CHECK(opened && !r.Extract(r.Entries().back().index, &out, &err) && err == Error::Cancelled && out.empty(),
+			"cancelled before the unpacking: nothing comes out");
+		stop = false;
+		Reader r2;
+		CHECK(r2.Open(P("solid.7z"), &stop) == Error::None && r2.Extract(r2.Entries().back().index, &out, &err) && !out.empty(),
+			"not cancelled: one open lists and unpacks");
+	}
+
+	// which file is the ROM: a SNES ROM's name first, else the biggest
+	{
+		auto entry = [](const char* name, uint64_t size) {
+			Entry e;
+			e.name = name;
+			e.size = size;
+			return e;
+		};
+		Error err;
+		CHECK(PickRom({entry("readme.txt", 50000), entry("Game.sfc", 30000), entry("cover.png", 90000)}, kMaxRom, &err) == 1,
+			"a .sfc beats bigger files of other names");
+		CHECK(PickRom({entry("a.txt", 100), entry("b.dat", 200)}, kMaxRom, &err) == 1 && err == Error::None,
+			"no ROM name: the biggest file");
+		CHECK(PickRom({entry("big.smc", 17u << 20), entry("readme.txt", 10)}, kMaxRom, &err) < 0 && err == Error::TooBig,
+			"the ROM over the limit: too big, not the readme");
+	}
+
+	// a password on a solid block over the cap: "password" is what is said
+	{
+		std::vector<uint8_t> out;
+		Error err;
+		CHECK(!ExtractRom(P("enc-big.7z"), kMaxRom, &out, &err) && err == Error::Encrypted, "an encrypted big block: refused as encrypted");
+	}
+
+	// a lone UTF-16 surrogate in a name: U+FFFD
+	{
+		std::vector<uint8_t> out;
+		std::string name;
+		Error err;
+		CHECK(ExtractRom(P("surrogate.7z"), kMaxRom, &out, &err, &name) && name == "bad\xef\xbf\xbdname.sfc" && out == Rom(1000, 17),
+			"a lone surrogate becomes U+FFFD");
 	}
 
 	CHECK(std::string(Message(Error::Encrypted)).find("password") != std::string::npos && *Message(Error::None) == 0,
