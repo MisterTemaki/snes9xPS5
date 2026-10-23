@@ -586,8 +586,8 @@ std::vector<WantedCover> MissingCovers(const std::vector<GameInfo>& games)
 		if (!own.empty() && own != cache)
 			continue; // your own cover (a ROM named as its official name shares the downloaded cover's file)
 		const std::string dir = g.path.substr(0, g.path.find_last_of('/'));
-		if (!FindWithExts(dir + "/" + g.file_base).empty())
-			continue; // a cover beside the ROM
+		if (!g.on_network && !FindWithExts(dir + "/" + g.file_base).empty())
+			continue; // a cover beside the ROM (not looked for on a share: see Load)
 		bool dup = false;
 		for (const WantedCover& w : out)
 			dup = dup || w.file == file;
@@ -623,8 +623,8 @@ bool CoverService::NeedsDownload(int i) const
 	if (!own.empty() && own != cache)
 		return false; // your own cover, named after the ROM (not the downloaded one, when the names are the same)
 	const std::string dir = g.path.substr(0, g.path.find_last_of('/'));
-	if (!FindWithExts(dir + "/" + g.file_base).empty())
-		return false; // a picture beside the ROM is used before a download
+	if (!g.on_network && !FindWithExts(dir + "/" + g.file_base).empty())
+		return false; // a picture beside the ROM is used before a download (not looked for on a share: see Load)
 	if (Exists(RefetchMarker(cache)))
 		return true; // asked for again (Square)
 	return !NonEmptyFile(cache) && !RecentlyMissing(cache.substr(0, cache.size() - 4) + ".missing", CoverUrlForGame(g));
@@ -767,7 +767,9 @@ CoverPtr CoverService::Load(int i, bool* downloaded)
 	if (!manual.empty())
 		cands.push_back({manual, "manual"});
 	const std::string dir = g.path.substr(0, g.path.find_last_of('/'));
-	const std::string beside = FindWithExts(dir + "/" + g.file_base);
+	// not beside a game on a share: this thread would make network calls while Settings may reload the shares (netfs
+	// reloads only when no other call is running); the covers of network games are kept on the console
+	const std::string beside = g.on_network ? std::string() : FindWithExts(dir + "/" + g.file_base);
 	if (!beside.empty())
 		cands.push_back({beside, "beside"});
 	const std::string cache = CachePath(i);
