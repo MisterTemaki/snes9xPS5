@@ -552,8 +552,6 @@ struct Check
 	bool completed = false; // the scan ran to its end (else it was stopped)
 	bool changed = false; // its list differs from the one the shelf showed when it started (paths or names)
 	std::vector<GameInfo> result;
-	double started = 0;
-	std::string why;
 };
 
 // ---- state kept between visits to the shelf (the game list, its covers) -----------------------------------
@@ -802,8 +800,6 @@ void StartCheck(ShelfState& st, const char* why)
 	st.check_pending = false;
 	st.roots = RomRoots();
 	auto c = std::make_unique<Check>();
-	c->started = Now();
-	c->why = why;
 	Check* raw = c.get();
 	std::vector<GameInfo> shown = st.games;
 	const bool console = !ShelfDownloads(), downloads = Config().covers_download;
@@ -919,6 +915,8 @@ std::string Shelf()
 		// back from a game: no scan. The folders are checked only when a drive came or went meanwhile, when the check of
 		// the start was stopped by the game, or when the game picked was not there any more.
 		const bool played_gone = !st.played.empty() && !netfs_is_network_path(st.played.c_str()) && !OrbisIsFile(st.played);
+		if (st.check && roots_now != st.roots)
+			StopCheck(st, "the ROM folders changed during the game", true); // its list predates the change: a new check
 		if (st.check)
 			; // a result that is ready is taken below
 		else if (roots_now != st.roots)

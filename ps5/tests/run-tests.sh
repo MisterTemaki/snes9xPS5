@@ -2108,7 +2108,7 @@ expect "grep -q 'checking the folders in the background (the app started from th
 expect "awk '/first frame/{f=NR} /ROM\\(s\\)/{s=NR} END{exit !(f && s && f < s)}' $T/root/logs/boot.log" "the first frame came before the check's scan ended"
 expect "cmp -s $T/lib1.bin $T/root/library.bin && [ ! -e $T/root/library.bin.part ]" "the list saved again is the same file; no temporary file left"
 SAVED43=$T/dump/flip00060.ppm
-expect "[ -f $SAVED43 ]" "the shelf at flip 60, while the check runs, dumped"
+expect "[ -f $SAVED43 ]" "the shelf from the saved list at flip 60 dumped (no sign of the check)"
 expect "! grep -q 'runtime error\|AddressSanitizer' $T/out.txt" "no sanitizer reports"
 # b. a damaged file, a foreign one and one of another format version are ignored: the scan as before, the file written anew
 T=$(lib_root t43b)

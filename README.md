@@ -21,7 +21,7 @@ archive is unpacked by the port, `ps5/frontend/fe_7z.cpp`).
 > **Status (2.10):** 2.6 runs on the console: the app opens from its icon, the shelf, the controller, video and sound
 > work, and games play. 2.7's new parts (network shares, shelf tabs, borders), 2.8's Smooth picture, 2.9's `.7z`
 > games and 2.10's search and fixes have **not been run on a PS5 yet**. It
-> builds with the ps5-payload-dev SDK and passes 469 host tests (one, the sound-queue timing, depends on the test
+> builds with the ps5-payload-dev SDK and passes 497 host tests (one, the sound-queue timing, depends on the test
 > machine's load), which run the same code on Linux with the PS5 calls simulated, plus the network-share, search and
 > other unit and loopback tests. If something fails, turn on Settings, Debug logs: the logs in `/data/snes9x/logs/` say where.
 
@@ -58,7 +58,10 @@ README, "`Snes9xPS5.elf`" always means the current release's ELF.
 
 **2.10:** **Search by name on the shelf**: **Circle** opens the on-screen keyboard; type part of a game's name and the
 shelf shows only the games that match (capitals and accents don't matter: `pokemon` finds *Pokémon*; the file name
-counts too). See [Search](#search-by-name). With it, the fixes of a full code audit:
+counts too). See [Search](#search-by-name). **The shelf opens at once:** it no longer shows "Looking for games..."
+at every start and after every game. It opens from the list it saved last time and looks at the folders in the
+background, updating itself quietly if something changed; back from a game it doesn't scan at all (see
+[The game shelf](#the-game-shelf-and-covers)). With it, the fixes of a full code audit:
 - **C++ exceptions:** the app's C++ runtime was split between its own copy and the console's (the mix that made Stella
   PS5 1.0 crash at its first exception); it is now entirely the app's own. When memory runs out while a ROM is loaded or
   a state is saved or loaded, that load or save fails with a message and the game goes on; anywhere else the app still
@@ -278,6 +281,20 @@ author's line with the GitHub mark: **github.com/MisterTemaki** (PS5SX2 shows it
   library does: **Internal** (the console's drive), **USB** (only while a game is on a USB drive) and **Network**
   (games on a share). **L1 / R1** go round the tabs; each tab keeps its place, and the shelf opens on the tab
   you used last.
+- **Opening at once (2.10):** after each scan the app saves the game list in `/data/snes9x/library.bin`.
+  - **First start** (or no saved list, or a saved list that is damaged or from another format version): the shelf
+    scans the folders as before, with "Looking for games..." and its progress, and then saves the list.
+  - **Later starts:** the shelf appears at once from the saved list (the games of a USB or extended drive that isn't
+    plugged in are left out) while the folders are checked in the background, with nothing on the screen. If
+    games were added, removed or renamed, the shelf updates quietly: the tab, the search and the selected game stay
+    (if that game is gone, its neighbour is selected).
+  - **Back from a game:** the shelf comes back as it was, with no scan. The folders are only checked again (in the
+    background) when a drive was plugged in or removed during the game.
+  - A game deleted since the last start may still be on the shelf for a moment: picking it says "The file is no
+    longer there." and returns to the shelf, which then drops it.
+  - **Covers of new games** found by the background check: the Snes9x helper downloads them in the background as
+    usual. With another jailbreak daemon (the prefetch way, below) they are fetched at the next start: the app never
+    restarts itself while you are on the shelf.
 - **Official names:** SNES ROMs have no serial. A game is identified by its file name or, when that doesn't
   match, by the ROM's CRC32, looked up in a No-Intro table of 4268 games built into the app.
   - The CRC is taken without a copier header; for a `.zip` or a `.7z`, the CRC stored in the archive is used.
@@ -703,7 +720,7 @@ make ps5 -j$(nproc)              # build/ps5/Snes9xPS5.elf (installer + helper, 
 make send PS5_HOST=192.168.0.10  # sends it to elfldr (port 9021)
 make dist                        # build/dist/Snes9xPS5-v<version>.elf, the release zip, the source zip
 make app                         # only build/app/PPSA99922/, to copy by hand
-make test                        # Linux builds (app, installer, helper) + 469 tests (ASan/UBSan) and the unit tests
+make test                        # Linux builds (app, installer, helper) + 497 tests (ASan/UBSan) and the unit tests
 ```
 
 The build has three stages:
