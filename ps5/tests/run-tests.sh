@@ -25,6 +25,7 @@ BIN=$PWD/build/host/snes9x-ps5-host
 INSTALLER=$PWD/build/host/snes9x-ps5-installer
 HELPER=$PWD/build/host/snes9x-ps5-helper
 VER=$(sed -n 's/^VERSION ?= //p' Makefile) # the release the binaries say they are
+CVER=$(sed -n 's/.*"contentVersion": "\([0-9.]*\)".*/\1/p' app/sce_sys/param.json) # the same, as param.json says it
 # ports nobody listens on, so the app's ordinary runs find no helper and no ELF loader
 export SNES9X_HELPER_PORT=$((20000 + RANDOM % 10000)) SNES9X_ELFLDR_PORT=$((30000 + RANDOM % 10000)) SNES9X_JB_NO_OTHERS=1
 # the debug logs are off by default (2.6.1): the tests read boot.log, so here a settings file without the key means on
@@ -1654,6 +1655,365 @@ rc=$(SNES9X_HOST_NETFS_DELAY_MS=3000 SNES9X_HOST_REALTIME=1 MAXFLIPS=900 SNES9X_
 expect "grep -q 'network CRC pass: 0 ROM(s) read (stopped)' $T/root/logs/boot.log" "Settings stops the pass while it reads"
 expect "grep -q 'dkc.sfc -> \"Donkey Kong Country (USA) (Rev 2)\" (by CRC)' $T/root/logs/boot.log" "and, once Settings is left, the ROM it was reading is read again and named"
 expect "! grep -q 'runtime error\|AddressSanitizer' $T/out.txt" "no sanitizer reports"
+
+echo "== 41. the 2.10 audit: the eboot's imports and C++ runtime, the version reaches every object, a failed allocation throws, the helper's HTTP limits, the shelf without threads, the crash report, ShadowMount+'s folder, 2.10 after 2.9"
+SDKLIB=${PS5_PAYLOAD_SDK:-/opt/ps5-payload-sdk}/target/lib
+stop41() { pkill -f 'build/host/snes9x-ps5-(installer|helper)' 2>/dev/null; pkill -f 'http.server 1[89][0-9][0-9][0-9]' 2>/dev/null; sleep 0.3; }
+waitfor41() { for i in $(seq 1 100); do grep -q "$2" "$1" 2>/dev/null && return 0; sleep 0.1; done; return 1; }
+QUIT41() { echo "$1:$L3R3;$(($1 + 5)):0;$(($1 + 20)):$UP;$(($1 + 21)):0;$(($1 + 30)):$CROSS;$(($1 + 31)):0"; }
+# a. the PIE of the last make ps5 (build/app/snes9x-pie.elf): the eleven modules 2.9 loads, no C++ runtime import, and its
+#    own personality routine, which every CIE names through a slot relocated to it (2.9: an R_X86_64_64 to the import)
+if [ -f build/app/snes9x-pie.elf ] && [ -d "$SDKLIB" ]; then
+	python3 tools/check_imports.py build/app/snes9x-pie.elf "$SDKLIB" >"$WORK/imports.txt" 2>&1
+	rc=$?
+	expect "[ $rc = 0 ] && grep -q '^check_imports: ok' $WORK/imports.txt && ! grep -q 'libkernel_sys\|libkernel_web' $WORK/imports.txt" "the app's PIE: only allowed modules, every import found in one of them, no C++ runtime import"
+	if command -v llvm-dwarfdump-18 >/dev/null && command -v llvm-readelf-18 >/dev/null; then
+		P=build/app/snes9x-pie.elf
+		pers=$(llvm-readelf-18 -sW $P | awk '$NF=="__gxx_personality_v0" && $2 != "0000000000000000" {print $2}' | sed 's/^0*//' | head -1)
+		slots=$(llvm-dwarfdump-18 --eh-frame $P 2>/dev/null | awk '/Personality Address/ {print $3}' | sed 's/^0*//' | sort -u)
+		hdr=$(llvm-readelf-18 -SW $P | awk '$2==".eh_frame_hdr" {print $4}' | sed 's/^0*//')
+		ok=1
+		[ -n "$pers" ] && [ -n "$slots" ] || ok=0
+		for s in $slots; do llvm-readelf-18 -rW $P | grep -qi "^0*$s .*R_X86_64_RELATIVE *0*$pers\$" || ok=0; done
+		llvm-readelf-18 -sW $P | awk '$NF=="__eh_frame_hdr_start" {print $2}' | grep -qi "0*$hdr\$" || ok=0
+		expect "[ $ok = 1 ]" "the eboot's exceptions: its own __gxx_personality_v0 (0x$pers), every CIE's personality slot ($(echo $slots | tr ' ' ,)) relocated to it"
+		expect "llvm-readelf-18 -sW $P | awk '\$NF==\"_Znwm\" && \$5==\"LOCAL\"' | grep -q . && llvm-readelf-18 -sW $P | awk '\$NF==\"__cxa_throw\" && \$5==\"LOCAL\"' | grep -q ." "operator new and __cxa_throw are the eboot's own"
+	fi
+else
+	echo "  (skipped: build/app/snes9x-pie.elf or the SDK isn't there -- make ps5 first)"
+fi
+# the check itself refuses what crashed the other ports: statfs (libkernel_sys), the personality routine, __dynamic_cast
+if [ -d "$SDKLIB" ] && command -v ld.lld >/dev/null && command -v clang >/dev/null; then
+	mkdir -p "$WORK/imp"
+	printf 'int statfs(const char*, void*);\nint _start(void) { return statfs("/", 0); }\n' >"$WORK/imp/bad.c"
+	clang -fPIC -c -o "$WORK/imp/bad.o" "$WORK/imp/bad.c" &&
+		ld.lld -pie --no-dynamic-linker -e _start -o "$WORK/imp/bad.elf" "$WORK/imp/bad.o" --as-needed "$SDKLIB/libkernel.so" "$SDKLIB/libkernel_sys.so"
+	python3 tools/check_imports.py "$WORK/imp/bad.elf" "$SDKLIB" >"$WORK/imp/out.txt" 2>&1
+	rc=$?
+	expect "[ $rc = 1 ] && grep -q 'NEEDED libkernel_sys.sprx: not a module the app may load' $WORK/imp/out.txt && grep -q 'import statfs: not in an allowed module (only in libkernel_sys.so)' $WORK/imp/out.txt" "a PIE importing statfs: refused, naming libkernel_sys"
+	for sym in __gxx_personality_v0 __dynamic_cast __cxa_get_globals; do
+		printf 'extern char %s;\nvoid* p = &%s;\nint _start(void) { return p != 0; }\n' $sym $sym >"$WORK/imp/$sym.c"
+		clang -fPIC -c -o "$WORK/imp/$sym.o" "$WORK/imp/$sym.c" &&
+			ld.lld -pie --no-dynamic-linker -e _start -o "$WORK/imp/$sym.elf" "$WORK/imp/$sym.o" --as-needed "$SDKLIB/libkernel.so" "$SDKLIB/libSceLibcInternal.so"
+		python3 tools/check_imports.py "$WORK/imp/$sym.elf" "$SDKLIB" >"$WORK/imp/$sym.txt" 2>&1
+		rc=$?
+		expect "[ $rc = 1 ] && grep -q 'import $sym: the C++ runtime .* must be the eboot.s own' $WORK/imp/$sym.txt" "a PIE importing $sym from the system: refused"
+	done
+	make -s --eval 'print-app-stubs: ; @echo $(APP_STUBS)' print-app-stubs >"$WORK/imp/stubs.txt" 2>&1
+	expect "grep -q '/libkernel.so' $WORK/imp/stubs.txt && ! grep -q 'libkernel_sys\|libkernel_web' $WORK/imp/stubs.txt" "the app's link takes no libkernel_sys / libkernel_web stub"
+	expect "make -n -p build/app/snes9x-pie.elf 2>/dev/null | grep -A2 '^build/app/snes9x-pie.elf:' | grep -q check_imports.py" "make ps5 runs the check on every link of the PIE"
+else
+	echo "  (skipped: no SDK, ld.lld or clang for the check's own test)"
+fi
+# b. a new VERSION (TITLE_ID, UPDATE_REPO) rebuilds what is built with it; the same one rebuilds nothing; an asset rebuilds
+#    the object it is built into (2.9: recipe-less pattern rules, nothing)
+cp -p build/defs.stamp "$WORK/defs.stamp.keep" 2>/dev/null
+make -n build/host/snes9x-ps5-host build/host/snes9x-ps5-installer VERSION=9.8.7 >"$WORK/t41-make-new.txt" 2>&1
+[ -f "$WORK/defs.stamp.keep" ] && cp -p "$WORK/defs.stamp.keep" build/defs.stamp
+make -n build/host/snes9x-ps5-host build/host/snes9x-ps5-installer >"$WORK/t41-make-same.txt" 2>&1
+[ -f "$WORK/defs.stamp.keep" ] && cp -p "$WORK/defs.stamp.keep" build/defs.stamp
+expect "grep -q 'main-boot.cpp' $WORK/t41-make-new.txt && grep -q 'installer_main.cpp' $WORK/t41-make-new.txt && grep -q 'fe_shelf.cpp' $WORK/t41-make-new.txt && ! grep -q 'memmap.cpp' $WORK/t41-make-new.txt" "a new VERSION: the objects that carry it are built again, not the core (make -n)"
+expect "! grep -q 'main-boot.cpp\|installer_main.cpp' $WORK/t41-make-same.txt" "... the same VERSION: nothing built again"
+make -s --eval 'audit-rm-stamp: ; @rm -f build/defs.stamp' audit-rm-stamp build/defs.stamp >"$WORK/t41-make-clean.txt" 2>&1
+rc=$?
+stamp=$(cat build/defs.stamp 2>/dev/null)
+[ -f "$WORK/defs.stamp.keep" ] && cp -p "$WORK/defs.stamp.keep" build/defs.stamp
+expect "[ $rc = 0 ] && [ \"$stamp\" = \"$VER PPSA99922 MisterTemaki/snes9xPS5\" ]" "the stamp removed during the run (make clean <target>): made again (exit $rc)"
+deps_ok=1
+for pair in frontend/data/cacert.pem:fe_tlshttp frontend/data/snes-nointro.tsv:fe_games frontend/data/snes-cover-index.txt:fe_covers \
+	frontend/assets/borders/default.png:fe_border frontend/data/snes-border-index.txt:fe_borderfetch \
+	frontend/assets/fonts/Roboto-Regular.ttf:fe_text third_party/lzma7z/7z.h:fe_7z; do
+	make -n -W "${pair%%:*}" "build/host/port/frontend/${pair##*:}.o" 2>&1 | grep -q "frontend/${pair##*:}.cpp" || { deps_ok=0; echo "    not rebuilt: ${pair##*:}.o for ${pair%%:*}"; }
+done
+expect "[ $deps_ok = 1 ]" "a changed table, CA list, font, border or LZMA header rebuilds the object it is built into"
+# c. the eboot's operator new (proto/native/tooling/native/app_cpp_runtime.cpp): a failed allocation is std::bad_alloc
+mkdir -p "$WORK/t41-new"
+cat >"$WORK/t41-new/main.cpp" <<'EOF'
+#include <cstdint>
+#include <cstdio>
+#include <new>
+int main()
+{
+	int caught = 0;
+	volatile size_t huge = SIZE_MAX / 2 + 1;
+	try { void* p = ::operator new(huge); ::operator delete(p); } catch (const std::bad_alloc&) { caught++; }
+	try { char* p = new char[huge]; delete[] p; } catch (const std::bad_alloc&) { caught++; }
+	try { void* p = ::operator new(huge, std::align_val_t(64)); ::operator delete(p, std::align_val_t(64)); } catch (const std::bad_alloc&) { caught++; }
+	void* q = ::operator new(huge, std::nothrow);
+	void* r = ::operator new(16);
+	::operator delete(r);
+	std::printf("caught %d, nothrow %s\n", caught, q ? "allocated" : "null");
+	return caught == 3 && !q ? 0 : 1;
+}
+EOF
+g++ -std=c++20 -O1 -fno-rtti -o "$WORK/t41-new/rt" "$WORK/t41-new/main.cpp" proto/native/tooling/native/app_cpp_runtime.cpp -Wno-alloc-size-larger-than >"$WORK/t41-new/build.txt" 2>&1
+"$WORK/t41-new/rt" >"$WORK/t41-new/out.txt" 2>&1
+rc=$?
+expect "[ $rc = 0 ] && grep -q 'caught 3, nothrow null' $WORK/t41-new/out.txt" "the eboot's operator new: a failed allocation throws std::bad_alloc (new, new[], aligned), nothrow gives null (got $rc: $(head -c 80 $WORK/t41-new/out.txt))"
+# d. the start-up self-test (debug logs on): our throw and libc++'s caught (bad_alloc only on the console)
+T=$(newroot t41-exc)
+rc=$(run "$T" "0:0;30:$OPTIONS;32:0;40:$CROSS;42:0" "")
+expect "grep -q \"\[boot\] exceptions: ok (our throw caught, libc++'s std::invalid_argument caught, operator new's std::bad_alloc not tried on the host)\" $T/root/logs/boot.log" "the start-up self-test: exceptions: ok"
+# e. the helper's HTTP client: a chunk size near 2^64 is over the limit at once (it wrapped round and read on)
+stop41
+T=$(newroot t41-chunk)
+mkdir -p "$T/root/covers"
+OPORT=$((18000 + RANDOM % 1900))
+python3 tests/odd_http_server.py $OPORT bigchunk 2>"$T/server.txt" &
+osp=$!
+sleep 0.5
+printf 'Big.png\thttp://127.0.0.1:%s/big.png\n' $OPORT >"$T/root/covers/wanted.txt"
+SNES9X_PS5_ROOT=$T/root ASAN_OPTIONS=detect_leaks=0 timeout 8 "$HELPER" >"$T/helper.txt" 2>&1
+kill $osp 2>/dev/null; wait $osp 2>/dev/null
+stop41
+H="$T/root/logs/helper.log"
+expect "grep -q 'GET http://127.0.0.1:$OPORT/big.png -> -2,' $H && ! grep -q 'a chunk stopped' $H" "a chunk bigger than the answer may be: refused at once as too big (-2), not read on"
+expect "[ \$(grep -c 'GET /big.png' $T/server.txt) = 1 ] && [ ! -e $T/root/covers/Big.png ]" "... asked once, nothing saved"
+# f. a redirect from HTTPS down to plain HTTP isn't followed
+C=$WORK/t41-certs; rm -rf "$C"; mkdir -p "$C"
+openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:P-256 -nodes -keyout "$C/ca.key" -out "$C/ca.pem" -days 30 -subj "/CN=Snes9x PS5 Test CA" 2>/dev/null
+openssl req -newkey ec -pkeyopt ec_paramgen_curve:P-256 -nodes -keyout "$C/srv.key" -out "$C/srv.csr" -subj "/CN=localhost" 2>/dev/null
+printf 'subjectAltName=DNS:localhost\nbasicConstraints=CA:FALSE\n' >"$C/ext.cnf"
+openssl x509 -req -in "$C/srv.csr" -CA "$C/ca.pem" -CAkey "$C/ca.key" -CAcreateserial -out "$C/srv.pem" -days 30 -extfile "$C/ext.cnf" 2>/dev/null
+T=$(newroot t41-down)
+mkdir -p "$T/root/covers"
+HPORT=$((18000 + RANDOM % 1900))
+python3 tests/odd_http_server.py $HPORT bigchunk 2>"$T/plain.txt" &
+p1=$!
+python3 tests/odd_http_server.py $((HPORT + 1)) downgrade "$C/srv.pem" "$C/srv.key" "http://127.0.0.1:$HPORT/big.png" 2>"$T/tls.txt" &
+p2=$!
+sleep 0.6
+printf 'Down.png\thttps://localhost:%s/down.png\n' $((HPORT + 1)) >"$T/root/covers/wanted.txt"
+SNES9X_EXTRA_CA=$C/ca.pem SNES9X_PS5_ROOT=$T/root ASAN_OPTIONS=detect_leaks=0 timeout 6 "$HELPER" >"$T/helper.txt" 2>&1
+kill $p1 $p2 2>/dev/null; wait $p1 $p2 2>/dev/null
+stop41
+H="$T/root/logs/helper.log"
+expect "grep -q 'GET /down.png' $T/tls.txt && grep -q 'from HTTPS to plain HTTP: not followed' $H && ! grep -q 'GET' $T/plain.txt" "a redirect from https:// to http://: not followed, the plain server never asked"
+expect "! grep -q 'runtime error\|AddressSanitizer' $T/helper.txt" "no sanitizer reports"
+# g. the shelf when the system refuses every new thread: it draws, and a game starts (its render pool counted threads that
+#    never started and waited for them for ever)
+T=$(newroot t41-nothreads)
+python3 tests/make_test_rom.py "$T/root/roms/test.sfc" ntsc >/dev/null
+rc=$(SNES9X_HOST_NO_THREADS=1 MAXFLIPS=600 run "$T" "0:0;60:$CROSS;62:0;$(QUIT41 200)" "")
+expect "[ $rc = 0 ] && grep -q 'loading .*test.sfc' $T/root/logs/boot.log && grep -q '\[emu\] start: running' $T/root/logs/boot.log" "no threads at all: the shelf works and the game starts (exit $rc)"
+# h. the crash report with rbp holding no frame (-O3 code): the stack scan first, the report whole
+T=$(newroot t41-crash)
+SNES9X_HOST_CRASH_HANDLER=1 SNES9X_HOST_CRASH_TEST=1 SNES9X_PS5_ROOT=$T/root SNES9X_PS5_HOMEBREW=$T/homebrew \
+	ASAN_OPTIONS=detect_leaks=0:handle_segv=0:allow_user_segv_handler=1 timeout 30 "$BIN" >"$T/out.txt" 2>&1
+rc=$?
+B=$T/root/logs/boot.log
+expect "[ $rc = 1 ] && grep -q '== CRASH ==' $B && grep -q 'signal 11 (SIGSEGV)' $B && grep -q 'stage\[boot\] = crash test' $B && grep -q '== END CRASH ==' $B" "a fault with a garbage rbp: the crash report is written whole (exit $rc)"
+# i. ShadowMount+: the payload and the helper's updates go to the folder the console runs the app from (here a USB drive's
+#    folder, nullfs-mounted on /system_ex/app/PPSA99922), never a second copy in /data/homebrew; an image is said, not written
+stop41
+T=$(newroot t41-place)
+# the mount table's names are cut at 87 bytes, as the console's: with a long work dir the folders live under a short one
+M=$T; [ ${#T} -le 56 ] || M=$(mktemp -d /tmp/snes41.XXXXXX)
+SX=$M/sysex; U=$M/usb0/homebrew/PPSA99922
+SNES9X_PS5_ROOT=$T/root SNES9X_PS5_HOMEBREW=$T/homebrew SNES9X_PS5_APPMETA=$T/appmeta ASAN_OPTIONS=detect_leaks=0 timeout 60 "$INSTALLER" >"$T/inst0.txt" 2>&1 &
+waitfor41 $T/root/logs/installer.log 'listening on 127.0.0.1'
+stop41
+rm -rf $SX $M/usb0 && mkdir -p $SX/app $M/usb0/homebrew && cp -r $T/homebrew/PPSA99922 $U
+sums41() { ( cd $1 && find . -type f | sort | xargs sha256sum ); }
+ver41() { sed -i "s/\"contentVersion\": \"[0-9.]*\"/\"contentVersion\": \"$2\"/" $1/sce_sys/param.json; }
+ln -s $U $SX/app/PPSA99922
+MNT="$SX/app/PPSA99922|nullfs|$U|rw;$M/usb0|exfatfs|/dev/da0s1|rw"
+echo "eboot usb old" >$U/eboot.bin; ver41 $U 00.900.000
+env SNES9X_SYSTEM_EX=$SX SNES9X_SHADOWMNT=$M/shadowmnt SNES9X_USER_APP=$M/userapp SNES9X_PS5_ROOT=$T/root SNES9X_PS5_HOMEBREW=$M/hb2 \
+	SNES9X_PS5_APPMETA=$T/appmeta SNES9X_HOST_MOUNTS="$MNT" ASAN_OPTIONS=detect_leaks=0 timeout 60 "$INSTALLER" >"$T/inst1.txt" 2>&1 &
+waitfor41 $T/inst1.txt 'listening on 127.0.0.1'
+stop41
+expect "grep -q \"updated to $VER (in $U, the copy ShadowMount+ runs)\" $T/inst1.txt && ! grep -q 'eboot usb old' $U/eboot.bin && grep -q '\"contentVersion\": \"$CVER\"' $U/sce_sys/param.json && [ ! -e $M/hb2 ]" "the payload: the copy ShadowMount+ runs (a USB folder) updated through the mount, no second copy"
+SRV=$T/srv; mkdir -p $SRV
+SPORT=$((18000 + RANDOM % 1900))
+(cd "$SRV" && exec python3 -m http.server $SPORT --bind 127.0.0.1 >/dev/null 2>&1) &
+rel41() { # tag contentVersion: a release of the USB copy with that tag, served as the newest
+	rm -rf $T/rel && mkdir -p $T/rel && cp -r $U $T/rel/PPSA99922 && rm -f $T/rel/PPSA99922/manifest.sha256
+	echo "eboot $1" >$T/rel/PPSA99922/eboot.bin; ver41 $T/rel/PPSA99922 $2
+	python3 tools/make_release_zip.py $T/rel/PPSA99922 PPSA99922 $SRV/Snes9xPS5-$1-PPSA99922.zip >/dev/null
+	local sha size
+	sha=$(sha256sum $SRV/Snes9xPS5-$1-PPSA99922.zip | cut -c1-64); size=$(stat -c %s $SRV/Snes9xPS5-$1-PPSA99922.zip)
+	printf '{"tag_name":"%s","assets":[{"name":"Snes9xPS5-%s-PPSA99922.zip","size":%s,"digest":"sha256:%s","browser_download_url":"http://127.0.0.1:%s/Snes9xPS5-%s-PPSA99922.zip"}]}' $1 $1 $size $sha $SPORT $1 >$SRV/latest.json
+}
+rel41 v9.9 99.000.000
+sums41 $T/homebrew/PPSA99922 >$T/home.sums
+UPD="python3 tests/update_client.py $SNES9X_HELPER_PORT"
+helper41() { # the helper with env ($@)
+	rm -f $T/root/logs/helper.log
+	env SNES9X_UPDATE_API=http://127.0.0.1:$SPORT/latest.json SNES9X_SYSTEM_EX=$SX SNES9X_SHADOWMNT=$M/shadowmnt SNES9X_USER_APP=$M/userapp SNES9X_PS5_ROOT=$T/root SNES9X_PS5_HOMEBREW=$T/homebrew SNES9X_PS5_APPMETA=$T/appmeta "$@" ASAN_OPTIONS=detect_leaks=0 timeout 120 "$HELPER" >"$T/helper.txt" 2>&1 &
+	sleep 0.3
+	waitfor41 $T/root/logs/helper.log 'listening on 127.0.0.1'
+}
+helper41 SNES9X_HOST_MOUNTS="$MNT"
+expect "$UPD check $VER --until available,failed | grep -q '^available|9.9|' && $UPD install $VER --until done,failed | grep -q '^done|9.9|'" "the helper: 9.9 found, installed"
+expect "grep -q \"$SX/app/PPSA99922 is a nullfs mount of $U (on $M/usb0, exfatfs, from /dev/da0s1): files go through $SX/app/PPSA99922\" $T/root/logs/helper.log" "the app runs from a USB drive's folder (a nullfs mount): found, written through the mount"
+expect "grep -q 'eboot v9.9' $U/eboot.bin && grep -q '\"contentVersion\": \"99.000.000\"' $U/sce_sys/param.json" "... the update is in that folder"
+expect "sums41 $T/homebrew/PPSA99922 | cmp -s - $T/home.sums" "... /data/homebrew's copy untouched (no second copy written)"
+pkill -f 'build/host/snes9x-ps5-(installer|helper)' 2>/dev/null; sleep 0.3
+I=$M/shadowmnt/img1/PPSA99922
+rm -rf $M/shadowmnt $SX/app/PPSA99922 && mkdir -p $M/shadowmnt/img1 && cp -r $U $I && ln -s $I $SX/app/PPSA99922
+sums41 $I >$T/img.sums
+helper41 SNES9X_HOST_MOUNTS="$SX/app/PPSA99922|nullfs|$I|rw;$M/shadowmnt/img1|ufs|/dev/lvd2|ro"
+rel41 v9.10 99.100.000
+expect "$UPD check 9.9 --until available,failed | grep -q '^available|9.10|' && $UPD install 9.9 --until done,failed | grep -q '^failed|.*image that ShadowMount+ mounted'" "an image ShadowMount+ mounted can't take the update: refused, saying why"
+expect "sums41 $I | cmp -s - $T/img.sums && [ -z \"\$(find $M -name '*.new')\" ]" "... nothing written into it"
+# j. 2.10 after 2.9 (every comparison is by number: as text or as a decimal, 2.10 would come before 2.9)
+pkill -f 'build/host/snes9x-ps5-(installer|helper)' 2>/dev/null; sleep 0.3
+rm -rf $SX/app/PPSA99922
+helper41
+rel41 v2.10 02.100.000
+expect "$UPD check 2.9 --until available,uptodate,failed | grep -q '^available|2.10|'" "the updater: an app at 2.9 is offered 2.10"
+rel41 v2.9 02.090.000
+expect "$UPD check 2.10 --until available,uptodate,failed | grep -q '^uptodate|2.9|'" "... an app at 2.10 isn't offered 2.9"
+stop41
+want_cver=$(python3 -c "v='$VER'.split('.'); print('%02d.%03d.000' % (int(v[0]), int(v[1]) * 10 + (int(v[2]) if len(v) > 2 else 0)))")
+expect "[ \"$CVER\" = \"$want_cver\" ]" "param.json's contentVersion ($CVER) is the Makefile's VERSION $VER as the installer compares it ($want_cver; 2.9 was 02.090.000)"
+T2=$T/inst29; mkdir -p $T2/root $T2/homebrew; cp -r $T/homebrew/PPSA99922 $T2/homebrew/; ver41 $T2/homebrew/PPSA99922 02.090.000
+SNES9X_PS5_ROOT=$T2/root SNES9X_PS5_HOMEBREW=$T2/homebrew SNES9X_PS5_APPMETA=$T2/appmeta ASAN_OPTIONS=detect_leaks=0 timeout 60 "$INSTALLER" >"$T2/inst.txt" 2>&1 &
+waitfor41 $T2/inst.txt 'listening on 127.0.0.1'
+stop41
+expect "grep -q '\"contentVersion\": \"$CVER\"' $T2/homebrew/PPSA99922/sce_sys/param.json && ! grep -q 'a newer version is installed' $T2/inst.txt" "the payload over a 2.9 app (02.090.000): installs this version, not \"a newer version is installed\""
+expect "! grep -q 'runtime error\|AddressSanitizer' $T/inst1.txt $T/helper.txt $T2/inst.txt" "no sanitizer reports"
+[ "$M" != "$T" ] && rm -rf "$M"
+
+echo "== 42. search by name on the shelf (2.10): Circle opens the keyboard, the shelf shows the games that match (name or file name, any case, accents folded); no match says so; Cancel keeps the shelf; the search stays across tabs; the skip keys and Cross count in the filtered shelf"
+# eight games; the shelf sorts them by name: Donkey Kong Country, F-Zero, Mario Paint, Pokémon Gold (Hack), Super Mario Kart,
+# Super Mario World, Super Metroid, Yoshi's Island. The keyboard (tests/osk_pad.py) opens on its first key each time.
+srch_pad() { python3 tests/osk_pad.py 2>/dev/null; }
+srch_done() { echo "$1" | tr ';' '\n' | awk -F: '$2 == "8" {print $1}' | sed -n "${2}p"; } # pad, n: the flip of the nth OPTIONS
+srch_root() {
+	local t
+	t=$(newroot "$1")
+	echo "covers_download=0" >>"$t/root/snes9x-ps5.ini" # as on the console, where the shelf itself downloads nothing: title cards at once
+	for n in "Super Mario World (USA)" "Super Mario Kart (USA)" "Super Metroid (USA)" "F-Zero (USA)" "Pokémon Gold (Hack)" \
+		"Donkey Kong Country (USA)" "Mario Paint (Japan, USA)" "Yoshi's Island (USA)"; do
+		python3 tests/make_test_rom.py "$t/root/roms/$n.sfc" ntsc >/dev/null
+	done
+	echo "$t"
+}
+SQUARE=8000; R1=800; R2=200; TRIANGLE=1000
+# a. "MARIO" (capitals): three games; R2 (skip 10) stops on the filtered shelf's last game, Cross plays it
+T=$(srch_root t42a)
+PAD=$(srch_pad <<'STEPS'
+frame 60
+press CIRCLE
+type MARIO
+wait 10
+press OPTIONS
+wait 40
+press R2
+wait 30
+press CROSS
+STEPS
+)
+last=$(echo "$PAD" | sed 's/.*;\([0-9]*\):0$/\1/')
+rc=$(MAXFLIPS=$((last + 200)) run "$T" "$PAD;$(QUIT41 $((last + 120)))" "$((last - 40))")
+expect "grep -q '\[shelf\] tab Internal: 3 of 8 game(s) match the search \"MARIO\"' $T/root/logs/boot.log" "\"MARIO\": 3 of the 8 games (capitals or not)"
+expect "grep -q 'loading .*Super Mario World (USA).sfc' $T/root/logs/boot.log" "R2 on the filtered shelf goes to its last game (Super Mario World), and Cross plays it"
+expect "[ $rc = 0 ] && ! grep -q 'runtime error\|AddressSanitizer' $T/out.txt" "exit code 0, no sanitizer reports"
+FILTERED=$T/dump/flip$(printf %05d $((last - 40))).ppm
+# b. accents and file names: "pokemon" finds "Pokémon Gold (Hack)"; "(japan" only the file name of Mario Paint; the keyboard
+#    says how many match while it is open (its screen dumped while "pokemon" is typed)
+T=$(srch_root t42b)
+PAD=$(srch_pad <<'STEPS'
+frame 60
+press CIRCLE
+type pokemon
+wait 12
+press OPTIONS
+wait 40
+press CIRCLE
+press SQUARE 7
+type (japan
+press OPTIONS
+wait 40
+press CROSS
+STEPS
+)
+last=$(echo "$PAD" | sed 's/.*;\([0-9]*\):0$/\1/')
+kb=$(srch_done "$PAD" 1)
+rc=$(MAXFLIPS=$((last + 200)) run "$T" "$PAD;$(QUIT41 $((last + 120)))" "$((kb - 4))")
+expect "grep -q 'match the search \"pokemon\"' $T/root/logs/boot.log && grep -q 'tab Internal: 1 of 8 game(s) match the search \"pokemon\"' $T/root/logs/boot.log" "\"pokemon\" finds \"Pokémon Gold (Hack)\" (accents folded)"
+expect "grep -q 'tab Internal: 1 of 8 game(s) match the search \"(japan\"' $T/root/logs/boot.log && grep -q 'loading .*Mario Paint (Japan, USA).sfc' $T/root/logs/boot.log" "\"(japan\" is only in a file name: Mario Paint, which Cross plays"
+KEYBOARD=$T/dump/flip$(printf %05d $((kb - 4))).ppm
+expect "[ -f $KEYBOARD ]" "the keyboard's screen with \"pokemon\" typed was dumped"
+# c. no match: the shelf says so and how to get back; Circle, the text deleted, Done: every game again. Cancel keeps a search.
+T=$(srch_root t42c)
+PAD=$(srch_pad <<'STEPS'
+frame 60
+press CIRCLE
+type zzz
+press OPTIONS
+wait 40
+press CIRCLE
+type x
+press CIRCLE
+wait 30
+press CIRCLE
+press SQUARE 3
+press OPTIONS
+wait 30
+STEPS
+)
+last=$(echo "$PAD" | sed 's/.*;\([0-9]*\):0$/\1/')
+nomatch=$(srch_done "$PAD" 1)
+rc=$(MAXFLIPS=$((last + 100)) run "$T" "$PAD;$((last + 10)):$OPTIONS;$((last + 12)):0;$((last + 20)):$CROSS;$((last + 22)):0" "$((nomatch + 30))")
+log=$T/root/logs/boot.log
+expect "grep -q 'tab Internal: 0 of 8 game(s) match the search \"zzz\"' $log" "\"zzz\": no game"
+expect "[ \$(grep -c 'search \"zzz\"' $log) = 2 ] && ! grep -q 'search \"zzzx\"\|search \"x\"' $log" "Circle (Cancel) on the keyboard leaves the search as it was"
+expect "grep -q '\[shelf\] search cleared: every game' $log && tail -n 20 $log | grep -q 'tab Internal: 8 game(s)'" "the text deleted and Done: the 8 games again"
+expect "[ $rc = 0 ] && ! grep -q 'runtime error\|AddressSanitizer' $T/out.txt" "exit code 0, no sanitizer reports"
+NOMATCH=$T/dump/flip$(printf %05d $((nomatch + 30))).ppm
+expect "[ -f $NOMATCH ]" "the no-match screen was dumped"
+# d. the search stays when the tab changes: R1 to the Network tab cuts it too
+T=$(srch_root t42d)
+mkdir -p "$T/share"
+python3 tests/make_test_rom.py "$T/share/Super Mario All-Stars (USA).sfc" ntsc >/dev/null
+python3 tests/make_test_rom.py "$T/share/Zelda (Hack).sfc" ntsc >/dev/null
+echo "smb://10.0.0.5/games" >"$T/root/shares.txt"
+PAD=$(srch_pad <<'STEPS'
+frame 220
+press CIRCLE
+type mario
+press OPTIONS
+wait 30
+press R1
+wait 40
+STEPS
+)
+last=$(echo "$PAD" | sed 's/.*;\([0-9]*\):0$/\1/')
+rc=$(SNES9X_HOST_REALTIME=1 SNES9X_HOST_NETFS_DIR="$T/share" MAXFLIPS=$((last + 100)) run "$T" "$PAD;$((last + 10)):$OPTIONS;$((last + 12)):0;$((last + 20)):$CROSS;$((last + 22)):0" "")
+expect "grep -q 'tab Network: 1 of 2 game(s) match the search \"mario\"' $T/root/logs/boot.log" "R1: the Network tab shows only its game that matches"
+expect "[ $rc = 0 ] && ! grep -q 'runtime error\|AddressSanitizer' $T/out.txt" "exit code 0, no sanitizer reports"
+# e. the new texts are translated (Spanish): nothing of the search is shown in English
+T=$(srch_root t42e)
+echo "language=1" >>"$T/root/snes9x-ps5.ini"
+PAD=$(srch_pad <<'STEPS'
+frame 60
+press CIRCLE
+type zzz
+press OPTIONS
+wait 30
+press CIRCLE
+press SQUARE 3
+type mario
+press OPTIONS
+wait 30
+STEPS
+)
+last=$(echo "$PAD" | sed 's/.*;\([0-9]*\):0$/\1/')
+rc=$(SNES9X_HOST_I18N_MISSING=$T/missing.txt MAXFLIPS=$((last + 100)) run "$T" "$PAD;$((last + 10)):$OPTIONS;$((last + 12)):0;$((last + 20)):$CROSS;$((last + 22)):0" "")
+expect "[ $rc = 0 ] && ! grep -qi 'search\|match\|typed' $T/missing.txt 2>/dev/null" "Spanish: every text of the search translated ($(head -c 120 $T/missing.txt 2>/dev/null | tr '\n' '|'))"
+# the three screens for the report (SHOTS=<folder>)
+if [ -n "${SHOTS:-}" ]; then
+	mkdir -p "$SHOTS"
+	python3 -c "
+import sys
+from PIL import Image
+for src, dst in zip(sys.argv[1::2], sys.argv[2::2]):
+    Image.open(src).save(dst)
+" "$KEYBOARD" "$SHOTS/1-keyboard-open.png" "$FILTERED" "$SHOTS/2-filtered-shelf.png" "$NOMATCH" "$SHOTS/3-no-match.png" && echo "  (screens saved in $SHOTS)"
+fi
 
 echo
 echo "passed $PASS, failed $FAIL  (work dir $WORK)"
