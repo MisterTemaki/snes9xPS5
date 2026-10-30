@@ -69,6 +69,11 @@ std::string Region(const std::string& nointro);
 // (0 when not known: the cache or the file then supplies it, a ROM on a share only from the cache).
 GameInfo DescribeGame(const std::string& path, uint32_t rom_crc);
 
+// 2.10: clears crc_pending on the games whose path the CRC cache already has an answer for (in memory, no file read),
+// so a list kept from an earlier scan (the saved list, the shelf's list across a game) doesn't send them to NetNaming
+// again. Their names come with the next scan. Returns how many.
+size_t RefreshPendingFromCache(std::vector<GameInfo>& games);
+
 // The folders to look for ROMs in: OrbisRomRoots() plus the network shares that are connected (in memory, no I/O).
 std::vector<std::string> RomRoots();
 

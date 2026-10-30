@@ -2211,6 +2211,60 @@ secs=$(python3 -c "print(round($(date +%s.%N) - $start, 1))")
 expect "[ $rc = 0 ] && grep -q 'scan stopped before its end' $T/root/logs/boot.log && grep -q 'check stopped (the app quits)' $T/root/logs/boot.log" "quit while the check runs: it stops (exit code 0)"
 expect "python3 -c 'import sys; sys.exit(0 if $secs < 15 else 1)'" "... at once: the app was gone in ${secs}s (the check alone would take 18 s)"
 expect "cmp -s $T/lib1.bin $T/root/library.bin && [ ! -e $T/root/library.bin.part ] && ! grep -q 'check of the folders done' $T/root/logs/boot.log" "the saved list is the one before, whole; no temporary file"
+# j. (review 3) a share that connects while the first start scans: the shelf scans again once it is up, its game is
+#    shelved and saved (the shares were looked at before the scan, not after it)
+T=$(lib_root t43j)
+mkdir -p "$T/share" && python3 tests/make_test_rom.py "$T/share/Contra III (USA).sfc" ntsc >/dev/null
+echo "smb://10.0.0.5/games" >"$T/root/shares.txt"
+rc=$(SNES9X_HOST_NETFS_DIR="$T/share" SNES9X_HOST_NETFS_CONNECT_MS=1000 SNES9X_HOST_SCAN_SLOW_MS=400 SNES9X_HOST_REALTIME=1 MAXFLIPS=1200 run "$T" "0:0;$(QUIT43 900)" "")
+expect "[ $rc = 0 ] && awk '/games\] 8 ROM\(s\)/{a=NR} /games\] 9 ROM\(s\)/{b=NR} END{exit !(a && b && a < b)}' $T/root/logs/boot.log" "the first scan found the 8 local games; the share that connected meanwhile was scanned after it (9)"
+expect "grep -q 'saved .*library.bin: 9 game(s)' $T/root/logs/boot.log" "the saved list has the share's game"
+# k. (review 3) from a saved list whose network game still says "CRC pending" while the CRC cache knows it: the naming
+#    pass doesn't read it again, the shelf doesn't scan again for it, the check is not thrown away, and the CRC cache is
+#    never written before it was read (no ".part" in the working folder)
+T=$(newroot t43k)
+echo "covers_download=0" >>"$T/root/snes9x-ps5.ini"
+mkdir -p "$T/share" && python3 tests/make_test_rom.py "$T/root/roms/Super Metroid (USA).sfc" ntsc >/dev/null
+python3 tests/make_test_rom.py "$T/share/dkc.sfc" ntsc >/dev/null
+python3 tests/forge_crc.py "$T/share/dkc.sfc" $(grep -P "\tDonkey Kong Country \(USA\) \(Rev 2\)$" frontend/data/snes-nointro.tsv | cut -f1) >/dev/null
+echo "smb://10.0.0.5/games" >"$T/root/shares.txt"
+SNES9X_HOST_NETFS_DIR="$T/share" SNES9X_HOST_REALTIME=1 MAXFLIPS=600 run "$T" "0:0;$(QUIT43 400)" "" >/dev/null
+expect "grep -q '/smb/10.0.0.5/games/dkc.sfc' $T/root/covers/crc-cache.txt && grep -q 'saved .*library.bin: 2 game(s)' $T/root/logs/boot.log" "first run: the share's ROM named by CRC, in the cache; the list saved"
+n43k=$(python3 tests/library_flags.py "$T/root/library.bin" dkc.sfc 8)
+rm -f "$T/root/logs/boot.log"
+rc=$(cd "$T" && SNES9X_HOST_NETFS_DIR="$T/share" SNES9X_HOST_SCAN_SLOW_MS=300 SNES9X_HOST_REALTIME=1 MAXFLIPS=600 run "$T" "0:0;$(QUIT43 400)" "")
+expect "[ $rc = 0 ] && [ \"$n43k\" = 1 ] && ! grep -q 'network CRC pass: [1-9][0-9]* ROM(s) read' $T/root/logs/boot.log" "an old \"CRC pending\" flag: the ROM is not read again"
+expect "! grep -q 'check stopped (the shelf scans the folders itself)' $T/root/logs/boot.log && grep -q 'check of the folders done' $T/root/logs/boot.log" "no scan of the shelf's own for it: the check ran to its end"
+expect "[ ! -e $T/.part ] && [ ! -e $T/root/.part ] && grep -q '/smb/10.0.0.5/games/dkc.sfc' $T/root/covers/crc-cache.txt" "the CRC cache kept its entry; no \".part\" written outside covers/"
+# l. (review 3) a drive unplugged during a game: its games leave the shelf at once on the way back
+T=$(lib_root t43l)
+U43=$T/usbroms
+mkdir -p "$U43" && python3 tests/make_test_rom.py "$U43/Contra III (USA).sfc" ntsc >/dev/null
+SNES9X_HOST_USB_ROOT=$U43 run "$T" "0:0;$(QUIT43 40)" "" >/dev/null
+rm -f "$T/root/logs/boot.log"
+( for i in $(seq 600); do
+	if grep -q 'loading ' "$T/root/logs/boot.log" 2>/dev/null; then rm -rf "$U43"; break; fi
+	sleep 0.05
+done ) &
+rc=$(SNES9X_HOST_USB_ROOT=$U43 SNES9X_HOST_SCAN_SLOW_MS=400 run "$T" "0:0;60:$CROSS;62:0;300:$L3R3;302:0;310:$UP;312:0;314:$UP;316:0;320:$CROSS;322:0;$(QUIT43 420)" "")
+wait
+expect "[ $rc = 0 ] && grep -q '1 game(s) left out: their folder isn.t there any more' $T/root/logs/boot.log" "back from the game, the unplugged drive's game left out at once"
+expect "awk '/left out: their folder isn.t there any more/{a=NR} /first frame .* from the list in memory/{b=NR} END{exit !(a && b && a < b)}' $T/root/logs/boot.log" "... before the shelf's first frame (8 games)"
+# m. (review 3) no thread for the check: the scan runs before the shelf with the progress screen, not a frozen one
+T=$(lib_root t43m)
+run "$T" "0:0;$(QUIT43 40)" "" >/dev/null
+rm -f "$T/root/logs/boot.log"
+rc=$(SNES9X_HOST_NO_THREADS=1 run "$T" "0:0;$(QUIT43 60)" "0,1,2,3")
+expect "[ $rc = 0 ] && grep -q 'no thread for the check: checking now' $T/root/logs/boot.log" "no thread: the check runs on the shelf's thread"
+expect "$CHECK $T/dump/flip00001.ppm 40 1000 12 10 26 >/dev/null && ! $CHECK $T/dump/flip00003.ppm 40 1000 12 10 26 >/dev/null 2>&1" "and the screen says so (\"Looking for games...\", flip 1) before the shelf (flip 3)"
+# n. (review 3) Fix Covers (R3) while the check runs: the check is stopped first, then runs again and is merged
+T=$(lib_root t43n)
+run "$T" "0:0;$(QUIT43 40)" "" >/dev/null
+python3 tests/make_test_rom.py "$T/root/roms/Contra III (USA).sfc" ntsc >/dev/null
+rm -f "$T/root/logs/boot.log"
+rc=$(SNES9X_HOST_SCAN_SLOW_MS=300 SNES9X_HOST_REALTIME=1 MAXFLIPS=1200 run "$T" "0:0;40:$L3R3;42:0;$(QUIT43 700)" "")
+expect "[ $rc = 0 ] && grep -q 'check stopped (Fix Covers)' $T/root/logs/boot.log && grep -q 'checking the folders in the background (after Fix Covers)' $T/root/logs/boot.log" "R3 while the check runs: stopped before the covers are listed, started again after"
+expect "grep -q 'check: 1 new, 0 gone' $T/root/logs/boot.log" "... and its list merged (the new game)"
 # i. the shelf's first frame with 5000 games: from the saved list, and from a scan (every start before 2.10)
 T=$(newroot t43i)
 python3 - "$T/root/roms" <<'PY'

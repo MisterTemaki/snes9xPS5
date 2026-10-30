@@ -31,6 +31,7 @@ constexpr uint32_t kVersion = 1; // a change of the layout above (or of what a f
 constexpr char kMagic[8] = {'S', '9', 'X', 'L', 'I', 'B', '\r', '\n'};
 constexpr uint32_t kMaxGames = 200000;
 constexpr uint32_t kMaxString = 4096;
+constexpr size_t kMinGameBytes = 8 * 4 + 1 + 4;
 
 inline uint32_t Crc32(const char* p, size_t n)
 {
@@ -150,7 +151,9 @@ inline Bad Decode(const std::string& data, std::vector<GameInfo>& out)
 	tail.U32(sum);
 	if (sum != Crc32(data.data(), data.size() - 4))
 		return Bad::Checksum;
-	if (!r.U32(count) || count > kMaxGames)
+	// the smallest game is its 8 string lengths, the flags and the CRC: a count the bytes left can't hold is refused
+	// before anything is allocated for it
+	if (!r.U32(count) || count > kMaxGames || count > (r.end - r.at) / kMinGameBytes)
 		return Bad::Format;
 	std::vector<GameInfo> games(count);
 	for (GameInfo& g : games)

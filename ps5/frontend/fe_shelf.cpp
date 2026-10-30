@@ -769,14 +769,33 @@ bool SameNames(const std::vector<GameInfo>& a, const std::vector<GameInfo>& b)
 	return true;
 }
 
+// The progress of a scan the player waits for: a big library takes a while the first time (each new ROM is read once
+// for its CRC), so the screen says how far it is, redrawn at most ten times a second.
+ScanProgress ScanScreen()
+{
+	double drawn = Now();
+	return [drawn](int stage, size_t done, size_t total) mutable {
+		const double now = Now();
+		if (now - drawn < 0.1)
+			return;
+		drawn = now;
+		char text[96];
+		if (stage == 0)
+			snprintf(text, sizeof(text), T("Looking for games... %zu found"), done);
+		else
+			snprintf(text, sizeof(text), T("Identifying games... %d%% (%zu of %zu)"), total ? int(done * 100 / total) : 0, done, total);
+		LoadingProgress(text, stage == 0 ? -1.0f : total ? float(done) / float(total) : 0.f);
+	};
+}
+
 // ---- 2.10: the check in the background --------------------------------------------------------------------------
 // The thread's work: a scan as the shelf made before 2.10, stopped between two files when `cancel` turns true. A scan
 // that ends is saved (fe_library.h); on the console the covers of new games go into covers/wanted.txt without a
 // restart (CoversWantedLater: the helper downloads them in the background when it can, else the next start's prefetch).
-void CheckBody(Check* c, std::vector<GameInfo> shown, bool console, bool downloads)
+void CheckBody(Check* c, std::vector<GameInfo> shown, bool console, bool downloads, const ScanProgress& progress = nullptr)
 {
 	const double t0 = Now();
-	std::vector<GameInfo> fresh = ScanGames(nullptr, &c->cancel);
+	std::vector<GameInfo> fresh = ScanGames(progress, &c->cancel);
 	if (!c->cancel)
 	{
 		tabs::OrderByTab(fresh);
@@ -807,9 +826,10 @@ void StartCheck(ShelfState& st, const char* why)
 	c->thread = ps5::BigThread([raw, shown, console, downloads] { CheckBody(raw, shown, console, downloads); }, 4 * 1024 * 1024);
 	if (!c->thread.joinable())
 	{
-		// no thread to be had: the check runs here, as the scan did before 2.10
+		// no thread to be had: the check runs here, as the scan did before 2.10, with its progress on the screen
 		OrbisLog("[shelf] no thread for the check: checking now");
-		CheckBody(raw, std::move(shown), console, downloads);
+		Loading(T("Looking for games..."));
+		CheckBody(raw, std::move(shown), console, downloads, ScanScreen());
 	}
 	st.check = std::move(c);
 }
@@ -859,11 +879,15 @@ std::string Shelf()
 	const std::vector<std::string> roots_now = RomRoots();
 	std::vector<GameInfo> games;
 	bool from_saved = false;
+	// taken before the first scan, as before 2.10: a share that connects during that scan is seen below (its games
+	// are then scanned for)
+	std::vector<std::string> net_seen = netfs_mount_points();
 	if (!st.started)
 	{
 		if (LoadLibrary(games))
 		{
 			const size_t dropped = library::KeepUnder(games, roots_now);
+			RefreshPendingFromCache(games); // a game the naming pass finished after the list was saved is not read again
 			OrbisLog("[shelf] %zu game(s) from the saved list (%zu left out: their folder isn't there now)", games.size(), dropped);
 			from_saved = true;
 			opened_from = "the saved list";
@@ -871,28 +895,13 @@ std::string Shelf()
 		else
 		{
 			Loading(T("Looking for games..."));
-			// a big library takes a while the first time (each new ROM is read once for its CRC): say how far it is,
-			// redrawn at most ten times a second
-			double drawn = Now();
-			games = ScanGames([&drawn](int stage, size_t done, size_t total) {
-				const double now = Now();
-				if (now - drawn < 0.1)
-					return;
-				drawn = now;
-				char text[96];
-				if (stage == 0)
-					snprintf(text, sizeof(text), T("Looking for games... %zu found"), done);
-				else
-					snprintf(text, sizeof(text), T("Identifying games... %d%% (%zu of %zu)"), total ? int(done * 100 / total) : 0, done, total);
-				LoadingProgress(text, stage == 0 ? -1.0f : total ? float(done) / float(total) : 0.f);
-			});
+			games = ScanGames(ScanScreen());
 			tabs::OrderByTab(games);
 			SaveLibrary(games);
 			opened_from = "a scan";
 		}
 		st.roots = roots_now;
 	}
-	std::vector<std::string> net_seen = netfs_mount_points(); // a share that connects from now on is seen below
 	if (!st.started)
 	{
 		if (!ShelfDownloads())
@@ -915,6 +924,36 @@ std::string Shelf()
 		// back from a game: no scan. The folders are checked only when a drive came or went meanwhile, when the check of
 		// the start was stopped by the game, or when the game picked was not there any more.
 		const bool played_gone = !st.played.empty() && !netfs_is_network_path(st.played.c_str()) && !OrbisIsFile(st.played);
+		if (roots_now != st.roots)
+		{
+			// a drive (or a share) went away during the game: its games leave the shelf at once, as at start
+			std::vector<GameInfo> kept = st.games;
+			const size_t dropped = library::KeepUnder(kept, roots_now);
+			if (dropped)
+			{
+				std::map<std::string, CoverPtr> held;
+				for (size_t i = 0; i < st.games.size() && i < st.slots.size(); i++)
+					if (st.slots[i])
+						held.emplace(st.games[i].path, st.slots[i]);
+				std::vector<CoverPtr> slots(kept.size());
+				for (size_t i = 0; i < kept.size(); i++)
+				{
+					auto it = held.find(kept[i].path);
+					if (it != held.end())
+						slots[i] = it->second;
+				}
+				st.games = std::move(kept);
+				st.slots = std::move(slots);
+				st.covers.Start(st.games, cfg.covers_download && ShelfDownloads(), cfg.covers_download && BackgroundCovers(), &st.slots);
+				OrbisLog("[shelf] %zu game(s) left out: their folder isn't there any more", dropped);
+			}
+		}
+		// the CRC naming pass finished some during the game: they are not read again (their names come with a scan)
+		if (const size_t known = RefreshPendingFromCache(st.games))
+		{
+			OrbisLog("[shelf] %zu network game(s) named by CRC since the list was made", known);
+			st.check_pending = true;
+		}
 		if (st.check && roots_now != st.roots)
 			StopCheck(st, "the ROM folders changed during the game", true); // its list predates the change: a new check
 		if (st.check)
@@ -1049,6 +1088,12 @@ std::string Shelf()
 			keep.empty() ? "(no game)" : keep.c_str(), tabs::Name(tab), st.search.c_str(), kept_covers);
 		return true;
 	};
+	// Before what writes the wanted covers or may restart the app (Fix Covers, Get cover, Settings): the check is stopped,
+	// and its list taken when it is done, so the covers of the games it found are not left out
+	auto Settle = [&](const char* why) {
+		StopCheck(st, why);
+		TakeCheck();
+	};
 	OpenTab(cfg.last_tab, "");
 	RefreshNet(Now());
 
@@ -1173,16 +1218,21 @@ std::string Shelf()
 		}
 		if (down & SCE_PAD_BUTTON_R3)
 		{
+			// 2.10: the wanted list is written from the newest list (the check's, when it is done) and the app may
+			// restart for it (the console): the check is stopped first, never cut by the restart
+			Settle("Fix Covers");
 			bulk_covers = RepairMissingCovers();
 			bulk_covers_until = now + 5.0;
 			dirty = true;
+			if (st.check_pending)
+				StartCheck(st, "after Fix Covers");
 		}
 		if (down & SCE_PAD_BUTTON_TRIANGLE)
 		{
 			// Settings > Network shares connects the shares again (netfs_reload), which needs no other netfs call
 			// running: the naming pass waits, and goes on (with what it had left) afterwards
 			naming.Stop();
-			StopCheck(st, "Settings"); // the check reads the shares too: it goes on afterwards
+			Settle("Settings"); // the check reads the shares too (it goes on afterwards); Fix covers there sees its list
 			SettingsMenu();
 			naming.Add(st.games);
 			if (st.check_pending)
@@ -1224,15 +1274,22 @@ std::string Shelf()
 		}
 		else if ((down & SCE_PAD_BUTTON_SQUARE) && n > 0)
 		{
-			st.covers.Refetch(view[size_t(sel)]);
-			Slot(sel) = nullptr;
 			dirty = true;
-			if (!ShelfDownloads()) // the console: the helper fetches it (or the prefetch at the next start)
+			if (!ShelfDownloads())
+				Settle("Get cover"); // the console may restart for the cover: see Settle (the selection is kept)
+			if (n > 0)
 			{
-				cfg.last_rom = Game(sel).path;
-				cfg.Save();
-				CoversRestartIfNeeded(st.games, cfg.covers_download, true, Loading);
+				st.covers.Refetch(view[size_t(sel)]);
+				Slot(sel) = nullptr;
+				if (!ShelfDownloads()) // the console: the helper fetches it (or the prefetch at the next start)
+				{
+					cfg.last_rom = Game(sel).path;
+					cfg.Save();
+					CoversRestartIfNeeded(st.games, cfg.covers_download, true, Loading);
+				}
 			}
+			if (st.check_pending)
+				StartCheck(st, "after Get cover");
 		}
 		if (down & SCE_PAD_BUTTON_CIRCLE)
 		{

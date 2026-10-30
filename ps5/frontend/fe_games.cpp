@@ -187,11 +187,11 @@ struct CrcCache
 	bool dirty = false;
 	bool loaded = false;
 	std::string file;
-	// A new scan: reads the file the first time, forgets which paths the last scan saw.
-	void Begin()
+	// Reads the file the first time anything uses the cache (2.10: a scan, the naming pass or a game's start, in whatever
+	// order: from the saved list the naming pass may come first). Called with `lock` held. An entry already in memory is
+	// newer than the file's (put since the start) and is kept.
+	void LoadLocked()
 	{
-		std::lock_guard<std::mutex> g(lock);
-		seen.clear();
 		if (loaded)
 			return;
 		loaded = true;
@@ -207,15 +207,23 @@ struct CrcCache
 			if (tab)
 			{
 				*tab = 0;
-				lines[line] = tab + 1;
+				lines.emplace(line, tab + 1);
 			}
 		}
 		fclose(f);
+	}
+	// A new scan: forgets which paths the last scan saw.
+	void Begin()
+	{
+		std::lock_guard<std::mutex> g(lock);
+		LoadLocked();
+		seen.clear();
 	}
 	// prune: the scan's end drops the entries of files that are gone; the naming pass (mid-scan, maybe) keeps all.
 	void Save(bool prune)
 	{
 		std::lock_guard<std::mutex> g(lock);
+		LoadLocked(); // never a write before the file was read (it would lose its entries, or have no name)
 		// entries of files that are gone are dropped (a USB drive that isn't plugged in, or a share that is not
 		// connected, keeps its own)
 		for (auto it = lines.begin(); prune && it != lines.end();)
@@ -248,6 +256,7 @@ struct CrcCache
 	void Put(const std::string& path, const char* key, const char* val)
 	{
 		std::lock_guard<std::mutex> g(lock);
+		LoadLocked();
 		lines[path] = std::string(key) + val;
 		dirty = true;
 	}
@@ -316,6 +325,7 @@ bool CachedCrc(CrcCache& cache, const std::string& path, uint32_t* crc, bool rea
 	snprintf(key, sizeof(key), "%lld\t%lld\t", (long long)st.st_size, (long long)st.st_mtime);
 	{
 		std::lock_guard<std::mutex> g(cache.lock);
+		cache.LoadLocked();
 		auto it = cache.lines.find(path);
 		if (it != cache.lines.end() && it->second.compare(0, strlen(key), key) == 0)
 		{
@@ -357,6 +367,7 @@ bool HeaderHint(CrcCache& cache, const std::string& path, bool read, std::string
 	snprintf(stamp, sizeof(stamp), "%lld\t%lld\t", (long long)st.st_size, (long long)st.st_mtime);
 	{
 		std::lock_guard<std::mutex> lk(cache.lock);
+		cache.LoadLocked();
 		cache.seen[key] = true;
 		auto it = cache.lines.find(key);
 		if (it != cache.lines.end() && it->second.compare(0, strlen(stamp), stamp) == 0)
@@ -682,7 +693,7 @@ struct NetNaming::Impl
 	void Run()
 	{
 		CrcCache& cache = SharedCrcCache();
-		int named = 0, since_save = 0;
+		int named = 0, since_save = 0, skipped = 0;
 		for (;;)
 		{
 			std::string path;
@@ -712,6 +723,18 @@ struct NetNaming::Impl
 			char key[64];
 			snprintf(key, sizeof(key), "%lld\t%lld\t", (long long)st.st_size, (long long)st.st_mtime);
 			uint32_t crc = 0;
+			{
+				// 2.10: the flag may be old (the saved list, or the list kept across a game): a ROM whose CRC the cache
+				// already holds for this size and date is not read again, and doesn't count as named (the shelf would
+				// scan again for nothing)
+				bool known = false;
+				CachedCrc(cache, path, &crc, false, &known);
+				if (known)
+				{
+					skipped++;
+					continue;
+				}
+			}
 			const bool ok = RomCrc32(path, &crc, &stop);
 			if (stop.load())
 			{
@@ -748,6 +771,8 @@ struct NetNaming::Impl
 		}
 		cache.Save(false);
 		busy = false;
+		if (skipped)
+			OrbisLog("[games] network CRC pass: %d ROM(s) already in the CRC cache, not read again", skipped);
 		OrbisLog("[games] network CRC pass: %d ROM(s) read%s", named, stop.load() ? " (stopped)" : "");
 	}
 };
@@ -800,6 +825,21 @@ int NetNaming::Resolved() const
 bool NetNaming::Busy() const
 {
 	return m_i->busy.load();
+}
+
+size_t RefreshPendingFromCache(std::vector<GameInfo>& games)
+{
+	CrcCache& cache = SharedCrcCache();
+	std::lock_guard<std::mutex> g(cache.lock);
+	cache.LoadLocked();
+	size_t n = 0;
+	for (GameInfo& game : games)
+		if (game.crc_pending && cache.lines.count(game.path))
+		{
+			game.crc_pending = false;
+			n++;
+		}
+	return n;
 }
 
 std::vector<std::string> RomRoots()

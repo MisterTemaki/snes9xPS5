@@ -7,9 +7,30 @@
 
 #include <chrono>
 #include <cstdio>
+#include <cstdlib>
+#include <new>
 #include <string>
 
 using namespace fe;
+
+// the largest single allocation since the last reset (a count in the file must not decide it before it is checked)
+static size_t g_largest = 0;
+void* operator new(size_t n)
+{
+	if (n > g_largest)
+		g_largest = n;
+	if (void* p = malloc(n ? n : 1))
+		return p;
+	throw std::bad_alloc();
+}
+void operator delete(void* p) noexcept
+{
+	free(p);
+}
+void operator delete(void* p, size_t) noexcept
+{
+	free(p);
+}
 
 static int g_fail = 0;
 static int g_checks = 0;
@@ -114,6 +135,20 @@ int main()
 			lying[lying.size() - 4 + size_t(i)] = char((sum2 >> (8 * i)) & 0xff);
 		CHECK(library::Decode(lying, out) == library::Bad::Format);
 		CHECK(out.size() == 1 && out[0].path == "/keep");
+		// a count of 200000 games in a file of a few bytes (checksum right): refused before 200000 games are allocated
+		std::string huge = library::Encode({});
+		huge.resize(huge.size() - 4);
+		for (int i = 0; i < 4; i++)
+			huge[12 + size_t(i)] = char((uint32_t(library::kMaxGames) >> (8 * i)) & 0xff);
+		huge += std::string(40, '\0');
+		const uint32_t sum3 = library::Crc32(huge.data(), huge.size());
+		for (int i = 0; i < 4; i++)
+			huge += char((sum3 >> (8 * i)) & 0xff);
+		g_largest = 0;
+		CHECK(library::Decode(huge, out) == library::Bad::Format);
+		CHECK(g_largest < 64 * 1024);
+		if (g_largest >= 64 * 1024)
+			printf("  a lying count made a %zu-byte allocation\n", g_largest);
 		// every cut of the file is refused, never read past its end (ASan)
 		int refused = 0;
 		for (size_t n = 0; n < good.size(); n++)

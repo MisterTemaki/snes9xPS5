@@ -3,6 +3,7 @@
 // real app (shelf, launch, MSU-1) runs over netfs without a server. SNES9X_HOST_NETFS_DELAY_MS adds that many
 // milliseconds to every read, as a slow link would. SNES9X_HOST_NETFS_EIO=<text>[,<text>...]: every read of a file whose
 // path has one of these in it fails with EIO (the share stays connected), as a read cut short on a real link would.
+// SNES9X_HOST_NETFS_CONNECT_MS=<n>: connecting takes that long.
 // Not part of the console build.
 //
 // SPDX-License-Identifier: MIT
@@ -32,6 +33,9 @@ public:
 
 	netfs::Status Connect(const netfs::ShareConfig&) override
 	{
+		// SNES9X_HOST_NETFS_CONNECT_MS: the share answers that late (a share that connects while the shelf scans)
+		if (const char* ms = getenv("SNES9X_HOST_NETFS_CONNECT_MS"))
+			usleep(useconds_t(atoi(ms)) * 1000);
 		struct stat st;
 		if (stat(m_root.c_str(), &st) != 0 || !S_ISDIR(st.st_mode))
 			return netfs::Status::Kind(netfs::ErrKind::FolderNotFound);
