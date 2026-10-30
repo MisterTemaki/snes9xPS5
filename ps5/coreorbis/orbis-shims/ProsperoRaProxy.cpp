@@ -186,11 +186,14 @@ void Worker()
 		if (!client)
 			client.reset(new fe::TlsHttp);
 		std::vector<uint8_t> body;
-		const int status = client->Send(job.url, job.post, job.agent, job.what.c_str(), body, jailbreak::kRaMaxAnswer);
+		// 2.11 review: a redirect is followed only to an address of the same allow-list
+		const int status = client->Send(job.url, job.post, job.agent, job.what.c_str(), body, jailbreak::kRaMaxAnswer, Allowed);
 		if (status >= 100)
 			Answer(job.fd, jailbreak::kRaOk, status, body, nullptr);
 		else if (status == -2)
 			Answer(job.fd, jailbreak::kRaTooBig, 0, body, "the answer is too big");
+		else if (status == -4)
+			Answer(job.fd, jailbreak::kRaRefused, 0, body, "a redirect to an address that isn't RetroAchievements'");
 		else
 		{
 			Answer(job.fd, jailbreak::kRaNetwork, 0, body, client->Offline() ? "no network" : "the server did not answer");

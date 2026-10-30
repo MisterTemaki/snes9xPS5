@@ -34,8 +34,9 @@ public:
 	// (the server explains its errors in it), up to max_bytes. Tried once (the caller retries), redirects followed only
 	// for a GET (and never from HTTPS to plain HTTP). `what` names the request in the log line instead of its address
 	// and body, which are never logged. The status, or -1 (no answer), -2 (too big), -4 (refused redirect).
+	// `allowed` (2.11 review), when given, is asked about every redirect's target too: one it refuses is not followed (-4).
 	int Send(const std::string& url, const std::string& body, const std::string& user_agent, const char* what,
-		std::vector<uint8_t>& out, size_t max_bytes);
+		std::vector<uint8_t>& out, size_t max_bytes, bool (*allowed)(const std::string&) = nullptr);
 
 	struct Impl;
 

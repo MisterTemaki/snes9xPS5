@@ -85,7 +85,10 @@ struct State
 	bool game_open = false;
 	GameRa game = GameRa::Off;
 	std::string rom;
+	std::string hash; // the game's hash, to ask for its set again once a login that came late goes through
 	double last_frame = -1000, last_idle = -1000;
+	double retry_at = 0, retry_delay = 0; // 2.11 review: the saved token tried again while the network is down
+	bool drew = false; // the overlay drew something last time (the shelf redraws once more to clear it)
 	bool reset_seen = false;
 	std::deque<Toast> toasts;
 	std::map<uint32_t, std::string> trackers; // leaderboard trackers shown
@@ -257,19 +260,6 @@ void FetchBadge(const rc_client_achievement_t* ach)
 	const std::string name = SafeName(ach->badge_name);
 	if (name.empty() || g.badges.count(name))
 		return;
-	const std::string file = BadgeFile(name);
-	if (FILE* f = fopen(file.c_str(), "rb"))
-	{
-		std::vector<uint8_t> data(64 * 1024);
-		data.resize(fread(data.data(), 1, data.size(), f));
-		fclose(f);
-		fe::border::Image img;
-		if (fe::border::DecodeSmallPng(data.data(), data.size(), 256, &img))
-		{
-			AttachBadge(name, img);
-			return;
-		}
-	}
 	char buf[512];
 	if (rc_client_achievement_get_image_url(ach, RC_CLIENT_ACHIEVEMENT_STATE_UNLOCKED, buf, sizeof(buf)) != RC_OK)
 		return;
@@ -280,23 +270,33 @@ void FetchBadge(const rc_client_achievement_t* ach)
 	if (const char* host = getenv("SNES9X_RA_HOST"); host && url.compare(0, strlen(media), media) == 0)
 		url = host + url.substr(strlen(media));
 #endif
-	net::Send(url, std::string(), UserAgent(), "badge " + name, [name, file](const net::Answer& a) {
+	// 2.11 review: the cache read, the download and the cache write all happen on the request thread (fe_ranet.h); only
+	// the small PNG's decoding is left for this thread
+	net::FetchCached(url, BadgeFile(name), UserAgent(), "badge " + name, [name](const net::Answer& a) {
 		fe::border::Image img;
-		if (a.outcome != net::Outcome::Http || a.http != 200 ||
-			!fe::border::DecodeSmallPng(reinterpret_cast<const uint8_t*>(a.body.data()), a.body.size(), 256, &img))
-			return;
-		AttachBadge(name, img);
-		OrbisMkdirs(Dir() + "/badges");
-		const std::string part = file + ".part";
-		if (FILE* f = fopen(part.c_str(), "wb"))
-		{
-			const bool ok = fwrite(a.body.data(), 1, a.body.size(), f) == a.body.size();
-			if (fclose(f) == 0 && ok)
-				rename(part.c_str(), file.c_str());
-			else
-				unlink(part.c_str());
-		}
+		if (a.outcome == net::Outcome::Http && a.http == 200 &&
+			fe::border::DecodeSmallPng(reinterpret_cast<const uint8_t*>(a.body.data()), a.body.size(), 256, &img))
+			AttachBadge(name, img);
 	});
+}
+
+bool NetworkIssue()
+{
+	return g.issue == Issue::NoHelper || g.issue == Issue::Offline || g.issue == Issue::Server;
+}
+
+// 2.11 review: the next try of a saved token whose login failed for want of a network: 10 s, then twice as long each time,
+// at most 5 minutes (the host tests set the first wait)
+void ScheduleRetry()
+{
+	double first = 10;
+#ifndef __PROSPERO__
+	if (const char* e = getenv("SNES9X_HOST_RA_RETRY_S"))
+		first = atof(e) > 0 ? atof(e) : first;
+#endif
+	g.retry_delay = g.retry_delay <= 0 ? first : std::min(300.0, g.retry_delay * 2);
+	g.retry_at = Now() + g.retry_delay;
+	OrbisLog("[ra] the saved login is tried again in %.0f s", g.retry_delay);
 }
 
 std::string IssueText(Issue issue)
@@ -327,8 +327,8 @@ uint32_t ReadMemory(uint32_t address, uint8_t* buffer, uint32_t num_bytes, rc_cl
 {
 	if (!emu::GameLoaded())
 		return 0;
-	size_t sram = Memory.SRAMSize ? size_t(1024) << Memory.SRAMSize : 0;
-	sram = std::min(sram, size_t(0x80000));
+	// 2.11 review: a damaged header byte can't shift past Memory.SRAM's 512 KiB (1 KiB << 9)
+	const size_t sram = Memory.SRAMSize == 0 ? 0 : Memory.SRAMSize >= 9 ? size_t(0x80000) : size_t(1024) << Memory.SRAMSize;
 	uint32_t done = 0;
 	while (done < num_bytes)
 	{
@@ -512,6 +512,8 @@ void OnEvent(const rc_client_event_t* e, rc_client_t*)
 	}
 }
 
+void OnGameLoaded(int result, const char* error_message, rc_client_t* client, void*);
+
 void OnLogin(int result, const char* error_message, rc_client_t* client, void*)
 {
 	if (!g.password_sent.empty())
@@ -540,10 +542,23 @@ void OnLogin(int result, const char* error_message, rc_client_t* client, void*)
 			OrbisLog("[ra] could not save the login in %s", LoginFile().c_str());
 		Wipe(saved_token);
 		OrbisLog("[ra] logged in as %s (%u points, softcore %u)", user->display_name, user->score, user->score_softcore);
+		g.retry_delay = 0;
+		g.retry_at = 0;
+		// 2.11 review: a game that started while the login could not go through gets its set now
+		if (g.game_open && g.game == GameRa::Failed && !g.hash.empty())
+		{
+			OrbisLog("[ra] the running game's set is asked for again");
+			g.game = GameRa::Loading;
+			rc_client_begin_load_game(client, g.hash.c_str(), OnGameLoaded, nullptr);
+			emu::HardcoreChanged();
+		}
 		return;
 	}
 	g.login = Login::Failed;
 	OrbisLog("[ra] login failed (%d): %s", result, g.login_message.c_str());
+	// 2.11 review: no network (or no helper, or the server down): the saved token is tried again by itself, also on the shelf
+	if (g.login_with_token && NetworkIssue())
+		ScheduleRetry();
 	// a token the server refuses is no use: forgotten (the player logs in again from Settings). A network problem keeps it.
 	if (result == RC_INVALID_CREDENTIALS || result == RC_EXPIRED_TOKEN || result == RC_ACCESS_DENIED)
 	{
@@ -595,7 +610,9 @@ void OnGameLoaded(int result, const char* error_message, rc_client_t* client, vo
 		g.game = GameRa::Failed;
 		const std::string why = IssueText(g.issue);
 		OrbisLog("[ra] the game's achievements could not be loaded (%d): %s", result, error_message ? error_message : "");
-		Notify(fe::T("Achievements unavailable"), why.empty() ? std::string(error_message ? error_message : "") : why);
+		// 2.11 review: a login the server refused is off for the session (Settings says why), so nothing is said here
+		if (AccountActive())
+			Notify(fe::T("Achievements unavailable"), why.empty() ? std::string(error_message ? error_message : "") : why);
 	}
 	emu::HardcoreChanged(); // the restrictions may be lifted (an unknown game, nothing to unlock, no network)
 }
@@ -657,6 +674,14 @@ void Pump()
 		return;
 	net::Pump();
 	const double now = Now();
+	// 2.11 review: the saved token, tried again while the network was the problem (on the shelf too)
+	if (g.login == Login::Failed && g.retry_at > 0 && now >= g.retry_at && NetworkIssue())
+	{
+		g.retry_at = 0;
+		std::string user, token;
+		if (ReadLogin(&user, &token))
+			BeginTokenLogin(user, token);
+	}
 	if (g.login == Login::LoggedIn && now - g.last_frame > 1.0 && now - g.last_idle >= 1.0)
 	{
 		g.last_idle = now;
@@ -667,6 +692,15 @@ void Pump()
 Login LoginState()
 {
 	return g.login;
+}
+
+bool AccountActive()
+{
+	if (!g.client || g.login == Login::None)
+		return false;
+	// a failed login stays "on" only while the network is to blame (it is tried again) or the helper is too old (said
+	// at each game); one the server refused is off for the session
+	return g.login != Login::Failed || NetworkIssue() || g.issue == Issue::OldHelper;
 }
 
 std::string UserName()
@@ -750,12 +784,22 @@ bool HardcoreSetting()
 	return fe::Config().ra_hardcore;
 }
 
-void SetHardcore(bool on)
+bool SetHardcore(bool on, std::string* refused)
 {
+	// 2.11 review: a game snes9x.conf forced to PAL can't become a hardcore session (RetroAchievements forbids the
+	// forced region, and it can't change without loading the game again)
+	const std::string why = on && g.game_open ? emu::HardcoreRefusal() : std::string();
+	if (!why.empty())
+	{
+		OrbisLog("[ra] hardcore not turned on: %s", why.c_str());
+		if (refused)
+			*refused = fe::T(why.c_str());
+		return false;
+	}
 	fe::Config().ra_hardcore = on;
 	fe::Config().Save();
 	if (!g.client)
-		return;
+		return true;
 	g.reset_seen = false;
 	rc_client_set_hardcore_enabled(g.client, on ? 1 : 0);
 	OrbisLog("[ra] hardcore %s", on ? "on" : "off");
@@ -768,6 +812,7 @@ void SetHardcore(bool on)
 		emu::Reset();
 	}
 	emu::HardcoreChanged();
+	return true;
 }
 
 bool HardcoreActive()
@@ -790,40 +835,41 @@ bool CanPause(int* seconds_left)
 	return false;
 }
 
-void GameStarted(const std::string& rom_path)
+void GameStarted(const std::string& rom_path, const std::vector<uint8_t>* patched)
 {
 	g.game_open = true;
 	g.game = GameRa::Off;
 	g.rom = rom_path;
-	g.toasts.clear();
+	g.hash.clear();
+	// (notifications still waiting -- an unlock sent from the shelf -- stay; the game's own indicators start empty)
 	g.trackers.clear();
 	g.challenges.clear();
 	g.progress_until = 0;
-	if (!g.client || g.login == Login::None)
-		return;
-	// a saved token whose login failed for want of a network: tried again (at most every 20 s)
-	if (g.login == Login::Failed && g.issue != Issue::None && Now() - g.login_tried_at > 20)
-	{
-		std::string user, token;
-		if (ReadLogin(&user, &token))
-			BeginTokenLogin(user, token);
-	}
+	if (!AccountActive())
+		return; // no account, or one the server refused this session: nothing
 	if (g.login == Login::Failed)
 	{
-		const std::string why = Problem();
-		Notify(fe::T("Achievements unavailable"), why);
+		Notify(fe::T("Achievements unavailable"), Problem());
 		return;
 	}
 	std::string hash, why;
 	const double t0 = Now();
-	if (!fe::rahash::HashFile(rom_path, &hash, &why))
+	// 2.11 review: a soft patch Snes9x applied (IPS/UPS/BPS) is part of the game: the patched ROM is hashed, as RetroArch
+	// does, so a patched game is the hack it is (or unknown), never the original
+	if (patched)
+		hash = fe::rahash::HashBytes(patched->data(), patched->size());
+	else if (!fe::rahash::HashFile(rom_path, &hash, &why))
+		hash.clear();
+	if (hash.size() != 32)
 	{
 		OrbisLog("[ra] %s: no hash (%s)", rom_path.c_str(), why.c_str());
 		g.game = GameRa::Unknown;
 		Notify(fe::T("RetroAchievements"), fe::T("Unknown game: no achievements"));
 		return;
 	}
-	OrbisLog("[ra] %s: hash %s (%.0f ms)", rom_path.c_str(), hash.c_str(), (Now() - t0) * 1000.0);
+	OrbisLog("[ra] %s: hash %s%s (%.0f ms)", rom_path.c_str(), hash.c_str(), patched ? " (soft-patched ROM)" : "",
+		(Now() - t0) * 1000.0);
+	g.hash = hash;
 	g.game = GameRa::Loading;
 	rc_client_begin_load_game(g.client, hash.c_str(), OnGameLoaded, nullptr);
 }
@@ -834,6 +880,7 @@ void GameClosed()
 		rc_client_unload_game(g.client);
 	g.game_open = false;
 	g.game = GameRa::Off;
+	g.hash.clear();
 	g.toasts.clear();
 	g.trackers.clear();
 	g.challenges.clear();
@@ -1000,8 +1047,14 @@ void Box(int x, int y, int w, int h, const ps5video::Rect& r)
 }
 } // namespace
 
+bool OverlayBusy()
+{
+	return !g.toasts.empty() || g.drew;
+}
+
 void DrawOverlay(const ps5video::Rect& r)
 {
+	g.drew = false;
 	if (g.toasts.empty() && g.trackers.empty() && g.challenges.empty() && g.progress_until <= 0)
 		return;
 	const double now = Now();
@@ -1018,7 +1071,11 @@ void DrawOverlay(const ps5video::Rect& r)
 	{
 		Toast& t = g.toasts[size_t(k)];
 		if (t.shown_at < 0)
+		{
 			t.shown_at = now;
+			OrbisLog("[ra] shown: %s | %s", t.title.c_str(), t.text.c_str());
+		}
+		g.drew = true;
 		const int h = 96;
 		y -= h;
 		const int x = r.x + margin;
@@ -1053,6 +1110,7 @@ void DrawOverlay(const ps5video::Rect& r)
 		const int w = fe::TextWidth(fit.c_str(), 2) + 36;
 		const int x = r.x + r.w - margin - w;
 		Box(x, cy, w, 44, r);
+		g.drew = true;
 		fe::DrawText(x + 20, cy + 10, fit.c_str(), 2, ps5video::Rgb(240, 240, 250));
 		cy += 52;
 		if (cy > r.y + r.h / 2)

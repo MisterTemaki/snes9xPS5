@@ -2569,6 +2569,121 @@ expect "grep -q 'notification: Snes9x RA Test | 0 de 4 logros desbloqueados | Mo
 expect "[ ! -s $T/missing.txt ] || ! grep -q -i 'achiev\|hardcore\|login\|helper\|leaderboard\|RetroAchievements' $T/missing.txt" "Spanish: no RetroAchievements text shown untranslated"
 ra_stop
 
+# ---- 2.11 review fixes (each fails on the build before them; see the report's "Review fixes")
+# 44k (H1): a soft patch (an .ips beside the ROM, applied by Snes9x at load) changes the game: it is hashed as patched, so
+# a cheat patch can't earn unlocks under the original game's hash. The patch makes the NMI store the pad's high byte in
+# $12 instead of $10: Square + Left ($42) then sets $12 = $42, Secret room's condition.
+ra_setup t44k
+ra_token
+RA_PATCHED=$(python3 - "$T/root/roms/RA Test.sfc" "$T/root/roms/RA Test.ips" <<'PY'
+import hashlib, sys
+rom = bytearray(open(sys.argv[1], 'rb').read())
+at = rom.index(b'\xAD\x19\x42\x85\x10') + 4  # LDA $4219; STA $10 -> STA $12
+ips = b'PATCH' + at.to_bytes(3, 'big') + (1).to_bytes(2, 'big') + b'\x12' + b'EOF'
+open(sys.argv[2], 'wb').write(ips)
+rom[at] = 0x12
+print(hashlib.md5(bytes(rom)).hexdigest())
+PY
+)
+ra_server; ra_helper
+rc=$(rarun "$T" "0:0;100:8080;160:0;300:$L3R3;302:0;310:$UP;312:0;320:$CROSS;322:0" "" "$T/root/roms/RA Test.sfc")
+expect "[ $rc = 0 ] && grep -q 'IPS Patched\|IPS patched' $T/out.txt $T/root/logs/boot.log" "a soft patch: Snes9x applied the .ips beside the ROM"
+expect "[ \$(ra_req r=achievementsets m=$RA_PATCHED) = 1 ] && [ \$(ra_req r=achievementsets m=$RA_HASH) = 0 ]" "a soft patch: the game is hashed as patched ($RA_PATCHED), not as the original"
+expect "[ \$(ra_req r=awardachievement) = 0 ] && [ \$(ra_note 'RetroAchievements | Unknown game: no achievements') = 1 ]" "a soft patch: an unknown game, nothing unlocked (the patch's Secret room is not awarded under the original hash)"
+ra_stop
+
+# 44l (M2, L2): a slow server is not an old helper. The first login answer comes after the app's timeout (1 s here):
+# the network is said to be down (not "update the helper"), the token is kept and tried again by itself, and once it is
+# in, the game's set loads; the first unlock's answer is slow too, and the unlock still arrives.
+ra_setup t44l
+ra_token
+python3 - "$T/ra.json" <<'PY'
+import json, sys
+c = json.load(open(sys.argv[1])); c["delay_first"] = {"login2": 3, "awardachievement": 3}; json.dump(c, open(sys.argv[1], "w"))
+PY
+ra_server; ra_helper
+rc=$(SNES9X_HOST_RA_TIMEOUT=1 SNES9X_HOST_RA_RETRY_S=2 SNES9X_HOST_REALTIME=1 MAXFLIPS=2400 rarun "$T" "0:0;$(B_HOLD 700 760);1200:$L3R3;1202:0;1210:$UP;1212:0;1220:$CROSS;1222:0" "" "$T/root/roms/RA Test.sfc")
+expect "[ $rc = 0 ] && ! grep -q 'an older helper\|Update the helper' $T/root/logs/boot.log" "a slow server: never taken for an older helper"
+expect "[ \$(ra_req r=login2) -ge 2 ] && grep -q 'logged in as Tester' $T/root/logs/boot.log && [ -s $T/root/retroachievements/login.txt ]" "a slow server: the token login is tried again by itself and goes through"
+expect "[ \$(ra_req r=achievementsets m=$RA_HASH) = 1 ] && [ \$(ra_note 'Snes9x RA Test | 0 of 4 achievements unlocked') = 1 ]" "then the game's set is loaded, in the game that was already running"
+expect "[ \$(ra_req r=awardachievement a=101) -ge 1 ] && grep -q 'Achievement 101 awarded' $T/root/logs/boot.log" "a slow answer to the unlock: tried again, the unlock arrives"
+ra_stop
+
+# 44m (L1): a login the server refused is off for the session: no notification at a game's start, no Achievements or
+# Hardcore rows in the pause menu (Settings still says why)
+ra_setup t44m
+ra_token tok-EXPIRED-000
+ra_server; ra_helper
+rc=$(rarun "$T" "0:0;200:$L3R3;202:0;210:$UP;212:0;220:$CROSS;222:0" "" "$T/root/roms/RA Test.sfc")
+expect "[ $rc = 0 ] && [ \$(ra_req r=login2 token_expired=True) = 1 ] && ! grep -q '\[ra\] notification' $T/root/logs/boot.log" "a refused login: no notification at the game's start"
+expect "grep -q 'pause menu (RetroAchievements rows: no)' $T/root/logs/boot.log" "a refused login: the pause menu is 2.10's (no Achievements, no Hardcore mode)"
+ra_stop
+
+# 44n (L3): a notification raised on the shelf is shown there: an unlock that waited for the server is sent while the
+# player is back on the shelf, and "Back online" is drawn over it
+ra_setup t44n
+ra_token
+ra_server; ra_helper
+( SNES9X_HOST_REALTIME=1 MAXFLIPS=3000 RA_CLOCK=8 rarun "$T" "0:0;40:$CROSS;42:0;$(B_HOLD 300 330);500:$L3R3;502:0;510:$UP;512:0;516:$UP;518:0;524:$CROSS;526:0;1500:$OPTIONS;1502:0;1510:$CROSS;1512:0" "$(seq -s, 560 30 1490)" >"$T/rc.txt" ) &
+GAME=$!
+waitlog 'achievements loaded'
+kill $RA_SRV 2>/dev/null; wait $RA_SRV 2>/dev/null; RA_SRV=
+waitlog 'notification: RetroAchievements | Offline'
+waitlog 'Unloading game 4321'
+ra_server
+waitlog 'shown: RetroAchievements | Back online'
+wait $GAME
+expect "[ \"\$(cat $T/rc.txt)\" = 0 ] && [ \$(ra_req r=awardachievement a=101) = 1 ]" "an unlock sent while the player is back on the shelf"
+SHELF44=
+for f in $(seq 560 30 1490); do
+	d=$(printf '%s/dump/flip%05d.ppm' "$T" $f)
+	[ -f "$d" ] && $CHECK "$d" 18 920 150 125 255 >/dev/null 2>&1 && ! $CHECK "$d" 960 300 0 255 0 >/dev/null 2>&1 && ! $CHECK "$d" 960 300 255 0 0 >/dev/null 2>&1 && { SHELF44=$d; break; }
+done
+expect "grep -q 'shown: RetroAchievements | Back online' $T/root/logs/boot.log && [ -n \"$SHELF44\" ]" "its \"Back online\" drawn on the shelf (a box at its bottom left, the game closed)"
+ra_shot "$SHELF44" ra-9-shelf-notification.png
+rm -f "$T"/dump/*.ppm
+ra_stop
+
+# 44o (L4): a picture's redirect to another host is not followed (the helper's allow-list holds for every hop)
+ra_setup t44o
+ra_token
+OTHER_PORT=$((RA_PORT + 1))
+mkdir -p "$T/other"
+python3 -m http.server $OTHER_PORT --bind 127.0.0.1 --directory "$T/other" >"$T/other.txt" 2>&1 &
+OTHER=$!
+python3 - "$T/ra.json" "$OTHER_PORT" <<'PY'
+import json, sys
+c = json.load(open(sys.argv[1])); c["redirect_badges"] = "http://127.0.0.1:%s/elsewhere.png" % sys.argv[2]; json.dump(c, open(sys.argv[1], "w"))
+PY
+ra_server; ra_helper
+rc=$(rarun "$T" "0:0;$(B_HOLD 100 130);300:$L3R3;302:0;310:$UP;312:0;320:$CROSS;322:0" "" "$T/root/roms/RA Test.sfc")
+kill $OTHER 2>/dev/null; wait $OTHER 2>/dev/null; pkill -f "http.server $OTHER_PORT" 2>/dev/null
+expect "[ $rc = 0 ] && [ \$(ra_req get=/Badge/00101.png) = 1 ] && ! grep -q 'elsewhere' $T/other.txt && [ ! -e $T/root/retroachievements/badges/00101.png ]" "a badge redirected to another host: not followed, nothing saved"
+expect "[ \$(ra_req r=awardachievement a=101) = 1 ]" "the unlock itself is unaffected"
+ra_stop
+
+# 44p (M1, L5): settings RetroAchievements forbids follow hardcore when it is turned on in a game: snes9x.conf's graphic
+# windows off and a Super FX clock under 100% are overridden at once; a game started with snes9x.conf forcing PAL can't
+# switch to hardcore without a restart, and says so
+ra_setup t44p
+ra_token
+printf 'ra_hardcore=0\nsuperfx_clock=50\n' >>"$T/root/snes9x-ps5.ini"
+printf '[Display]\nGraphicWindows = false\n' >"$T/root/snes9x.conf"
+ra_server; ra_helper
+rc=$(rarun "$T" "0:0;$(PAUSE_DOWN 200 7);260:$CROSS;262:0;280:$CIRCLE;282:0;400:$L3R3;402:0;410:$UP;412:0;420:$CROSS;422:0" "" "$T/root/roms/RA Test.sfc")
+expect "[ $rc = 0 ] && grep -q 'graphic windows off (snes9x.conf)' $T/root/logs/boot.log" "softcore: snes9x.conf's graphic windows off applies"
+expect "grep -q 'hardcore on: the game is reset' $T/root/logs/boot.log && grep -q 'hardcore mode: graphic windows on' $T/root/logs/boot.log && grep -q 'hardcore mode: Super FX clock 100%' $T/root/logs/boot.log" "hardcore turned on: graphic windows back on and the Super FX clock at 100% at once"
+ra_stop
+ra_setup t44p2
+ra_token
+printf 'ra_hardcore=0\n' >>"$T/root/snes9x-ps5.ini"
+printf '[ROM]\nPAL = true\n' >"$T/root/snes9x.conf"
+ra_server; ra_helper
+rc=$(rarun "$T" "0:0;$(PAUSE_DOWN 200 7);260:$CROSS;262:0;280:$CIRCLE;282:0;400:$L3R3;402:0;410:$UP;412:0;420:$CROSS;422:0" "" "$T/root/roms/RA Test.sfc")
+expect "[ $rc = 0 ] && grep -q '50 fps, PAL' $T/root/logs/boot.log && grep -q 'hardcore not turned on: snes9x.conf forces PAL' $T/root/logs/boot.log && ! grep -q 'the game is reset' $T/root/logs/boot.log" "a game forced to PAL by snes9x.conf: hardcore can't be turned on mid-game (said so), the game isn't reset"
+expect "grep -q 'ra_hardcore=0' $T/root/snes9x-ps5.ini" "and the setting stays off"
+ra_stop
+
 echo
 echo "passed $PASS, failed $FAIL  (work dir $WORK)"
 [ $FAIL = 0 ]

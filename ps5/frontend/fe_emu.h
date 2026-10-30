@@ -51,6 +51,8 @@ void Reset(); // also starts the achievements over (fe_ra.h)
 bool LoadStateRefused();
 // 2.11: hardcore mode started or stopped applying: the cheats off or on again, Transparency forced on or not
 void HardcoreChanged();
+// 2.11 review: why hardcore can't start in the game running ("" when it can): snes9x.conf forced its region to PAL
+std::string HardcoreRefusal();
 void Osd(const char* fmt, ...) __attribute__((format(printf, 1, 2))); // message drawn in the picture
 
 // Redraws the last frame into the surface (the pause menu draws over it).

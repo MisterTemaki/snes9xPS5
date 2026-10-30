@@ -307,7 +307,11 @@ std::string SettingValue(int s)
 		case S_FPS: return YesNo(c.show_fps);
 		case S_AUDIO: return YesNo(c.audio);
 		case S_TRANSPARENCY: return ra::HardcoreActive() ? T("On (hardcore mode)") : YesNo(c.transparency);
-		case S_SUPERFX: snprintf(buf, sizeof(buf), "%d%%", c.superfx_clock); return buf;
+		case S_SUPERFX:
+			if (ra::HardcoreActive() && c.superfx_clock < 100)
+				return T("100% (hardcore mode)"); // 2.11 review: no underclock (a slow motion) in hardcore
+			snprintf(buf, sizeof(buf), "%d%%", c.superfx_clock);
+			return buf;
 		case S_COVERS: return YesNo(c.covers_download);
 		case S_LANGUAGE: return LanguageName(c.language);
 		case S_DEBUGLOGS: return YesNo(c.debug_logs);
@@ -355,7 +359,7 @@ void ChangeSetting(int s, int dir)
 			int i = 0;
 			while (i < 7 && steps[i] < c.superfx_clock)
 				i++;
-			i = std::max(0, std::min(7, i + dir));
+			i = std::max(ra::HardcoreActive() ? 2 : 0, std::min(7, i + dir)); // 2.11 review: 100% at least in hardcore
 			c.superfx_clock = steps[i];
 			break;
 		}
@@ -692,6 +696,7 @@ PauseAction PauseMenu()
 	};
 	std::string toast;
 	double toast_until = 0;
+	bool logged = false;
 
 	for (;;)
 	{
@@ -703,8 +708,12 @@ PauseAction PauseMenu()
 		ps5video::DarkenRect(0, 0, W, H);
 
 		// the rows shown: without a RetroAchievements account the menu is 2.10's
-		const bool ra_rows = ra::LoginState() != ra::Login::None;
+		// 2.11 review: not for a login the server refused (it counts as no account this session)
+		const bool ra_rows = ra::AccountActive();
 		const bool hardcore = ra::HardcoreActive();
+		if (!logged) // what the menu shows, once each time it opens (the host tests read it)
+			OrbisLog("[menu] pause menu (RetroAchievements rows: %s)", ra_rows ? "yes" : "no");
+		logged = true;
 		std::vector<int> ids;
 		for (int i = 0; i < I_COUNT; i++)
 			if (ra_rows || (i != I_ACHIEVEMENTS && i != I_HARDCORE))
@@ -743,7 +752,8 @@ PauseAction PauseMenu()
 				default:
 				{
 					const int s = id - I_SET0;
-					row = {SettingLabel(s), SettingValue(s), !(s == S_TRANSPARENCY && hardcore)};
+					const bool forced = hardcore && (s == S_TRANSPARENCY || (s == S_SUPERFX && cfg.superfx_clock < 100));
+					row = {SettingLabel(s), SettingValue(s), !forced};
 					break;
 				}
 			}
@@ -775,9 +785,12 @@ PauseAction PauseMenu()
 		{
 			const bool on = !ra::HardcoreSetting();
 			const bool resets = on && ra::GameHasSet();
-			ra::SetHardcore(on); // on: the game is reset (RetroAchievements' rule)
-			toast = T(on ? (resets ? "Hardcore mode on: the game was reset." : "Hardcore mode on.") : "Hardcore mode off.");
-			toast_until = Now() + 2.5;
+			std::string refused;
+			if (!ra::SetHardcore(on, &refused)) // on: the game is reset (RetroAchievements' rule)
+				toast = refused;
+			else
+				toast = T(on ? (resets ? "Hardcore mode on: the game was reset." : "Hardcore mode on.") : "Hardcore mode off.");
+			toast_until = Now() + 3;
 		}
 		else if (id >= I_SET0 && id < I_SET0 + S_UPDATES && (n.left || n.right || n.ok))
 		{

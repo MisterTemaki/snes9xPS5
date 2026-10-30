@@ -270,8 +270,13 @@ RaReply RaRequest(const std::string& url, const std::string& post, const std::st
 		r.why = "no helper on the port";
 		return r;
 	}
-	// the server may take its time: kRaTimeoutSeconds per read (ConnectLocal set 5 s)
-	timeval tv = {kRaTimeoutSeconds, 0};
+	// the server may take its time: kRaTimeoutSeconds per read (ConnectLocal set 5 s); the host tests shorten it
+	int timeout = kRaTimeoutSeconds;
+#ifndef __PROSPERO__
+	if (const char* t = getenv("SNES9X_HOST_RA_TIMEOUT"))
+		timeout = atoi(t) > 0 ? atoi(t) : timeout;
+#endif
+	timeval tv = {timeout, 0};
 	setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
 	if (socket_out)
 		socket_out->store(fd);
@@ -294,25 +299,35 @@ RaReply RaRequest(const std::string& url, const std::string& post, const std::st
 	};
 	if (!WriteAll(fd, &req, sizeof(req)) || !WriteAll(fd, post.data(), post.size()))
 	{
-		// a 2.10 helper reads the header, then closes: the body may meet a closed connection
-		size_t got = 0;
+		// a 2.10 helper reads the header, then closes: the body may meet a closed connection. Closed (an end or a reset)
+		// with nothing sent back is that helper; a timeout is not.
 		char b;
-		while (recv(fd, &b, 1, 0) > 0)
-			got++;
-		return finish(got == 0 ? RaCall::OldHelper : RaCall::HelperError, "the helper closed the connection");
+		const ssize_t n = recv(fd, &b, 1, 0);
+		const bool timed_out = n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR);
+		if (n <= 0 && !timed_out)
+			return finish(RaCall::OldHelper, "the helper closed the connection");
+		return finish(RaCall::Timeout, "the request could not be sent to the helper");
 	}
 	size_t got = 0;
+	// closed: the helper ended the connection (an end, or a reset: a 2.10 helper closes with the body still unread,
+	// which resets it); not a timeout (SO_RCVTIMEO: EAGAIN)
+	bool closed = false;
 	while (got < sizeof(req))
 	{
 		const ssize_t n = recv(fd, reinterpret_cast<char*>(&req) + got, sizeof(req) - got, 0);
+		if (n == 0 || (n < 0 && errno != EAGAIN && errno != EWOULDBLOCK && errno != EINTR))
+			closed = true;
 		if (n <= 0)
 			break;
 		got += size_t(n);
 	}
+	// 2.11 review: only a connection closed with nothing sent back is a 2.10 helper; a timeout (the server is slow) is a
+	// request to try again
 	if (got == 0)
-		return finish(RaCall::OldHelper, "the helper closed the connection without an answer");
+		return closed ? finish(RaCall::OldHelper, "the helper closed the connection without an answer")
+					  : finish(RaCall::Timeout, "no answer from the helper in time");
 	if (got != sizeof(req) || req.magic != kMagic || req.cmd != kCmdRetroAchievements)
-		return finish(RaCall::HelperError, "the helper's answer was cut short");
+		return finish(RaCall::Timeout, "the helper's answer was cut short");
 	req.msg1[sizeof(req.msg1) - 1] = 0;
 	req.msg2[sizeof(req.msg2) - 1] = 0;
 	if (req.ret != kRaOk)
@@ -323,7 +338,10 @@ RaReply RaRequest(const std::string& url, const std::string& post, const std::st
 	unsigned long long len = 0;
 	int http = 0;
 	if (sscanf(req.msg1, "%d %llu", &http, &len) != 2 || len > kRaMaxAnswer)
+	{
+		r.helper_ret = kRaRefused;
 		return finish(RaCall::HelperError, "a malformed answer from the helper");
+	}
 	r.http = http;
 	r.body.resize(size_t(len));
 	size_t have = 0;
@@ -337,7 +355,7 @@ RaReply RaRequest(const std::string& url, const std::string& post, const std::st
 	if (have != r.body.size())
 	{
 		r.body.clear();
-		return finish(RaCall::HelperError, "the answer was cut short");
+		return finish(RaCall::Timeout, "the answer was cut short");
 	}
 	return finish(RaCall::Answer, nullptr);
 }

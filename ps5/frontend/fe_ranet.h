@@ -38,6 +38,12 @@ using Done = std::function<void(const Answer&)>;
 void Send(const std::string& url, const std::string& post, const std::string& user_agent, const std::string& what,
 	Done done);
 
+// 2.11 review: a picture kept in a cache file: the worker reads `cache_file` if it is there; else it fetches `url` (a GET
+// through the helper) and, when a PNG comes back, saves it there (.part, then renamed). `done` gets the bytes (http 200)
+// either way. No file is touched on the main thread.
+void FetchCached(const std::string& url, const std::string& cache_file, const std::string& user_agent,
+	const std::string& what, Done done);
+
 // Main thread: runs the `done` of every request answered since the last call.
 void Pump();
 

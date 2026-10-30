@@ -1382,6 +1382,8 @@ std::string Shelf()
 			dirty = true;
 		}
 
+		if (ra::OverlayBusy())
+			dirty = true; // 2.11 review: a RetroAchievements notification to show (or to clear) over the shelf
 		if (!dirty)
 		{
 			// nothing moved: flip a 1-pixel change so the loop still runs at the display's pace
@@ -1571,6 +1573,9 @@ std::string Shelf()
 		const std::string hint_fit = FitText(hint, 2, W - 40);
 		DrawText((W - TextWidth(hint_fit.c_str(), 2)) / 2, H - 54, hint_fit.c_str(), 2, Rgb(205, 200, 228));
 
+		// 2.11 review: notifications raised here (an unlock sent once the network came back) are shown over the shelf,
+		// above its button hints
+		ra::DrawOverlay({0, 0, W, H - 90});
 		ps5video::Present(0, 0, 0, 0, true);
 		ra::Pump();
 		if (opened > 0)

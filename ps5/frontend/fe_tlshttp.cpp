@@ -907,7 +907,7 @@ int TlsHttp::Get(const std::string& start_url, std::vector<uint8_t>& out, size_t
 }
 
 int TlsHttp::Send(const std::string& start_url, const std::string& body, const std::string& user_agent, const char* what,
-	std::vector<uint8_t>& out, size_t max_bytes)
+	std::vector<uint8_t>& out, size_t max_bytes, bool (*allowed)(const std::string&))
 {
 	out.clear();
 	if (!m->NetUp())
@@ -953,8 +953,9 @@ int TlsHttp::Send(const std::string& start_url, const std::string& body, const s
 		{
 			url = Resolve(u, location);
 			out.clear();
-			if (u.tls && url.compare(0, 7, "http://") == 0)
+			if ((u.tls && url.compare(0, 7, "http://") == 0) || (allowed && !allowed(url)))
 			{
+				OrbisLog("[https] %s: a redirect to another address, not followed", what);
 				status = kRefusedRedirect;
 				break;
 			}

@@ -214,6 +214,8 @@ bool8 LoadZip(const char *, uint32 *, uint8 *, uint32);
 // a .7z: its ROM unpacked into buffer, copier header removed (the port supplies it: ps5/frontend/fe_emu.cpp)
 bool8 Load7z(const char *, uint32 *, uint8 *, uint32);
 #endif
+// Snes9x PS5 2.11: the ROM's bytes once a soft patch (IPS/UPS/BPS) is applied, header left out (RetroAchievements hashes them)
+void S9xRomPatched(const uint8 *, int32);
 
 enum s9xwrap_t
 {

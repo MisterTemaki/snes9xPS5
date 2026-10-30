@@ -141,6 +141,9 @@ struct State
 	// 2.11: what snes9x.conf asked for the two settings RetroAchievements forbids changing in hardcore (rc_libretro.c's
 	// list for Snes9x: the region forced to PAL, the graphic windows off): ignored while hardcore applies
 	bool conf_force_pal = false, conf_no_windows = false;
+	bool pal_forced = false; // snes9x.conf's PAL was applied to the game running (it can't become a hardcore session)
+	// 2.11 review: the ROM's bytes after a soft patch (S9xRomPatched), hashed for RetroAchievements; empty: no patch
+	std::vector<uint8_t> patched;
 };
 State g;
 
@@ -572,6 +575,21 @@ void S9xMessage(int type, int number, const char* message)
 	OrbisLog("[s9x%s] %s", type == S9X_ERROR ? " error" : (type == S9X_WARNING ? " warning" : ""), message);
 }
 
+// 2.11 review: the core applied a soft patch (IPS/UPS/BPS) to the ROM it loads: its bytes, header left out, before
+// anything else changes them (memmap.cpp, LoadROM). RetroAchievements hashes the patched game, as RetroArch does.
+void S9xRomPatched(const uint8* rom, int32 size)
+{
+	try
+	{
+		g.patched.assign(rom, rom + (size > 0 ? size : 0));
+	}
+	catch (const std::bad_alloc&)
+	{
+		g.patched.clear();
+	}
+	OrbisLog("[emu] a soft patch was applied (%d bytes)", int(size));
+}
+
 // The core's loader for a .7z (memmap.cpp, FileLoader): the archive's ROM (fe_7z.h: the biggest file that fits) unpacked
 // into the ROM buffer, its copier header dropped, as LoadZip does for a .zip. Why it failed is kept for the message.
 bool8 Load7z(const char* path, uint32* total, uint8* buffer, uint32 buffer_size)
@@ -805,11 +823,14 @@ bool LoadGame(const std::string& path)
 	netfs_prepare_game(path); // a ROM on a share: its MSU-1 files first (nothing for any other path)
 	fe::sevenzip::SetLastLoadError(fe::sevenzip::Error::None);
 	StartStep("load ROM");
-	// 2.11: with a RetroAchievements account and hardcore on, snes9x.conf can't force the PAL region or turn the graphic
-	// windows off (RetroAchievements forbids both for Snes9x in hardcore)
-	const bool ra_strict = fe::Config().ra_hardcore && ra::LoginState() != ra::Login::None;
+	// 2.11: with a RetroAchievements account and hardcore on, snes9x.conf can't force the PAL region (RetroAchievements
+	// forbids it for Snes9x in hardcore). The region is fixed once the ROM is loaded, so this is decided here, before
+	// the server has said whether the game has a set; the graphic windows follow hardcore as it applies (HardcoreChanged).
+	const bool ra_strict = fe::Config().ra_hardcore && ra::AccountActive();
 	Settings.ForcePAL = g.conf_force_pal && !ra_strict;
-	Settings.DisableGraphicWindows = g.conf_no_windows && !ra_strict;
+	g.pal_forced = Settings.ForcePAL;
+	Settings.DisableGraphicWindows = g.conf_no_windows;
+	g.patched.clear();
 	bool loaded = false;
 	try
 	{
@@ -852,7 +873,9 @@ bool LoadGame(const std::string& path)
 	// 2.11: RetroAchievements: the ROM's hash (it reads the file again, so before realtime too), then its set is asked for
 	// in the background; with hardcore the cheats are turned off from the first frame
 	StartStep("achievements");
-	ra::GameStarted(path);
+	ra::GameStarted(path, g.patched.empty() ? nullptr : &g.patched);
+	g.patched.clear();
+	g.patched.shrink_to_fit();
 	HardcoreChanged();
 	netfs_set_realtime(true); // from here nothing on this thread waits for a share
 	StartStep("first frame");
@@ -990,7 +1013,8 @@ void ApplySettings()
 	// 2.11: RetroAchievements forbids turning Snes9x's transparency off in hardcore (rc_libretro.c)
 	Settings.Transparency = cfg.transparency || ra::HardcoreActive();
 	Settings.DisplayFrameRate = cfg.show_fps;
-	Settings.SuperFXClockMultiplier = cfg.superfx_clock;
+	// 2.11 review: no Super FX underclock (a slow motion) while hardcore applies
+	Settings.SuperFXClockMultiplier = ra::HardcoreActive() && cfg.superfx_clock < 100 ? 100 : cfg.superfx_clock;
 	Settings.Mute = !cfg.audio;
 	S9xSetSoundMute(Settings.Mute);
 	ps5video::InvalidateSnes();
@@ -1120,6 +1144,24 @@ void HardcoreChanged()
 	Settings.Transparency = fe::Config().transparency || hardcore;
 	if (hardcore && !fe::Config().transparency)
 		OrbisLog("[emu] hardcore mode: Transparency stays on");
+	// 2.11 review: snes9x.conf's graphic windows off and a Super FX clock under 100%, which RetroAchievements forbids in
+	// hardcore, follow it as it starts or stops applying (the PAL region can't: HardcoreRefusal)
+	const bool no_windows = g.conf_no_windows && !hardcore;
+	if (no_windows != bool(Settings.DisableGraphicWindows) || (g.conf_no_windows && g.frame == 0))
+		OrbisLog("[emu] %s", no_windows ? "graphic windows off (snes9x.conf)" : "hardcore mode: graphic windows on");
+	Settings.DisableGraphicWindows = no_windows;
+	const int fx = fe::Config().superfx_clock;
+	const int fx_now = hardcore && fx < 100 ? 100 : fx;
+	if (fx_now != int(Settings.SuperFXClockMultiplier) && fx < 100)
+		OrbisLog("[emu] %s", hardcore ? "hardcore mode: Super FX clock 100%" : "Super FX clock back to the setting");
+	Settings.SuperFXClockMultiplier = fx_now;
+}
+
+std::string HardcoreRefusal()
+{
+	if (g.loaded && g.pal_forced)
+		return "snes9x.conf forces PAL in this game: start it again to play it in hardcore mode";
+	return "";
 }
 
 void AfterMenu()

@@ -16,7 +16,9 @@ retroachievements.org). The answers have the format rcheevos 12.5.0's own tests 
 
 config.json: {"user": "...", "password": "...", "token": "...", "expired_token": "...",
               "games": {"<hash>": <the achievementsets answer>}, "unlocked_hardcore": [ids], "unlocked": [ids],
-              "fail_awards": n (the first n awardachievement get a 503), "delay": seconds before each answer}
+              "fail_awards": n (the first n awardachievement get a 503), "delay": seconds before each answer,
+              "delay_first": {"<r>": seconds} (only the first request of that kind waits; 2.11 review: a slow server),
+              "redirect_badges": "<url>" (every badge answers 302 to it)}
 
 Each request is one JSON line in log.jsonl: its fields, but never the password or the token themselves -- "password_ok"
 and "token_ok" say whether they were right -- and the User-Agent header.
@@ -34,7 +36,7 @@ port = int(sys.argv[1])
 config = json.load(open(sys.argv[2]))
 log_path = sys.argv[3]
 lock = threading.Lock()
-state = {"awards": 0, "score": 1234, "softcore": 56}
+state = {"awards": 0, "score": 1234, "softcore": 56, "delayed": set()}
 
 
 def png(w, h, rgba):
@@ -74,7 +76,12 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_GET(self):
         record({"get": self.path, "ua": self.headers.get("User-Agent", "")})
-        if self.path.startswith("/Badge/") and self.path.endswith(".png"):
+        if self.path.startswith("/Badge/") and self.path.endswith(".png") and config.get("redirect_badges"):
+            self.send_response(302)
+            self.send_header("Location", config["redirect_badges"])
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+        elif self.path.startswith("/Badge/") and self.path.endswith(".png"):
             self.answer(200, BADGE, "image/png")
         else:
             self.answer(404, b"not found", "text/plain")
@@ -94,6 +101,13 @@ class Handler(BaseHTTPRequestHandler):
             entry["token_ok"] = q["t"] == config["token"]
             entry["token_expired"] = q["t"] == config.get("expired_token")
         record(entry)
+        wait = config.get("delay_first", {}).get(r)
+        if wait:
+            with lock:
+                first = r not in state["delayed"]
+                state["delayed"].add(r)
+            if first:
+                time.sleep(float(wait))
         token_ok = q.get("t") == config["token"]
         if r == "login2":
             if q.get("u") == config["user"] and (q.get("p") == config["password"] or token_ok):

@@ -45,6 +45,10 @@ enum class Login
 	Failed, // the last login failed (LoginError says why); a saved token is tried again at the next game
 };
 Login LoginState();
+// 2.11 review: an account that counts this session: logged in, logging in, or a login that failed for want of a network
+// (tried again by itself) or because of an old helper (said at each game). One the server refused counts as none, except
+// in Settings, which says why.
+bool AccountActive();
 std::string UserName();
 uint32_t Points(); // the hardcore score, or the softcore one with hardcore off
 // Why the account isn't logged in (or what went wrong with the network), translated; "" when all is well.
@@ -56,14 +60,17 @@ void Logout();
 // ---- hardcore mode
 bool HardcoreSetting();
 // The setting. On in a game whose achievements are loaded (or loading): the game is reset, as RetroAchievements requires.
-void SetHardcore(bool on);
+// false (and `refused` says why, translated) when it can't be turned on in this game (snes9x.conf forced PAL at its start).
+bool SetHardcore(bool on, std::string* refused = nullptr);
 // The restrictions apply now: hardcore on, an account, and a game whose achievements are loaded or still loading.
 bool HardcoreActive();
 // Whether the pause menu may open now (rc_client_can_pause in hardcore; always outside it); seconds to wait when not.
 bool CanPause(int* seconds_left);
 
 // ---- the game (fe_emu.cpp calls these)
-void GameStarted(const std::string& rom_path); // after the ROM loaded: the hash, then the set from the server
+// After the ROM loaded: the hash, then the set from the server. `patched`: the ROM's bytes after a soft patch Snes9x
+// applied (memmap.cpp, S9xRomPatched), which are hashed instead of the file
+void GameStarted(const std::string& rom_path, const std::vector<uint8_t>* patched = nullptr);
 void GameClosed();
 void Frame(); // after every emulated frame
 void OnReset(); // the game was reset (rc_client_reset)
@@ -81,6 +88,9 @@ std::string GameSummary();
 // Over the game's picture, after each drawn frame: the notifications (bottom left), the trackers and challenge
 // indicators (top right). Only inside `picture`, which the next frame draws over again.
 void DrawOverlay(const ps5video::Rect& picture);
+// Something to draw (or drawn last time, to be cleared): the shelf redraws while this is true (2.11 review: notifications
+// raised on the shelf, such as an unlock sent once the network is back, are shown there)
+bool OverlayBusy();
 
 // The achievement list, for the pause menu's Achievements screen
 struct Item

@@ -86,8 +86,9 @@ enum class RaCall
 {
 	Answer, // the server answered: http and body
 	NoHelper, // nobody on the helper's port
-	OldHelper, // a helper that closed the connection without a word: a 2.10 one, which doesn't know the command
+	OldHelper, // a helper that closed the connection without a word right after the request: a 2.10 one
 	HelperError, // the helper answered with an error (helper_ret: kRaNetwork, kRaRefused...; why says more)
+	Timeout, // 2.11 review: no answer in time, or the answer cut short: a slow server, not an old helper (retried)
 };
 struct RaReply
 {

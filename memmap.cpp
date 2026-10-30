@@ -1360,6 +1360,9 @@ bool8 CMemory::LoadROM (const char *filename)
             return (FALSE);
 
         CheckForAnyPatch(filename, HeaderCount != 0, totalFileSize);
+        // Snes9x PS5 2.11: the patched bytes, as RetroAchievements hashes a patched game (before LoadROMInt de-interleaves)
+        if (Settings.IsPatched)
+            S9xRomPatched(ROM, totalFileSize);
     }
     while(!LoadROMInt(totalFileSize));
 
