@@ -21,7 +21,7 @@ archive is unpacked by the port, `ps5/frontend/fe_7z.cpp`).
 > **Status (2.10):** 2.6 runs on the console: the app opens from its icon, the shelf, the controller, video and sound
 > work, and games play. 2.7's new parts (network shares, shelf tabs, borders), 2.8's Smooth picture, 2.9's `.7z`
 > games and 2.10's search and fixes have **not been run on a PS5 yet**. It
-> builds with the ps5-payload-dev SDK and passes 462 host tests (one, the sound-queue timing, depends on the test
+> builds with the ps5-payload-dev SDK and passes 469 host tests (one, the sound-queue timing, depends on the test
 > machine's load), which run the same code on Linux with the PS5 calls simulated, plus the network-share, search and
 > other unit and loopback tests. If something fails, turn on Settings, Debug logs: the logs in `/data/snes9x/logs/` say where.
 
@@ -703,7 +703,7 @@ make ps5 -j$(nproc)              # build/ps5/Snes9xPS5.elf (installer + helper, 
 make send PS5_HOST=192.168.0.10  # sends it to elfldr (port 9021)
 make dist                        # build/dist/Snes9xPS5-v<version>.elf, the release zip, the source zip
 make app                         # only build/app/PPSA99922/, to copy by hand
-make test                        # Linux builds (app, installer, helper) + 462 tests (ASan/UBSan) and the unit tests
+make test                        # Linux builds (app, installer, helper) + 469 tests (ASan/UBSan) and the unit tests
 ```
 
 The build has three stages:
