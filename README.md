@@ -19,8 +19,9 @@ Everything outside `ps5/` is the original Snes9x source, unchanged, apart from t
 archive is unpacked by the port, `ps5/frontend/fe_7z.cpp`).
 
 > **Status (2.10):** 2.6 runs on the console: the app opens from its icon, the shelf, the controller, video and sound
-> work, and games play. 2.7's new parts (network shares, shelf tabs, borders), 2.8's Smooth picture, 2.9's `.7z`
-> games and 2.10's search and fixes have **not been run on a PS5 yet**. It
+> work, and games play. 2.10 was run on a PS5 before release: the shelf opened from its saved list (3,250 games on
+> a USB drive), the exceptions check passed, the search worked, a game played, and the update check ran. 2.7's
+> network shares and borders, 2.8's Smooth picture and 2.9's `.7z` games have **not been run on a PS5 yet**. It
 > builds with the ps5-payload-dev SDK and passes 509 host tests (one, the sound-queue timing, depends on the test
 > machine's load), which run the same code on Linux with the PS5 calls simulated, plus the network-share, search and
 > other unit and loopback tests. If something fails, turn on Settings, Debug logs: the logs in `/data/snes9x/logs/` say where.
