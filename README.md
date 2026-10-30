@@ -476,8 +476,10 @@ in the game, shown on your profile) to SNES games. Snes9x PS5 uses RetroAchievem
 2. On the shelf: **Triangle** (Settings) > **RetroAchievements** (the last row) > **Log in**.
 3. Type your user name on the on-screen keyboard (OPTIONS is Done), then your password: it is shown as `*****`.
 4. The screen says **Logged in as** *name* **(points)**; the Settings row says the same. Next time the app logs in by
-   itself at start, quietly. If that login no longer works (a changed password, an expired login), nothing pops up:
-   Settings, RetroAchievements says what is wrong and offers **Log in** again.
+   itself at start, quietly. If that login no longer works (a changed password, an expired login), nothing pops up and
+   nothing changes in the games (as without an account): Settings, RetroAchievements says what is wrong and offers **Log
+   in** again. If it failed only because the network (or the server) was down, it is tried again by itself, every 10 s at
+   first, then less often (at most every 5 minutes), on the shelf and in games.
 5. **Log out** on the same screen deletes the saved login.
 
 Without an account nothing changes: the menus are 2.10's, and the app sends nothing to RetroAchievements.
@@ -487,6 +489,10 @@ Without an account nothing changes: the menus are 2.10's, and the app sends noth
 - When a game starts, the app works out its RetroAchievements hash from the ROM (the way RetroAchievements does: the ROM
   file without a copier header; for a `.zip`, `.7z` or `.gz` the ROM inside it, so a zipped ROM is the same game as the
   loose one; ROMs on a network share and MSU-1 ROMs too) and asks for the game's achievements.
+- **Soft patches:** when Snes9x applies an IPS, UPS or BPS patch at load (a patch beside the ROM, in `/data/snes9x/patches`
+  or inside its zip), the patched game is hashed, as RetroArch does: a translation or hack gets its own entry on
+  RetroAchievements if it has one, and is otherwise an unknown game. A patch never plays under the original game's
+  achievements.
 - A small box at the bottom left of the picture says **N of M achievements unlocked** and whether hardcore is on, or **No
   achievements for this game**, or **Unknown game: no achievements** (a ROM RetroAchievements doesn't know: a hack, a bad
   dump, a different revision).
@@ -502,14 +508,19 @@ Without an account nothing changes: the menus are 2.10's, and the app sends noth
 - Hardcore unlocks count double on RetroAchievements and are the ones its leaderboards use. In hardcore, as
   RetroAchievements requires: **no state can be loaded** (saving one still works), **no cheats** (the cheats stay in their
   file and the list, but none reaches the game; the cheat manager is closed), and **Transparency stays on** (RetroAchievements
-  forbids turning Snes9x's transparency off; likewise `snes9x.conf` can't force PAL or turn off the graphic windows). The
-  pause menu shows those rows greyed with *Off in hardcore mode*. Pausing many times in a row is limited, as
+  forbids turning Snes9x's transparency off; likewise `snes9x.conf` can't turn off the graphic windows, and the Super FX
+  clock can't go under 100%, which would slow the game down). The pause menu shows those rows greyed with *Off in hardcore
+  mode*, *On (hardcore mode)* or *100% (hardcore mode)*. With an account and hardcore on, `snes9x.conf` can't force a game
+  to PAL either; a game started with `snes9x.conf` forcing PAL (hardcore off) can't switch to hardcore until it is started
+  again (the pause menu says so). Pausing many times in a row is limited, as
   RetroAchievements' library asks (pausing over and over would be a slow motion): "you can pause again in N s".
 - Fast forward (R2) stays: RetroAchievements allows it. Snes9x PS5 has no rewind, slow motion or frame advance.
 - **Turning hardcore on during a game resets the game** (RetroAchievements doesn't allow switching in the middle of a
   session). Turning it off is allowed at any time.
 - The restrictions apply only while the game has achievements or leaderboards: for an unknown game, a game without a set,
-  or with no connection, states and cheats work as usual.
+  or with no connection, states and cheats work as usual. If the connection comes back during such a game and its
+  achievements load then, that game counts as **softcore** until it is closed (states and cheats were allowed before);
+  turning hardcore on in the pause menu resets it into a hardcore session.
 - **Important: hardcore unlocks need RetroAchievements' approval of the emulator.** RetroAchievements' server turns
   hardcore unlocks from an emulator it doesn't recognise (by its User-Agent, here `Snes9xPS5/2.11 (PlayStation 5)
   Snes9x/1.63 rcheevos/12.5`) into softcore unlocks, and may show a "Warning: Unsupported Emulator" notice at game start.
@@ -528,7 +539,8 @@ Without an account nothing changes: the menus are 2.10's, and the app sends noth
   scores, and every two minutes the rich presence text. Nothing about your other games or files.
 - **No network, or the server down:** the game plays normally and one box says achievements are unavailable. An unlock
   earned while the connection is lost is kept and sent again by itself (rcheevos retries, waiting up to two minutes between
-  tries, also once you are back on the shelf); the boxes say *Offline* and then *Back online*. rcheevos keeps such
+  tries, also once you are back on the shelf, where its box is shown too); the boxes say *Offline* and then *Back online*.
+  A slow answer (no answer within a minute) counts the same way: it is tried again. rcheevos keeps such
   unlocks in memory only: one still waiting when the app closes is lost (the achievement unlocks again the next time its
   conditions are met).
 - **An older helper** (2.10's, still running from your autoload): it doesn't know these requests, and the app says so:

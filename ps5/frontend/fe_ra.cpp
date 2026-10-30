@@ -89,6 +89,10 @@ struct State
 	double last_frame = -1000, last_idle = -1000;
 	double retry_at = 0, retry_delay = 0; // 2.11 review: the saved token tried again while the network is down
 	bool drew = false; // the overlay drew something last time (the shelf redraws once more to clear it)
+	// the set came only after the game had started without it (a login that went through late): states and cheats were
+	// allowed meanwhile, so this game counts as softcore, whatever the setting (RetroAchievements: hardcore can't start
+	// in the middle of a session); back to the setting when the game closes or hardcore is turned on (which resets it)
+	bool session_softcore = false;
 	bool reset_seen = false;
 	std::deque<Toast> toasts;
 	std::map<uint32_t, std::string> trackers; // leaderboard trackers shown
@@ -547,7 +551,12 @@ void OnLogin(int result, const char* error_message, rc_client_t* client, void*)
 		// 2.11 review: a game that started while the login could not go through gets its set now
 		if (g.game_open && g.game == GameRa::Failed && !g.hash.empty())
 		{
-			OrbisLog("[ra] the running game's set is asked for again");
+			OrbisLog("[ra] the running game's set is asked for again (softcore for this game: it started without it)");
+			if (rc_client_get_hardcore_enabled(client))
+			{
+				g.session_softcore = true;
+				rc_client_set_hardcore_enabled(client, 0);
+			}
 			g.game = GameRa::Loading;
 			rc_client_begin_load_game(client, g.hash.c_str(), OnGameLoaded, nullptr);
 			emu::HardcoreChanged();
@@ -801,6 +810,7 @@ bool SetHardcore(bool on, std::string* refused)
 	if (!g.client)
 		return true;
 	g.reset_seen = false;
+	g.session_softcore = false;
 	rc_client_set_hardcore_enabled(g.client, on ? 1 : 0);
 	OrbisLog("[ra] hardcore %s", on ? "on" : "off");
 	// RetroAchievements: hardcore can't start in the middle of a session. rc_client asks for the reset itself once the set
@@ -817,7 +827,7 @@ bool SetHardcore(bool on, std::string* refused)
 
 bool HardcoreActive()
 {
-	return g.client && fe::Config().ra_hardcore && (g.login == Login::LoggedIn || g.login == Login::Pending) && g.game_open &&
+	return g.client && fe::Config().ra_hardcore && !g.session_softcore && (g.login == Login::LoggedIn || g.login == Login::Pending) && g.game_open &&
 		(g.game == GameRa::Loading || g.game == GameRa::Active);
 }
 
@@ -881,6 +891,9 @@ void GameClosed()
 	g.game_open = false;
 	g.game = GameRa::Off;
 	g.hash.clear();
+	if (g.session_softcore && g.client)
+		rc_client_set_hardcore_enabled(g.client, fe::Config().ra_hardcore ? 1 : 0);
+	g.session_softcore = false;
 	g.toasts.clear();
 	g.trackers.clear();
 	g.challenges.clear();

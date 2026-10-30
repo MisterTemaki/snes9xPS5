@@ -2607,6 +2607,7 @@ expect "[ $rc = 0 ] && ! grep -q 'an older helper\|Update the helper' $T/root/lo
 expect "[ \$(ra_req r=login2) -ge 2 ] && grep -q 'logged in as Tester' $T/root/logs/boot.log && [ -s $T/root/retroachievements/login.txt ]" "a slow server: the token login is tried again by itself and goes through"
 expect "[ \$(ra_req r=achievementsets m=$RA_HASH) = 1 ] && [ \$(ra_note 'Snes9x RA Test | 0 of 4 achievements unlocked') = 1 ]" "then the game's set is loaded, in the game that was already running"
 expect "[ \$(ra_req r=awardachievement a=101) -ge 1 ] && grep -q 'Achievement 101 awarded' $T/root/logs/boot.log" "a slow answer to the unlock: tried again, the unlock arrives"
+expect "grep -q 'softcore for this game: it started without it' $T/root/logs/boot.log && [ \$(ra_req r=awardachievement a=101 h=1) = 0 ] && [ \$(ra_req r=awardachievement a=101 h=0) -ge 1 ]" "a set that came after the game started (states and cheats were allowed meanwhile): that game counts as softcore"
 ra_stop
 
 # 44m (L1): a login the server refused is off for the session: no notification at a game's start, no Achievements or
