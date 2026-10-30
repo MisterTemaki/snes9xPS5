@@ -94,7 +94,10 @@ public:
 	~CoverService() { Stop(); }
 	// background: the helper downloads the covers (fe_coverworker.h): show each one as it lands, and tell the helper
 	// which ones are around the selection
-	void Start(const std::vector<GameInfo>& games, bool allow_download, bool background = false);
+	// loaded (2.10, when given: one per game): the covers the shelf already holds for these games (after the check in
+	// the background changed the list): they are not loaded again, so nothing on the shelf flickers
+	void Start(const std::vector<GameInfo>& games, bool allow_download, bool background = false,
+		const std::vector<CoverPtr>* loaded = nullptr);
 	void Stop();
 
 	// The shelf, every frame: the selection (the worker loads around it) ...

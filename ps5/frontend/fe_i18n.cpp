@@ -173,6 +173,8 @@ const Entry kTable[] = {
 	{"Identifying games... %d%% (%zu of %zu)", "Identificando juegos... %d%% (%zu de %zu)",
 		"Identificando jogos... %d%% (%zu de %zu)", "Identification des jeux... %d%% (%zu sur %zu)",
 		"Erkenne Spiele... %d%% (%zu von %zu)"},
+	{"The file is no longer there.", "El archivo ya no está ahí.", "O arquivo não está mais lá.", "Le fichier n'est plus là.",
+		"Die Datei ist nicht mehr da."},
 	{"Quit Snes9x PS5?", "¿Salir de Snes9x PS5?", "Sair do Snes9x PS5?", "Quitter Snes9x PS5 ?", "Snes9x PS5 beenden?"},
 	{"No games found.", "No se encontraron juegos.", "Nenhum jogo encontrado.", "Aucun jeu trouvé.",
 		"Keine Spiele gefunden."},

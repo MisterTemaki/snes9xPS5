@@ -508,6 +508,15 @@ $(SEARCH_TEST): tests/test_search.cpp frontend/fe_search.h frontend/fe_tabs.h fr
 test-search: $(SEARCH_TEST)
 	$(SEARCH_TEST)
 
+# the saved game list (frontend/fe_library.h, 2.10): the file's format, what it refuses, the folders, the selection kept
+LIBRARY_TEST := $(HOST_OUT)/library-test
+$(LIBRARY_TEST): tests/test_library.cpp frontend/fe_library.h frontend/fe_tabs.h frontend/fe_games.h
+	@mkdir -p $(dir $@)
+	$(HOST_CXX) -std=c++17 $(HOST_OPT) $(HOST_SAN) $(PORT_WARN) -Ifrontend -o $@ tests/test_library.cpp
+
+test-library: $(LIBRARY_TEST)
+	$(LIBRARY_TEST)
+
 # the border pack code (fe_border.cpp, fe_borderimg.cpp) with the renderer, the cover matcher and the game naming
 # stood in for by the test: generated PNGs through the lookup order, the window, the backdrop and the rim
 BORDER_TEST := $(HOST_OUT)/border-pack-test
@@ -519,7 +528,7 @@ $(BORDER_TEST): $(BORDER_TEST_OBJ) $(HOST_ZLIB_OBJ)
 test-border: $(BORDER_TEST)
 	ASAN_OPTIONS=detect_leaks=1 $(BORDER_TEST)
 
-test: test-nfs test-tabs test-search test-border
+test: test-nfs test-tabs test-search test-library test-border
 
 # the border in the renderer (ProsperoVideo.cpp): picture rectangle in a window, backdrop restore, rim blend; runs against the host's stub video output
 BORDER_RENDER_TEST := $(HOST_OUT)/border-render-test
@@ -566,5 +575,5 @@ clean:
 # the SMB backend against a real Samba (adds `smb-test`, run before the other tests; skipped without smbd)
 include tests/smb/smb.mk
 
-.PHONY: ps5 host test test-nfs test-nfs-server test-tabs test-search test-border test-download-worker send strip app dist clean
+.PHONY: ps5 host test test-nfs test-nfs-server test-tabs test-search test-library test-border test-download-worker send strip app dist clean
 .SECONDARY:

@@ -3,6 +3,8 @@
 
 #include "fe_games.h"
 #include "fe_7z.h"
+#include "fe_coverfetch.h"
+#include "fe_library.h"
 #include "fe_titlematch.h"
 #include "fe_artmatch.h"
 #include "fe_dbart.h"
@@ -18,11 +20,13 @@
 #include <dirent.h>
 #include <strings.h>
 #include <sys/stat.h>
+#include <unistd.h>
 
 #include <algorithm>
 #include <atomic>
 #include <cctype>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <deque>
 #include <mutex>
@@ -391,13 +395,16 @@ void LoadHeaderHint(CrcCache& cache, GameInfo& g)
 	g.header_japan = atoi(val.c_str() + tab + 1) == 0;
 }
 
-void Walk(const std::string& dir, int depth, bool usb, bool net, std::vector<GameInfo>& out, const ScanProgress& progress)
+void Walk(const std::string& dir, int depth, bool usb, bool net, std::vector<GameInfo>& out, const ScanProgress& progress,
+	const std::atomic<bool>* cancel)
 {
 	DIR* d = opendir(dir.c_str());
 	if (!d)
 		return;
 	while (dirent* e = readdir(d))
 	{
+		if (cancel && *cancel)
+			break;
 		if (e->d_name[0] == '.')
 			continue;
 		const std::string path = dir + "/" + e->d_name;
@@ -407,7 +414,7 @@ void Walk(const std::string& dir, int depth, bool usb, bool net, std::vector<Gam
 		if (S_ISDIR(st.st_mode))
 		{
 			if (depth < 4)
-				Walk(path, depth + 1, usb, net, out, progress);
+				Walk(path, depth + 1, usb, net, out, progress, cancel);
 			continue;
 		}
 		if (!S_ISREG(st.st_mode))
@@ -803,20 +810,38 @@ std::vector<std::string> RomRoots()
 	return roots;
 }
 
-std::vector<GameInfo> ScanGames(const ScanProgress& progress)
+std::vector<GameInfo> ScanGames(const ScanProgress& progress, const std::atomic<bool>* cancel)
 {
 	std::vector<GameInfo> games;
 	for (const std::string& root : RomRoots())
-		Walk(root, 0, root.rfind("/mnt/", 0) == 0, netfs_is_network_path(root.c_str()), games, progress);
+		Walk(root, 0, root.rfind("/mnt/", 0) == 0, netfs_is_network_path(root.c_str()), games, progress, cancel);
 
 	CrcCache& cache = SharedCrcCache();
 	cache.Begin();
 	size_t identified = 0;
 	for (GameInfo& g : games)
 	{
+		// 2.10: a scan in the background stops between two games when asked (the app quits, a game starts)
+		if (cancel && *cancel)
+			break;
 		if (progress)
 			progress(1, identified++, games.size());
+#ifndef __PROSPERO__
+		// the host tests: SNES9X_HOST_SCAN_SLOW_MS makes each game take that long, so a test can act while a scan runs
+		if (const char* e = getenv("SNES9X_HOST_SCAN_SLOW_MS"))
+			for (int ms = atoi(e); ms > 0 && !(cancel && *cancel); ms -= 10)
+				usleep(10 * 1000);
+		if (cancel && *cancel)
+			break;
+#endif
 		NameGame(cache, g, nullptr);
+	}
+	if (cancel && *cancel)
+	{
+		// stopped: the CRCs read so far are kept, nothing is pruned (the scan saw only part of the folders)
+		cache.Save(false);
+		OrbisLog("[games] scan stopped before its end");
+		return {};
 	}
 	cache.Save(true);
 
@@ -833,6 +858,49 @@ std::vector<GameInfo> ScanGames(const ScanProgress& progress)
 	if (games.size() > kLogged)
 		OrbisLog("[games]   ... and %zu more", games.size() - kLogged);
 	return games;
+}
+
+std::string LibraryPath()
+{
+	return OrbisRoot() + "/library.bin";
+}
+
+bool SaveLibrary(const std::vector<GameInfo>& games)
+{
+	static std::mutex lock; // the shelf's scans and the check in the background never write at the same time; this is a guard
+	std::lock_guard<std::mutex> g(lock);
+	const std::string data = library::Encode(games);
+	const bool ok = WriteFileAtomicTo(LibraryPath(), std::vector<uint8_t>(data.begin(), data.end()));
+	OrbisLog("[library] %s %s: %zu game(s), %zu bytes", ok ? "saved" : "could not save", LibraryPath().c_str(), games.size(),
+		data.size());
+	return ok;
+}
+
+bool LoadLibrary(std::vector<GameInfo>& games)
+{
+	const std::string path = LibraryPath();
+	FILE* f = fopen(path.c_str(), "rb");
+	if (!f)
+	{
+		OrbisLog("[library] no saved game list (%s): scanning", path.c_str());
+		return false;
+	}
+	std::string data;
+	char buf[65536];
+	size_t n;
+	while ((n = fread(buf, 1, sizeof(buf), f)) > 0 && data.size() < (size_t(64) << 20))
+		data.append(buf, n);
+	const bool read_ok = ferror(f) == 0;
+	fclose(f);
+	const library::Bad bad = read_ok ? library::Decode(data, games) : library::Bad::Short;
+	if (bad != library::Bad::None)
+	{
+		OrbisLog("[library] saved game list ignored (%s, %zu bytes): scanning", read_ok ? library::Why(bad) : "read error",
+			data.size());
+		return false;
+	}
+	OrbisLog("[library] saved game list: %zu game(s)", games.size());
+	return true;
 }
 
 GameInfo DescribeGame(const std::string& path, uint32_t rom_crc)

@@ -2080,6 +2080,164 @@ for src, dst in zip(sys.argv[1::2], sys.argv[2::2]):
 " "$KEYBOARD" "$SHOTS/1-keyboard-open.png" "$FILTERED" "$SHOTS/2-filtered-shelf.png" "$NOMATCH" "$SHOTS/3-no-match.png" && echo "  (screens saved in $SHOTS)"
 fi
 
+echo "== 43. the shelf opens from the saved list (2.10): the list saved after a scan, a bad or old file ignored, a missing drive's games left out, the check in the background merged with the selection, tab and search kept, no scan after a game, a drive plugged in during a game, a game gone from the list, the check stopped at quit"
+L1=400; R1=800; RIGHT=20
+lib_root() { # dir -> a root with the eight games of group 42 (title cards, no downloads)
+	local t
+	t=$(newroot "$1")
+	echo "covers_download=0" >>"$t/root/snes9x-ps5.ini"
+	for n in "Super Mario World (USA)" "Super Mario Kart (USA)" "Super Metroid (USA)" "F-Zero (USA)" "Pokémon Gold (Hack)" \
+		"Donkey Kong Country (USA)" "Mario Paint (Japan, USA)" "Yoshi's Island (USA)"; do
+		python3 tests/make_test_rom.py "$t/root/roms/$n.sfc" ntsc >/dev/null
+	done
+	echo "$t"
+}
+QUITG43() { echo "$1:$L3R3;$(($1 + 5)):0;$(($1 + 20)):$UP;$(($1 + 21)):0;$(($1 + 30)):$CROSS;$(($1 + 31)):0"; } # quit from the game's menu
+QUIT43() { echo "$1:$OPTIONS;$(($1 + 2)):0;$(($1 + 10)):$CROSS;$(($1 + 12)):0"; } # OPTIONS, Cross: quit from the shelf
+scans43() { grep -c '\[games\] [0-9]* ROM(s)' "$1/root/logs/boot.log"; }
+lib_pad() { python3 tests/osk_pad.py 2>/dev/null; }
+# a. the first start scans (as before) and saves the list; the second opens from it and checks in the background
+T=$(lib_root t43a)
+rc1=$(run "$T" "0:0;$(QUIT43 40)" "")
+expect "[ $rc1 = 0 ] && grep -q 'no saved game list' $T/root/logs/boot.log && grep -q 'first frame .* (8 game(s), from a scan)' $T/root/logs/boot.log && grep -q '\[library\] saved .*library.bin: 8 game(s)' $T/root/logs/boot.log" "first start: no saved list, the scan as before, the list saved (8 games)"
+cp "$T/root/library.bin" "$T/lib1.bin"
+rm -f "$T/root/logs/boot.log"
+rc2=$(SNES9X_HOST_REALTIME=1 SNES9X_HOST_SCAN_SLOW_MS=200 run "$T" "0:0;$(QUIT43 400)" "60")
+expect "[ $rc2 = 0 ] && grep -q 'saved game list: 8 game(s)' $T/root/logs/boot.log && grep -q 'first frame .* (8 game(s), from the saved list)' $T/root/logs/boot.log" "second start: the shelf opens from the saved list"
+expect "grep -q 'checking the folders in the background (the app started from the saved list)' $T/root/logs/boot.log && grep -q 'check of the folders done in .*8 game(s), nothing changed' $T/root/logs/boot.log" "... and checks the folders in the background: nothing changed"
+expect "awk '/first frame/{f=NR} /ROM\\(s\\)/{s=NR} END{exit !(f && s && f < s)}' $T/root/logs/boot.log" "the first frame came before the check's scan ended"
+expect "cmp -s $T/lib1.bin $T/root/library.bin && [ ! -e $T/root/library.bin.part ]" "the list saved again is the same file; no temporary file left"
+SAVED43=$T/dump/flip00060.ppm
+expect "[ -f $SAVED43 ]" "the shelf at flip 60, while the check runs, dumped"
+expect "! grep -q 'runtime error\|AddressSanitizer' $T/out.txt" "no sanitizer reports"
+# b. a damaged file, a foreign one and one of another format version are ignored: the scan as before, the file written anew
+T=$(lib_root t43b)
+run "$T" "0:0;$(QUIT43 40)" "" >/dev/null
+GOOD43=$T/good.bin
+cp "$T/root/library.bin" "$GOOD43"
+python3 - "$T/root/library.bin" <<'PY'
+import sys
+d = bytearray(open(sys.argv[1], 'rb').read()); d[40] ^= 0x20; open(sys.argv[1], 'wb').write(d)
+PY
+rm -f "$T/root/logs/boot.log"
+rc=$(run "$T" "0:0;$(QUIT43 40)" "")
+expect "[ $rc = 0 ] && grep -q 'saved game list ignored (damaged (checksum)' $T/root/logs/boot.log && grep -q 'first frame .* (8 game(s), from a scan)' $T/root/logs/boot.log && cmp -s $GOOD43 $T/root/library.bin" "a damaged list: ignored, the scan as before, the list written anew"
+python3 - "$T/root/library.bin" <<'PY'
+import sys, zlib, struct
+d = bytearray(open(sys.argv[1], 'rb').read())
+d[8] = 0  # format version 0
+d[-4:] = struct.pack('<I', zlib.crc32(bytes(d[:-4])) & 0xffffffff)
+open(sys.argv[1], 'wb').write(d)
+PY
+rm -f "$T/root/logs/boot.log"
+rc=$(run "$T" "0:0;$(QUIT43 40)" "")
+expect "[ $rc = 0 ] && grep -q 'saved game list ignored (another format version' $T/root/logs/boot.log && grep -q 'first frame .* (8 game(s), from a scan)' $T/root/logs/boot.log" "a list of another format version: ignored, the scan as before"
+printf 'hello, this is not a saved list of games' >"$T/root/library.bin"
+rm -f "$T/root/logs/boot.log"
+rc=$(run "$T" "0:0;$(QUIT43 40)" "")
+expect "[ $rc = 0 ] && grep -q 'saved game list ignored (not a saved game list' $T/root/logs/boot.log && grep -q 'first frame .* (8 game(s), from a scan)' $T/root/logs/boot.log && ! grep -q 'runtime error\|AddressSanitizer' $T/out.txt" "a foreign file: ignored, the scan as before"
+# c. a drive that isn't there now: its games are left out at once (one look at each ROM folder)
+T=$(lib_root t43c)
+U43=$T/usbroms
+mkdir -p "$U43" && python3 tests/make_test_rom.py "$U43/Contra III (USA).sfc" ntsc >/dev/null
+rc=$(SNES9X_HOST_USB_ROOT=$U43 run "$T" "0:0;$(QUIT43 40)" "")
+expect "[ $rc = 0 ] && grep -q 'saved .*library.bin: 9 game(s)' $T/root/logs/boot.log" "with the drive: 9 games saved"
+rm -rf "$U43" "$T/root/logs/boot.log"
+rc=$(SNES9X_HOST_USB_ROOT=$U43 SNES9X_HOST_SCAN_SLOW_MS=200 run "$T" "0:0;$(QUIT43 200)" "")
+expect "[ $rc = 0 ] && grep -q '8 game(s) from the saved list (1 left out: their folder isn.t there now)' $T/root/logs/boot.log && grep -q 'first frame .* (8 game(s), from the saved list)' $T/root/logs/boot.log" "the drive unplugged: its game left out before the first frame"
+# d. the check finds a new game and a game gone: the shelf keeps the tab, the search and the selection (the gone game's
+#    neighbour), applies the search again, and Cross plays the game kept
+T=$(lib_root t43d)
+run "$T" "0:0;$(QUIT43 40)" "" >/dev/null
+python3 tests/make_test_rom.py "$T/root/roms/Super Castlevania IV (USA).sfc" ntsc >/dev/null
+rm -f "$T/root/roms/Super Mario Kart (USA).sfc" "$T/root/logs/boot.log"
+PAD=$(lib_pad <<'STEPS'
+frame 40
+press CIRCLE
+type super ma
+wait 10
+press OPTIONS
+wait 400
+press CROSS
+STEPS
+)
+last=$(echo "$PAD" | sed 's/.*;\([0-9]*\):0$/\1/')
+rc=$(SNES9X_HOST_REALTIME=1 SNES9X_HOST_SCAN_SLOW_MS=600 MAXFLIPS=$((last + 300)) run "$T" "$PAD;$(QUITG43 $((last + 120)))" "")
+expect "grep -q 'tab Internal: 2 of 8 game(s) match the search \"super ma\"' $T/root/logs/boot.log" "from the saved list, \"super ma\": Super Mario Kart (its file already deleted) and Super Mario World"
+expect "awk '!m && /match the search \"super ma\"/{m=NR} /check of the folders done/{c=NR} END{exit !(m && c && m < c)}' $T/root/logs/boot.log" "the search was typed while the check ran"
+expect "grep -q 'check: 1 new, 1 gone: shelf updated on .*Super Mario World (USA).sfc, tab Internal, search \"super ma\"' $T/root/logs/boot.log" "the check merged: 1 new, 1 gone; Super Mario Kart was selected and is gone: its neighbour Super Mario World is selected; tab and search kept"
+expect "grep -q 'tab Internal: 1 of 8 game(s) match the search \"super ma\"' $T/root/logs/boot.log" "the search applied again to the new list (Super Castlevania IV doesn't match)"
+expect "grep -q 'loading .*Super Mario World (USA).sfc' $T/root/logs/boot.log && [ $rc = 0 ] && ! grep -q 'runtime error\|AddressSanitizer' $T/out.txt" "Cross plays the game kept selected; exit code 0, no sanitizer reports"
+# e. back from a game: no scan, no loading screen (the list stays in memory)
+T=$(lib_root t43e)
+run "$T" "0:0;$(QUIT43 40)" "" >/dev/null
+rm -f "$T/root/logs/boot.log"
+rc=$(run "$T" "0:0;60:$CROSS;62:0;150:$L3R3;152:0;160:$UP;162:0;164:$UP;166:0;170:$CROSS;172:0;$(QUIT43 230)" "")
+expect "[ $rc = 0 ] && grep -q 'loading ' $T/root/logs/boot.log && grep -q 'first frame .* from the list in memory' $T/root/logs/boot.log" "back from the game: the shelf from the list in memory"
+expect "[ \"\$(scans43 $T)\" = 1 ]" "one scan in all (the start's check), none on the way back ($(scans43 $T) found)"
+# f. a drive plugged in during the game: the way back checks the folders and finds its game
+T=$(lib_root t43f)
+U43=$T/usbroms
+run "$T" "0:0;$(QUIT43 40)" "" >/dev/null
+rm -f "$T/root/logs/boot.log"
+( for i in $(seq 600); do
+	if grep -q 'loading ' "$T/root/logs/boot.log" 2>/dev/null; then
+		mkdir -p "$U43.tmp" && python3 tests/make_test_rom.py "$U43.tmp/Contra III (USA).sfc" ntsc >/dev/null && mv "$U43.tmp" "$U43"
+		break
+	fi
+	sleep 0.05
+done ) &
+rc=$(SNES9X_HOST_USB_ROOT=$U43 run "$T" "0:0;60:$CROSS;62:0;300:$L3R3;302:0;310:$UP;312:0;314:$UP;316:0;320:$CROSS;322:0;$(QUIT43 420)" "")
+wait
+expect "[ $rc = 0 ] && grep -q 'checking the folders in the background (the ROM folders changed during the game)' $T/root/logs/boot.log" "the ROM folders changed during the game: the way back checks them"
+expect "grep -q 'check: 1 new, 0 gone' $T/root/logs/boot.log && grep -q 'saved .*library.bin: 9 game(s)' $T/root/logs/boot.log" "... finds the drive's game, and saves the list (9 games)"
+# g. a game picked from the saved list whose file is gone: a clear message, back to the shelf, and the check drops it
+T=$(lib_root t43g)
+run "$T" "0:0;$(QUIT43 40)" "" >/dev/null
+rm -f "$T/root/roms/F-Zero (USA).sfc" "$T/root/logs/boot.log"
+rc=$(SNES9X_HOST_REALTIME=1 SNES9X_HOST_SCAN_SLOW_MS=400 run "$T" "0:0;30:$RIGHT;32:0;40:$CROSS;42:0;100:$CROSS;102:0;$(QUIT43 400)" "80")
+expect "grep -q 'notify.*could not open .*F-Zero (USA).sfc - The file is no longer there' $T/root/logs/boot.log" "F-Zero picked from the saved list, its file gone: \"The file is no longer there.\""
+expect "grep -q 'check stopped (a game starts)' $T/root/logs/boot.log && grep -q 'check: 0 new, 1 gone' $T/root/logs/boot.log" "back on the shelf, the check (stopped by the game) runs again and drops it"
+expect "[ $rc = 0 ] && ! grep -q 'runtime error\|AddressSanitizer' $T/out.txt" "exit code 0, no crash, no sanitizer reports"
+# h. quitting while the check runs: it stops between two files; the saved list stays whole, nothing half-written
+T=$(lib_root t43h)
+run "$T" "0:0;$(QUIT43 40)" "" >/dev/null
+cp "$T/root/library.bin" "$T/lib1.bin"
+python3 tests/make_test_rom.py "$T/root/roms/Contra III (USA).sfc" ntsc >/dev/null
+rm -f "$T/root/logs/boot.log"
+start=$(date +%s.%N)
+rc=$(SNES9X_HOST_SCAN_SLOW_MS=2000 run "$T" "0:0;$(QUIT43 80)" "")
+secs=$(python3 -c "print(round($(date +%s.%N) - $start, 1))")
+expect "[ $rc = 0 ] && grep -q 'scan stopped before its end' $T/root/logs/boot.log && grep -q 'check stopped (the app quits)' $T/root/logs/boot.log" "quit while the check runs: it stops (exit code 0)"
+expect "python3 -c 'import sys; sys.exit(0 if $secs < 15 else 1)'" "... at once: the app was gone in ${secs}s (the check alone would take 18 s)"
+expect "cmp -s $T/lib1.bin $T/root/library.bin && [ ! -e $T/root/library.bin.part ] && ! grep -q 'check of the folders done' $T/root/logs/boot.log" "the saved list is the one before, whole; no temporary file"
+# i. the shelf's first frame with 5000 games: from the saved list, and from a scan (every start before 2.10)
+T=$(newroot t43i)
+python3 - "$T/root/roms" <<'PY'
+import sys, os
+words = ["Super", "Mega", "Dragon", "Quest", "Star", "Fighter", "Knight", "Racing", "Puzzle", "World", "Legend", "Battle"]
+for i in range(5000):
+    d = os.path.join(sys.argv[1], "set%02d" % (i % 50))
+    os.makedirs(d, exist_ok=True)
+    name = "%s %s %s %d (Hack).sfc" % (words[i % 12], words[(i // 12) % 12], words[(i // 144) % 12], i)
+    open(os.path.join(d, name), "wb").write(bytes([i & 0xff, (i >> 8) & 0xff]) * 256)
+PY
+echo "covers_download=0" >>"$T/root/snes9x-ps5.ini"
+run "$T" "0:0;$(QUIT43 20)" "" >/dev/null # the first start: every CRC read once (the CRC cache), as an old library has
+rm -f "$T/root/library.bin" "$T/root/logs/boot.log"
+run "$T" "0:0;$(QUIT43 20)" "" >/dev/null
+scan_ms=$(sed -n 's/.*first frame \([0-9]*\) ms after the shelf opened (5000 game(s), from a scan).*/\1/p' $T/root/logs/boot.log)
+rm -f "$T/root/logs/boot.log"
+SNES9X_HOST_REALTIME=1 run "$T" "0:0;$(QUIT43 300)" "" >/dev/null
+saved_ms=$(sed -n 's/.*first frame \([0-9]*\) ms after the shelf opened (5000 game(s), from the saved list).*/\1/p' $T/root/logs/boot.log)
+check_ms=$(sed -n 's/.*check of the folders done in \([0-9]*\) ms: 5000 game(s).*/\1/p' $T/root/logs/boot.log)
+echo "  (5000 games, ASan build: first frame ${scan_ms:-?} ms after a scan (before 2.10, every start), ${saved_ms:-?} ms from the saved list; the check behind it ${check_ms:-?} ms)"
+expect "[ -n \"$scan_ms\" ] && [ -n \"$saved_ms\" ] && [ $saved_ms -lt $((scan_ms / 2)) ]" "5000 games: the first frame from the saved list (${saved_ms:-?} ms) at least twice as fast as after a scan (${scan_ms:-?} ms)"
+if [ -n "${SHOTS:-}" ] && [ -f "$SAVED43" ]; then
+	mkdir -p "$SHOTS" && python3 -c "import sys; from PIL import Image; Image.open(sys.argv[1]).save(sys.argv[2])" "$SAVED43" "$SHOTS/5-start-from-saved-list.png" && echo "  (screen saved: $SHOTS/5-start-from-saved-list.png)"
+fi
+rm -rf "$T/root/roms"
+
 echo
 echo "passed $PASS, failed $FAIL  (work dir $WORK)"
 [ $FAIL = 0 ]

@@ -602,6 +602,8 @@ void WriteWantedList(const std::vector<WantedCover>& wanted)
 	std::string text;
 	for (const WantedCover& w : wanted)
 		text += w.file + "\t" + w.url + "\n";
+	static std::mutex lock; // 2.10: the shelf's check writes it from its own thread (one ".part" file for both)
+	std::lock_guard<std::mutex> g(lock);
 	WriteFileAtomic(WantedListPath(), std::vector<uint8_t>(text.begin(), text.end()));
 	OrbisLog("[covers] wanted list: %zu cover(s) for the next prefetch", wanted.size());
 }
@@ -630,7 +632,7 @@ bool CoverService::NeedsDownload(int i) const
 	return !NonEmptyFile(cache) && !RecentlyMissing(cache.substr(0, cache.size() - 4) + ".missing", CoverUrlForGame(g));
 }
 
-void CoverService::Start(const std::vector<GameInfo>& games, bool allow_download, bool background)
+void CoverService::Start(const std::vector<GameInfo>& games, bool allow_download, bool background, const std::vector<CoverPtr>* loaded)
 {
 	Stop();
 	m_games = games;
@@ -644,6 +646,13 @@ void CoverService::Start(const std::vector<GameInfo>& games, bool allow_download
 	m_bg_offline = false;
 	m_quit = false;
 	m_state.assign(games.size(), 0);
+	if (loaded && loaded->size() == games.size())
+		for (size_t i = 0; i < games.size(); i++)
+			if ((*loaded)[i])
+			{
+				m_state[i] = 2;
+				m_placeholder[i] = (*loaded)[i]->real ? 0 : 1;
+			}
 	m_fetched.assign(games.size(), 0);
 	m_order.Clear(games.size());
 	m_ready.clear();

@@ -103,6 +103,8 @@ private:
 // progress (when given) is told how far the scan is: stage 0 while the folders are listed (done = games found
 // so far, total = 0), stage 1 while each game is identified (done of total). It is called often: it decides itself
 // how often to draw.
+// cancel (2.10, when given): the scan stops between two files when it turns true and returns an empty list (the CRC
+// cache keeps what it learnt, prunes nothing); the caller tells that from an empty library by the flag.
 using ScanProgress = std::function<void(int stage, size_t done, size_t total)>;
-std::vector<GameInfo> ScanGames(const ScanProgress& progress = nullptr);
+std::vector<GameInfo> ScanGames(const ScanProgress& progress = nullptr, const std::atomic<bool>* cancel = nullptr);
 } // namespace fe

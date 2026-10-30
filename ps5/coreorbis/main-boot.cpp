@@ -67,6 +67,10 @@ bool PlayGame(const std::string& rom)
 	{
 		// a ROM on a share says why (no answer, wrong password...); netfs's sentences carry no password
 		std::string why = netfs_is_network_path(rom.c_str()) ? netfs_last_error() : std::string();
+		// 2.10: the shelf opens from the saved list before it has looked at the folders: a game deleted (or a drive
+		// unplugged) since is still listed for a moment. Say so plainly; the shelf then checks the folders.
+		if (why.empty() && !netfs_is_network_path(rom.c_str()) && !OrbisIsFile(rom))
+			why = fe::T("The file is no longer there.");
 		// a .7z says what is wrong with it (encrypted, too big...)
 		const fe::sevenzip::Error zerr = fe::sevenzip::LastLoadError();
 		if (zerr != fe::sevenzip::Error::None)

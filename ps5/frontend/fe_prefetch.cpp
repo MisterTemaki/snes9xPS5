@@ -119,6 +119,19 @@ void CoversRestartIfNeeded(const std::vector<GameInfo>& games, bool downloads_on
 	OrbisLog("[covers] sceSystemServiceLoadExec(%s) -> %x: carrying on without the new covers", path, unsigned(rc));
 }
 
+void CoversWantedLater(const std::vector<GameInfo>& games, bool downloads_on)
+{
+	const std::vector<WantedCover> wanted = downloads_on ? MissingCovers(games) : std::vector<WantedCover>();
+	WriteWantedList(wanted);
+	if (wanted.empty())
+		return;
+	if (BackgroundCovers())
+		OrbisLog("[covers] %zu cover(s) wanted: the helper downloads them in the background", wanted.size());
+	else
+		OrbisLog("[covers] %zu cover(s) wanted: the next start's prefetch fetches them (no restart while the shelf is in use)",
+			wanted.size());
+}
+
 bool NetConnected()
 {
 	const int nc = sceNetCtlInit();

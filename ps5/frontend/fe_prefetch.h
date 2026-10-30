@@ -63,4 +63,9 @@ bool BackgroundCovers();
 // prefetch fetches them. Returns only when it didn't restart.
 void CoversRestartIfNeeded(const std::vector<GameInfo>& games, bool downloads_on, bool force,
 	void (*show)(const char* text));
+
+// 2.10, the check in the background (fe_shelf.cpp; console only): writes covers/wanted.txt for `games` and never
+// restarts the app (a restart would take the player off the shelf they are using): a helper that downloads in the
+// background fetches the new games' covers now; otherwise the next start's prefetch does. Any thread.
+void CoversWantedLater(const std::vector<GameInfo>& games, bool downloads_on);
 } // namespace fe

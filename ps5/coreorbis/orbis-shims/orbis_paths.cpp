@@ -118,6 +118,11 @@ std::vector<std::string> OrbisRomRoots()
 		if (OrbisIsDir(buf))
 			roots.push_back(buf);
 	}
+#ifndef __PROSPERO__
+	// the host tests (2.10): a folder that stands for a USB drive's ROM folder, there or not as the test makes it
+	if (const char* usb = getenv("SNES9X_HOST_USB_ROOT"); usb && *usb && OrbisIsDir(usb))
+		roots.push_back(usb);
+#endif
 	return roots;
 }
 

@@ -7,6 +7,7 @@
 #include "fe_covers.h"
 #include "fe_games.h"
 #include "fe_i18n.h"
+#include "fe_library.h"
 #include "fe_menu.h"
 #include "fe_osk.h"
 #include "fe_prefetch.h"
@@ -34,13 +35,16 @@
 #include <atomic>
 #include <cmath>
 #include <condition_variable>
+#include <cstdlib>
 #include <cstring>
 #include <ctime>
 #include <functional>
 #include <map>
+#include <memory>
 #include <mutex>
 #include <string>
 #include <thread>
+#include <unordered_set>
 #include <vector>
 
 #ifndef SNES9X_PS5_VERSION
@@ -538,6 +542,20 @@ bool Confirm(const char* question)
 	}
 }
 
+// ---- 2.10: the check of the folders in the background (the shelf opened from the saved list, fe_library.h) -------
+struct Check
+{
+	ps5::BigThread thread;
+	std::atomic<bool> cancel{false};
+	std::atomic<bool> done{false}; // the thread's work is over: completed or stopped
+	// written by the thread before `done`, read by the shelf's thread after it
+	bool completed = false; // the scan ran to its end (else it was stopped)
+	bool changed = false; // its list differs from the one the shelf showed when it started (paths or names)
+	std::vector<GameInfo> result;
+	double started = 0;
+	std::string why;
+};
+
 // ---- state kept between visits to the shelf (the game list, its covers) -----------------------------------
 struct ShelfState
 {
@@ -550,6 +568,12 @@ struct ShelfState
 	// 2.10: what the player typed in the shelf's search (fe_search.h), "" for none. It applies to whichever tab is open
 	// and stays while the app runs (a game played and left, another tab); it is not saved.
 	std::string search;
+	// 2.10: the list stays in memory between games (no scan when the shelf comes back). `roots`: the ROM folders it was
+	// made from; when they differ on the way back from a game (a drive plugged in or out), the folders are checked again.
+	std::vector<std::string> roots;
+	std::unique_ptr<Check> check; // the check in the background, while it runs and until the shelf takes its result
+	bool check_pending = false; // a check was stopped before its end (a game started): it runs again on the way back
+	std::string played; // the game the shelf handed out last
 };
 ShelfState& S()
 {
@@ -746,10 +770,81 @@ bool SameNames(const std::vector<GameInfo>& a, const std::vector<GameInfo>& b)
 			return false;
 	return true;
 }
+
+// ---- 2.10: the check in the background --------------------------------------------------------------------------
+// The thread's work: a scan as the shelf made before 2.10, stopped between two files when `cancel` turns true. A scan
+// that ends is saved (fe_library.h); on the console the covers of new games go into covers/wanted.txt without a
+// restart (CoversWantedLater: the helper downloads them in the background when it can, else the next start's prefetch).
+void CheckBody(Check* c, std::vector<GameInfo> shown, bool console, bool downloads)
+{
+	const double t0 = Now();
+	std::vector<GameInfo> fresh = ScanGames(nullptr, &c->cancel);
+	if (!c->cancel)
+	{
+		tabs::OrderByTab(fresh);
+		SaveLibrary(fresh);
+		c->changed = !SamePaths(fresh, shown) || !SameNames(fresh, shown);
+		if (c->changed && console)
+			CoversWantedLater(fresh, downloads);
+		c->result = std::move(fresh);
+		c->completed = true;
+		OrbisLog("[shelf] check of the folders done in %.0f ms: %zu game(s), %s", (Now() - t0) * 1000.0, c->result.size(),
+			c->changed ? "the list changed" : "nothing changed");
+	}
+	c->done = true;
+}
+
+// Starts the check (nothing when one runs or waits to be taken).
+void StartCheck(ShelfState& st, const char* why)
+{
+	if (st.check)
+		return;
+	st.check_pending = false;
+	st.roots = RomRoots();
+	auto c = std::make_unique<Check>();
+	c->started = Now();
+	c->why = why;
+	Check* raw = c.get();
+	std::vector<GameInfo> shown = st.games;
+	const bool console = !ShelfDownloads(), downloads = Config().covers_download;
+	OrbisLog("[shelf] checking the folders in the background (%s)", why);
+	c->thread = ps5::BigThread([raw, shown, console, downloads] { CheckBody(raw, shown, console, downloads); }, 4 * 1024 * 1024);
+	if (!c->thread.joinable())
+	{
+		// no thread to be had: the check runs here, as the scan did before 2.10
+		OrbisLog("[shelf] no thread for the check: checking now");
+		CheckBody(raw, std::move(shown), console, downloads);
+	}
+	st.check = std::move(c);
+}
+
+// Stops the check that runs and waits for it (one ROM at most). A check stopped before its end runs again on the way
+// back to the shelf; a result that is ready stays for the shelf to take, unless `discard` (a scan of the shelf's own
+// replaces it, or the app quits).
+void StopCheck(ShelfState& st, const char* why, bool discard = false)
+{
+	if (!st.check)
+		return;
+	const bool running = !st.check->done;
+	st.check->cancel = true;
+	if (st.check->thread.joinable())
+		st.check->thread.join();
+	if (!st.check->completed)
+	{
+		OrbisLog("[shelf] check stopped (%s)%s", why, discard ? "" : ": it runs again when the shelf opens");
+		st.check_pending = !discard;
+		st.check.reset();
+	}
+	else if (discard)
+		st.check.reset();
+	else if (running)
+		OrbisLog("[shelf] check finished as it was stopped (%s): its list is taken when the shelf opens", why);
+}
 } // namespace
 
 void ShelfShutdown()
 {
+	StopCheck(S(), "the app quits", true);
 	S().covers.Stop();
 }
 
@@ -761,40 +856,84 @@ std::string Shelf()
 	Pool pool;
 
 	S9X_STAGE(Shelf, "scan games");
-	Loading(T("Looking for games..."));
-	// a big library takes a while the first time (each new ROM is read once for its CRC): say how far it is,
-	// redrawn at most ten times a second
-	double drawn = Now();
-	std::vector<std::string> net_seen = netfs_mount_points(); // taken first: a share that connects during the scan is seen below
-	std::vector<GameInfo> games = ScanGames([&drawn](int stage, size_t done, size_t total) {
-		const double now = Now();
-		if (now - drawn < 0.1)
-			return;
-		drawn = now;
-		char text[96];
-		if (stage == 0)
-			snprintf(text, sizeof(text), T("Looking for games... %zu found"), done);
+	double opened = Now();
+	const char* opened_from = "the list in memory";
+	// 2.10: the shelf opens from the list it had (back from a game) or from the saved list (the app's start), and the
+	// folders are checked in the background; only a start with no usable saved list waits for a scan, as before 2.10
+	const std::vector<std::string> roots_now = RomRoots();
+	std::vector<GameInfo> games;
+	bool from_saved = false;
+	if (!st.started)
+	{
+		if (LoadLibrary(games))
+		{
+			const size_t dropped = library::KeepUnder(games, roots_now);
+			OrbisLog("[shelf] %zu game(s) from the saved list (%zu left out: their folder isn't there now)", games.size(), dropped);
+			from_saved = true;
+			opened_from = "the saved list";
+		}
 		else
-			snprintf(text, sizeof(text), T("Identifying games... %d%% (%zu of %zu)"), total ? int(done * 100 / total) : 0, done, total);
-		LoadingProgress(text, stage == 0 ? -1.0f : total ? float(done) / float(total) : 0.f);
-	});
-	tabs::OrderByTab(games);
-	const bool same_paths = SamePaths(games, st.games);
-	const bool same = same_paths && SameNames(games, st.games);
-	if (!ShelfDownloads() && (!same_paths || !st.started))
-	{
-		// the console: covers come from the prefetch at start (fe_prefetch.h); new ones restart the app
-		S9X_STAGE(Shelf, "wanted covers");
-		CoversRestartIfNeeded(games, cfg.covers_download, false, Loading);
+		{
+			Loading(T("Looking for games..."));
+			// a big library takes a while the first time (each new ROM is read once for its CRC): say how far it is,
+			// redrawn at most ten times a second
+			double drawn = Now();
+			games = ScanGames([&drawn](int stage, size_t done, size_t total) {
+				const double now = Now();
+				if (now - drawn < 0.1)
+					return;
+				drawn = now;
+				char text[96];
+				if (stage == 0)
+					snprintf(text, sizeof(text), T("Looking for games... %zu found"), done);
+				else
+					snprintf(text, sizeof(text), T("Identifying games... %d%% (%zu of %zu)"), total ? int(done * 100 / total) : 0, done, total);
+				LoadingProgress(text, stage == 0 ? -1.0f : total ? float(done) / float(total) : 0.f);
+			});
+			tabs::OrderByTab(games);
+			SaveLibrary(games);
+			opened_from = "a scan";
+		}
+		st.roots = roots_now;
 	}
-	if (!same || !st.started || st.downloads != cfg.covers_download)
+	std::vector<std::string> net_seen = netfs_mount_points(); // a share that connects from now on is seen below
+	if (!st.started)
 	{
-		st.games = games;
-		st.slots.assign(games.size(), nullptr);
+		if (!ShelfDownloads())
+		{
+			// the console: covers come from the prefetch at start (fe_prefetch.h); new ones restart the app
+			S9X_STAGE(Shelf, "wanted covers");
+			CoversRestartIfNeeded(games, cfg.covers_download, false, Loading);
+		}
+		st.games = std::move(games);
+		st.slots.assign(st.games.size(), nullptr);
 		st.downloads = cfg.covers_download;
 		S9X_STAGE(Shelf, "cover service start");
 		st.covers.Start(st.games, cfg.covers_download && ShelfDownloads(), cfg.covers_download && BackgroundCovers());
 		st.started = true;
+		if (from_saved)
+			StartCheck(st, "the app started from the saved list");
+	}
+	else
+	{
+		// back from a game: no scan. The folders are checked only when a drive came or went meanwhile, when the check of
+		// the start was stopped by the game, or when the game picked was not there any more.
+		const bool played_gone = !st.played.empty() && !netfs_is_network_path(st.played.c_str()) && !OrbisIsFile(st.played);
+		if (st.check)
+			; // a result that is ready is taken below
+		else if (roots_now != st.roots)
+			StartCheck(st, "the ROM folders changed during the game");
+		else if (st.check_pending)
+			StartCheck(st, "the check stopped by the game");
+		else if (played_gone)
+			StartCheck(st, "the game picked is gone");
+		if (st.downloads != cfg.covers_download)
+		{
+			// a setting changed in the game's menu that the covers depend on
+			st.downloads = cfg.covers_download;
+			st.slots.assign(st.games.size(), nullptr);
+			st.covers.Start(st.games, cfg.covers_download && ShelfDownloads(), cfg.covers_download && BackgroundCovers());
+		}
 	}
 	NetNaming naming; // names the games on shares by CRC while the shelf is up; stops with it
 	naming.Add(st.games);
@@ -858,6 +997,60 @@ std::string Shelf()
 		net_key = key;
 		return changed;
 	};
+	// 2.10: the check's list, once it is done, on this thread. Nothing moves when nothing changed; otherwise the shelf
+	// keeps its tab, its search, the selected game (or, when that one is gone, its nearest neighbour in the view) and
+	// every cover it holds, and the search is applied again through OpenTab, as a rescan of the shares does.
+	auto TakeCheck = [&]() -> bool {
+		if (!st.check || !st.check->done)
+			return false;
+		if (st.check->thread.joinable())
+			st.check->thread.join();
+		std::unique_ptr<Check> c = std::move(st.check);
+		if (!c->completed)
+			return false;
+		if (!c->changed)
+			return false;
+		std::vector<GameInfo>& fresh = c->result;
+		std::unordered_set<std::string> paths;
+		for (const GameInfo& g : fresh)
+			paths.insert(g.path);
+		std::vector<std::string> shown;
+		for (int i = 0; i < n; i++)
+			shown.push_back(Game(i).path);
+		const std::string keep = library::Successor(shown, sel, paths);
+		// the covers held are kept, by path, for the games whose names (what the cover is looked up by) are the same
+		std::map<std::string, size_t> old_at;
+		for (size_t i = 0; i < st.games.size(); i++)
+			old_at.emplace(st.games[i].path, i);
+		std::vector<CoverPtr> slots(fresh.size());
+		size_t added = 0, kept_covers = 0;
+		for (size_t i = 0; i < fresh.size(); i++)
+		{
+			auto it = old_at.find(fresh[i].path);
+			if (it == old_at.end())
+			{
+				added++;
+				continue;
+			}
+			const GameInfo& o = st.games[it->second];
+			const GameInfo& g = fresh[i];
+			if (it->second < st.slots.size() && st.slots[it->second] && o.nointro == g.nointro && o.crc_name == g.crc_name &&
+				o.header_title == g.header_title && o.header_japan == g.header_japan && o.crc == g.crc)
+			{
+				slots[i] = st.slots[it->second];
+				kept_covers++;
+			}
+		}
+		const size_t gone = st.games.size() + added - fresh.size();
+		st.games = std::move(fresh);
+		st.slots = std::move(slots);
+		st.covers.Start(st.games, cfg.covers_download && ShelfDownloads(), cfg.covers_download && BackgroundCovers(), &st.slots);
+		naming.Add(st.games);
+		OpenTab(tab, keep);
+		OrbisLog("[shelf] check: %zu new, %zu gone: shelf updated on %s, tab %s, search \"%s\" (%zu cover(s) kept)", added, gone,
+			keep.empty() ? "(no game)" : keep.c_str(), tabs::Name(tab), st.search.c_str(), kept_covers);
+		return true;
+	};
 	OpenTab(cfg.last_tab, "");
 	RefreshNet(Now());
 
@@ -885,6 +1078,13 @@ std::string Shelf()
 		const float dt = float(std::min(0.05, now - last));
 		last = now;
 
+		// -- 2.10: the check in the background, when it is done
+		if (st.check && st.check->done)
+		{
+			TakeCheck();
+			dirty = true;
+		}
+
 		// -- shares: one that connected (or dropped out) after the scan changes what is on the shelf
 		if (now >= next_net)
 		{
@@ -907,8 +1107,12 @@ std::string Shelf()
 				naming_seen = resolved;
 				naming_refreshed = now;
 				const std::string keep = n > 0 ? Game(sel).path : std::string();
+				StopCheck(st, "the shelf scans the folders itself", true); // this scan replaces it
 				std::vector<GameInfo> fresh = ScanGames();
 				tabs::OrderByTab(fresh);
+				SaveLibrary(fresh);
+				st.check_pending = false;
+				st.roots = RomRoots();
 				if (!ShelfDownloads()) // the console: covers of games that came late are fetched by the prefetch of a restart
 					CoversRestartIfNeeded(fresh, cfg.covers_download, false, Loading);
 				// the covers start again only when the games or the names their covers are looked up by changed (a
@@ -964,6 +1168,9 @@ std::string Shelf()
 			cfg.last_rom = Game(sel).path;
 			cfg.last_tab = tab;
 			cfg.Save();
+			// 2.10: the game gets the console to itself: a check that runs stops (and runs again on the way back)
+			StopCheck(st, "a game starts");
+			st.played = Game(sel).path;
 			return Game(sel).path;
 		}
 		if (down & SCE_PAD_BUTTON_R3)
@@ -977,8 +1184,11 @@ std::string Shelf()
 			// Settings > Network shares connects the shares again (netfs_reload), which needs no other netfs call
 			// running: the naming pass waits, and goes on (with what it had left) afterwards
 			naming.Stop();
+			StopCheck(st, "Settings"); // the check reads the shares too: it goes on afterwards
 			SettingsMenu();
 			naming.Add(st.games);
+			if (st.check_pending)
+				StartCheck(st, "after Settings");
 			if (st.downloads != cfg.covers_download)
 			{
 				st.downloads = cfg.covers_download;
@@ -1003,8 +1213,11 @@ std::string Shelf()
 			if (share_down)
 			{
 				naming.Stop(); // it reads files of the shares that are about to be disconnected
+				StopCheck(st, "the shares reconnect");
 				netfs_reload();
 				net_since.clear();
+				if (st.check_pending)
+					StartCheck(st, "after the shares reconnected");
 			}
 			rescan = !share_down;
 			next_net = now;
@@ -1064,6 +1277,7 @@ std::string Shelf()
 			{
 				cfg.last_tab = tab;
 				cfg.Save();
+				StopCheck(st, "the app quits", true); // stopped between two files; the saved list is written whole or not at all
 				return "";
 			}
 			ps5input::Poll();
@@ -1301,6 +1515,12 @@ std::string Shelf()
 		DrawText((W - TextWidth(hint_fit.c_str(), 2)) / 2, H - 54, hint_fit.c_str(), 2, Rgb(205, 200, 228));
 
 		ps5video::Present(0, 0, 0, 0, true);
+		if (opened > 0)
+		{
+			OrbisLog("[shelf] first frame %.0f ms after the shelf opened (%zu game(s), from %s)", (Now() - opened) * 1000.0,
+				st.games.size(), opened_from);
+			opened = 0;
+		}
 	}
 }
 } // namespace fe
