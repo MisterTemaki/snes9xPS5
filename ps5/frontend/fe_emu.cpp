@@ -752,7 +752,7 @@ bool LoadGame(const std::string& path)
 		g.rom_path.clear();
 		return false;
 	}
-	StartStep("battery save");
+	StartStep("save RAM file");
 	const std::string srm = S9xGetFilename(".srm", SRAM_DIR);
 	Memory.LoadSRAM(srm.c_str());
 
@@ -773,7 +773,7 @@ bool LoadGame(const std::string& path)
 	ApplySettings();
 	OrbisLog("[emu] \"%s\" %s, %d fps, %s", Memory.ROMName, Memory.ROMFilename.c_str(), Memory.ROMFramesPerSecond,
 		Settings.PAL ? "PAL" : "NTSC");
-	StartStep("border");
+	StartStep("frame art");
 	fe::border::Select(path, Memory.ROMCRC32); // reads /data (and maybe the ROM's header on a share): before realtime starts
 	netfs_set_realtime(true); // from here nothing on this thread waits for a share
 	StartStep("first frame");
