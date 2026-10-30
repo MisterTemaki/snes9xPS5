@@ -488,8 +488,10 @@ void OnEvent(const rc_client_event_t* e, rc_client_t*)
 			break;
 		case RC_CLIENT_EVENT_RESET:
 			// hardcore was turned on: the game starts again, then rc_client is told (emu::Reset -> OnReset)
+			// (the cheats are taken out first, so the bytes they give back are not written over the fresh start)
 			g.reset_seen = true;
 			OrbisLog("[ra] hardcore on: the game is reset");
+			emu::HardcoreChanged();
 			emu::Reset();
 			break;
 		case RC_CLIENT_EVENT_SERVER_ERROR:
@@ -597,6 +599,7 @@ void OnGameLoaded(int result, const char* error_message, rc_client_t* client, vo
 	}
 	emu::HardcoreChanged(); // the restrictions may be lifted (an unknown game, nothing to unlock, no network)
 }
+
 // rc_client, made when the first login starts (none without an account)
 bool EnsureClient()
 {
@@ -761,6 +764,7 @@ void SetHardcore(bool on)
 	if (on && g.game_open && g.game == GameRa::Loading && !g.reset_seen && g.login != Login::None)
 	{
 		OrbisLog("[ra] hardcore on while the set loads: the game is reset");
+		emu::HardcoreChanged();
 		emu::Reset();
 	}
 	emu::HardcoreChanged();

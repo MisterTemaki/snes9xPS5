@@ -943,7 +943,8 @@ int TlsHttp::Send(const std::string& start_url, const std::string& body, const s
 			if (status == -1)
 				m->Close();
 			// a kept connection the server had closed in the meantime (nothing came back): once more on a new one. The
-			// request never reached the server, so a POST is not sent twice.
+			// server had closed it, so it did not take the first one (RetroAchievements answers a repeated unlock with
+			// "already unlocked" anyway).
 			if (!(status == -1 && reused && nothing_back))
 				break;
 		}
