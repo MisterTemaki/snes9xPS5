@@ -57,6 +57,47 @@ int main()
 	CHECK(search::Fold("\xC3") == "\xC3");                                 // cut short: kept
 	CHECK(search::Fold("") == "");
 
+	// ---- (2.10 review) every character of U+00C0..U+017F against its Unicode decomposition: the base letters of NFKD with
+	//      the combining marks dropped, lower case; the letters Unicode doesn't decompose (Đ Ħ ı ĸ Ł Ŋ Ŧ Ð Ø Þ ß Æ Œ) by
+	//      their usual Latin spelling; × and ÷ kept. Generated once, offline, with Python's unicodedata.
+	{
+		static const char* const kExpected[0x180 - 0xC0] = {
+	"a", "a", "a", "a", "a", "a", "ae", "c", "e", "e", "e", "e", "i", "i", "i", "i",
+	"d", "n", "o", "o", "o", "o", "o", "\xC3\x97", "o", "u", "u", "u", "u", "y", "th", "ss",
+	"a", "a", "a", "a", "a", "a", "ae", "c", "e", "e", "e", "e", "i", "i", "i", "i",
+	"d", "n", "o", "o", "o", "o", "o", "\xC3\xB7", "o", "u", "u", "u", "u", "y", "th", "y",
+	"a", "a", "a", "a", "a", "a", "c", "c", "c", "c", "c", "c", "c", "c", "d", "d",
+	"d", "d", "e", "e", "e", "e", "e", "e", "e", "e", "e", "e", "g", "g", "g", "g",
+	"g", "g", "g", "g", "h", "h", "h", "h", "i", "i", "i", "i", "i", "i", "i", "i",
+	"i", "i", "ij", "ij", "j", "j", "k", "k", "k", "l", "l", "l", "l", "l", "l", "l",
+	"l", "l", "l", "n", "n", "n", "n", "n", "n", "n", "n", "n", "o", "o", "o", "o",
+	"o", "o", "oe", "oe", "r", "r", "r", "r", "r", "r", "s", "s", "s", "s", "s", "s",
+	"s", "s", "t", "t", "t", "t", "t", "t", "u", "u", "u", "u", "u", "u", "u", "u",
+	"u", "u", "u", "u", "w", "w", "y", "y", "y", "z", "z", "z", "z", "z", "z", "s",
+		};
+		int wrong = 0;
+		for (unsigned cp = 0xC0; cp < 0x180; cp++)
+		{
+			std::string utf8;
+			utf8 += char(0xC0 | (cp >> 6));
+			utf8 += char(0x80 | (cp & 0x3F));
+			const std::string got = search::Fold(utf8);
+			if (got != kExpected[cp - 0xC0])
+			{
+				printf("  U+%04X folds to \"%s\", Unicode says \"%s\"\n", cp, got.c_str(), kExpected[cp - 0xC0]);
+				wrong++;
+			}
+		}
+		CHECK(wrong == 0);
+		CHECK(search::Fold("\xC5\xA6\xC5\xA7") == "tt"); // Ŧŧ (folded to "tu" before the review)
+	}
+	// ---- (2.10 review) a name in decomposed form (NFD: macOS, some NAS): the combining accents are dropped
+	CHECK(search::Fold("Poke\xCC\x81mon") == "pokemon");             // e + U+0301
+	CHECK(search::Fold("A\xCC\x88\xCC\x80" "b") == "ab");             // two marks in a row
+	CHECK(search::Fold("\xCD\xAF") == "");                           // U+036F, the last of the block
+	CHECK(search::Fold("\xCD\xB0") == "\xCD\xB0");                     // U+0370 is not a mark: kept
+	CHECK(Match(Game("/data/snes9x/roms/Poke\xCC\x81mon Gold.sfc", "Poke\xCC\x81mon Gold"), "pokemon"));
+
 	// ---- the query: folded, spaces at the ends off; nothing typed (or only spaces) is no search
 	CHECK(search::Query("  Mario  ") == "mario");
 	CHECK(search::Query("   ").empty());

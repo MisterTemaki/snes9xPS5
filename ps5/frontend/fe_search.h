@@ -26,8 +26,10 @@ namespace detail
 // U+00C0..U+00FF and U+0100..U+017F to their base letters. '0' keeps the character (x, division sign); digits 1-5 stand
 // for two letters: 1 ij, 2 oe, 3 ae, 4 th, 5 ss.
 constexpr const char kLatin1[] = "aaaaaa3ceeeeiiiidnooooo0ouuuuy45aaaaaa3ceeeeiiiidnooooo0ouuuuy4y";
+// (2.10 review: the t run is U+0162..U+0167, six letters, and the u run U+0168..U+0173, twelve; ŧ folded to u before.
+// tests/test_search.cpp checks every entry of both tables against Unicode's decompositions.)
 constexpr const char kLatinA[] = "aaaaaaccccccccddddeeeeeeeeeegggggggghhhhiiiiiiiiii11jjkkkllllllllllnnnnnnnnnoooooo22"
-								 "rrrrrrsssssssstttttuuuuuuuuuuuuuwwyyyzzzzzzs";
+								 "rrrrrrssssssssttttttuuuuuuuuuuuuwwyyyzzzzzzs";
 static_assert(sizeof(kLatin1) == 64 + 1, "U+00C0..U+00FF");
 static_assert(sizeof(kLatinA) == 128 + 1, "U+0100..U+017F");
 
@@ -78,8 +80,8 @@ inline uint32_t Decode(const std::string& s, size_t i, size_t& n)
 }
 } // namespace detail
 
-// The text as it is compared: ASCII capitals small, Latin accents off (above), the typographic apostrophes as ', every
-// other character as it is.
+// The text as it is compared: ASCII capitals small, Latin accents off (above), combining accents (U+0300..U+036F)
+// dropped, the typographic apostrophes as ', every other character as it is.
 inline std::string Fold(const std::string& s)
 {
 	std::string out;
@@ -96,6 +98,11 @@ inline std::string Fold(const std::string& s)
 			detail::PutBase(out, detail::kLatinA[cp - 0x100]);
 		else if (cp == 0x2018 || cp == 0x2019)
 			out += '\'';
+		else if (cp >= 0x300 && cp <= 0x36F)
+		{
+			// a combining accent (a name in decomposed form, NFD, as macOS and some NAS write them: "Poke\u0301mon"): dropped
+		}
+
 		else
 			out.append(s, i, n);
 		i += n;
