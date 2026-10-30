@@ -55,6 +55,18 @@ int __wrap_fcntl(int fd, int cmd, ...)
 		socklen_t len = sizeof on;
 		if (getsockopt(fd, SOL_SOCKET, SO_NBIO, &on, &len) == 0 && on)
 			return r | O_NONBLOCK;
+		return r;
+	}
+	if (r != -1 && cmd == F_SETFL)
+	{
+		// 2.10 (as Stella PS5's): an earlier F_SETFL may have fallen back to SO_NBIO; when it is on, it follows this one
+		// too (clearing O_NONBLOCK through the console's fcntl would otherwise leave the socket non-blocking)
+		int on = 0;
+		socklen_t len = sizeof on;
+		const int want = (arg & O_NONBLOCK) != 0;
+		if (getsockopt(fd, SOL_SOCKET, SO_NBIO, &on, &len) == 0 && on && !want)
+			setsockopt(fd, SOL_SOCKET, SO_NBIO, &want, sizeof want);
+		return r;
 	}
 	if (r != -1 || (cmd != F_SETFL && cmd != F_GETFL))
 		return r;

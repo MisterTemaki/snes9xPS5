@@ -13,6 +13,7 @@
 #include "ProsperoJailbreak.h"
 
 #include "OrbisPaths.h"
+#include "ProsperoAppPlace.h"
 #include "ProsperoNotify.h"
 #include "ProsperoUpdate.h"
 #include "fe_coverworker.h"
@@ -232,6 +233,20 @@ std::string EnvOr(const char* name, const char* fallback)
 	return v && *v ? v : fallback;
 }
 
+// 2.10: where the update goes (Media Player Classic PS5 1.5's ShadowMount+ fix, as Stella PS5 has it; ProsperoAppPlace.h):
+// the folder the console runs the app from -- ShadowMount+'s mount of it on /system_ex/app/<TITLE_ID>, written through
+// the mount --, else /data/homebrew/<TITLE_ID>. Up to 2.9 an update always went to /data/homebrew/<TITLE_ID>: for an app
+// that ShadowMount+ runs from a USB or extended drive (or another folder) it made a second copy there and left the copy
+// the console runs as it was. Looked up again before each check and install: the helper may have started (autoloaded)
+// before ShadowMount+ mounted the app.
+void RefreshPlace(bool log)
+{
+	const AppPlace p = FindAppPlace(SNES9X_TITLE_ID, EnvOr("SNES9X_PS5_HOMEBREW", "/data/homebrew") + "/" SNES9X_TITLE_ID);
+	if (log)
+		OrbisLog("[update] %s", p.log.c_str());
+	update::SetPlace(p.dir, p.writable ? std::string() : p.reason);
+}
+
 void InitUpdater()
 {
 	update::Config c;
@@ -239,7 +254,7 @@ void InitUpdater()
 	c.title_id = SNES9X_TITLE_ID;
 	c.version = SNES9X_PS5_VERSION;
 	c.app_name = "Snes9x PS5";
-	c.app_dir = EnvOr("SNES9X_PS5_HOMEBREW", "/data/homebrew") + "/" SNES9X_TITLE_ID;
+	c.app_dir = EnvOr("SNES9X_PS5_HOMEBREW", "/data/homebrew") + "/" SNES9X_TITLE_ID; // RefreshPlace sets it
 	c.appmeta_dir = EnvOr("SNES9X_PS5_APPMETA", "/user/appmeta") + "/" SNES9X_TITLE_ID;
 	c.api_url = EnvOr("SNES9X_UPDATE_API", "");
 	g_update_http = new fe::TlsHttp;
@@ -253,11 +268,14 @@ void InitUpdater()
 		ProsperoNotify("Snes9x PS5 %s is available: Settings, Updates.", v.c_str());
 		ProsperoNotifyFlush();
 	});
+	RefreshPlace(true);
 }
 
 // One updater request from the app: "status", "check", "autocheck", "install", "ack". The answer: the status.
 std::string UpdateCommand(const char* what)
 {
+	if (!strcmp(what, "check") || !strcmp(what, "autocheck") || !strcmp(what, "install"))
+		RefreshPlace(strcmp(what, "autocheck") != 0);
 	if (!strcmp(what, "check"))
 		update::StartCheck(false);
 	else if (!strcmp(what, "autocheck"))

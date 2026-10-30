@@ -10,6 +10,7 @@
 #include "ProsperoInstall.h"
 
 #include "OrbisPaths.h"
+#include "ProsperoAppPlace.h"
 #include "ProsperoUpdate.h"
 
 #include <fcntl.h>
@@ -86,10 +87,20 @@ bool WriteAtomically(const std::string& path, const unsigned char* data, size_t 
 }
 } // namespace
 
+const AppPlace& AppInstallPlace()
+{
+	static const AppPlace place = [] {
+		const char* env = getenv("SNES9X_PS5_HOMEBREW");
+		const AppPlace p = FindAppPlace(SNES9X_TITLE_ID, std::string(env && *env ? env : "/data/homebrew") + "/" SNES9X_TITLE_ID);
+		OrbisLog("[install] %s", p.log.c_str());
+		return p;
+	}();
+	return place;
+}
+
 std::string AppInstallDir()
 {
-	const char* env = getenv("SNES9X_PS5_HOMEBREW");
-	return std::string(env && *env ? env : "/data/homebrew") + "/" SNES9X_TITLE_ID;
+	return AppInstallPlace().dir;
 }
 
 namespace
@@ -107,7 +118,10 @@ std::string ContentVersion(const std::string& param)
 
 std::string InstalledVersion()
 {
-	FILE* f = fopen((AppInstallDir() + "/sce_sys/param.json").c_str(), "rb");
+	// the app the console runs: through the mount when there is one, else its folder
+	const AppPlace& place = AppInstallPlace();
+	const std::string dir = !place.mount.empty() ? place.mount : place.source;
+	FILE* f = fopen((dir + "/sce_sys/param.json").c_str(), "rb");
 	if (!f)
 		return "";
 	std::string s(65536, '\0');
@@ -122,6 +136,44 @@ InstallResult InstallApp()
 	if (!files)
 		return InstallResult::NothingEmbedded;
 
+	const AppPlace& place = AppInstallPlace();
+	if (!place.writable && place.image_pending)
+	{
+		// autoloaded before ShadowMount+ has mounted the image the app runs from: nothing to write, nothing to say
+		OrbisLog("[install] %s: left to the image", place.log.c_str());
+		return InstallResult::UpToDate;
+	}
+	if (!place.writable)
+	{
+		// an autoloaded payload and an image (or a read-only folder) already holding this version or a newer one:
+		// nothing to say at every start; only a newer payload is something the user can't put there
+		std::string mine;
+		for (const EmbeddedAppFile* f = files; f->rel; f++)
+			if (strcmp(f->rel, "sce_sys/param.json") == 0)
+				mine = ContentVersion(std::string(reinterpret_cast<const char*>(f->begin), size_t(f->end - f->begin)));
+		const std::string there = place.unsure ? "" : InstalledVersion();
+		if (!mine.empty() && !there.empty())
+		{
+			const int c = update::CompareVersions(there, mine);
+			if (c > 0)
+			{
+				OrbisLog("[install] %s holds version %s, newer than this payload's %s: left as it is (%s)",
+					place.source.c_str(), there.c_str(), mine.c_str(), place.log.c_str());
+				return InstallResult::NewerInstalled;
+			}
+			if (c == 0)
+			{
+				OrbisLog("[install] %s holds this version (%s): nothing to write (%s)", place.source.c_str(),
+					there.c_str(), place.log.c_str());
+				return InstallResult::UpToDate;
+			}
+		}
+		OrbisLog("[install] not installed: %s", place.reason.c_str());
+		return InstallResult::CantWrite;
+	}
+	if (!place.mount.empty())
+		OrbisLog("[install] the console runs the app from %s: that copy is the one brought up to date (through %s)",
+			place.source.c_str(), place.dir.c_str());
 	const std::string dir = AppInstallDir();
 	// a newer version installed (by the app's own update): this older payload doesn't put itself over it
 	for (const EmbeddedAppFile* f = files; f->rel; f++)
@@ -225,6 +277,8 @@ int SyncAppMeta()
 	for (const char* old : {"pic0.png", "pic1.png"})
 		for (const std::string& d : {dir, AppInstallDir() + "/sce_sys"})
 		{
+			if (d != dir && !AppInstallPlace().writable)
+				continue; // the app's folder can't be written (an image...): only our /user/appmeta copy
 			const std::string path = d + "/" + old;
 			if (OrbisIsFile(path) && unlink(path.c_str()) == 0)
 			{

@@ -13,7 +13,10 @@
 // ID is touched (it may be another app's); when our earlier version is still there, the notification says so
 // (ProsperoMigrate.h).
 //
-// Nothing here writes outside /data/snes9x and /data/homebrew/<TITLE_ID>.
+// Nothing here writes outside /data/snes9x, the app's folder and /user/appmeta/<TITLE_ID>. 2.10: the app's folder is the
+// one the console runs it from (ShadowMount+ may mount it from a USB drive, an extended drive or another folder:
+// ProsperoAppPlace.h), written through its mount /system_ex/app/<TITLE_ID>; /data/homebrew/<TITLE_ID> when nothing
+// runs it yet.
 //
 // SPDX-License-Identifier: MIT
 
@@ -22,10 +25,12 @@
 #include "ProsperoMigrate.h"
 #include "ProsperoNotify.h"
 #ifndef SNES9X_HELPER_ONLY
+#include "ProsperoAppPlace.h"
 #include "ProsperoInstall.h"
 #endif
 
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <string>
 #include <unistd.h>
@@ -37,6 +42,15 @@
 namespace
 {
 std::string g_ready_message;
+
+#ifndef SNES9X_HELPER_ONLY
+// where the payload installs when nothing else runs the app
+std::string DefaultAppDir()
+{
+	const char* env = getenv("SNES9X_PS5_HOMEBREW");
+	return std::string(env && *env ? env : "/data/homebrew") + "/" SNES9X_TITLE_ID;
+}
+#endif
 
 void OnReady()
 {
@@ -69,7 +83,12 @@ int main()
 			snprintf(msg, sizeof(msg), "Snes9x PS5 %s installed. %s", SNES9X_PS5_VERSION, open_hint);
 			break;
 		case InstallResult::Updated:
-			snprintf(msg, sizeof(msg), "Snes9x PS5 updated to %s. %s", SNES9X_PS5_VERSION, open_hint);
+			if ((!AppInstallPlace().mount.empty() || AppInstallPlace().via_link) &&
+				AppInstallPlace().source != DefaultAppDir())
+				snprintf(msg, sizeof(msg), "Snes9x PS5 updated to %s (in %s, the copy ShadowMount+ runs). %s",
+					SNES9X_PS5_VERSION, AppInstallPlace().source.c_str(), open_hint);
+			else
+				snprintf(msg, sizeof(msg), "Snes9x PS5 updated to %s. %s", SNES9X_PS5_VERSION, open_hint);
 			break;
 		case InstallResult::UpToDate:
 			snprintf(msg, sizeof(msg), "Snes9x PS5 %s is ready. %s", SNES9X_PS5_VERSION, open_hint);
@@ -80,6 +99,11 @@ int main()
 				"Put the newer payload in your autoload. %s",
 				SNES9X_PS5_VERSION, open_hint);
 			break;
+		case InstallResult::CantWrite:
+			// 2.10: ShadowMount+ runs the app from an image or a read-only folder: not written, and no second copy made
+			snprintf(msg, sizeof(msg), "%s (This payload is %s; the helper runs.)", AppInstallPlace().reason.c_str(),
+				SNES9X_PS5_VERSION);
+			break;
 		case InstallResult::Failed:
 			snprintf(msg, sizeof(msg), "Snes9x PS5: could not install the app in %s (see %s/logs/installer.log)",
 				AppInstallDir().c_str(), OrbisRoot().c_str());
@@ -88,7 +112,8 @@ int main()
 			snprintf(msg, sizeof(msg), "Snes9x PS5: nothing to install");
 			break;
 	}
-	if (installed != InstallResult::NewerInstalled && SyncAppMeta() > 0)
+	if (installed != InstallResult::NewerInstalled && installed != InstallResult::CantWrite &&
+		!AppInstallPlace().image_pending && SyncAppMeta() > 0)
 	{
 		const size_t len = strlen(msg);
 		snprintf(msg + len, sizeof(msg) - len, " Home screen art updated (restart the PS5 if it doesn't show).");

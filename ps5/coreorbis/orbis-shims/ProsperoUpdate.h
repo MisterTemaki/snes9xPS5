@@ -35,9 +35,13 @@ struct Config
 	std::string title_id;    // "PPSA99921"
 	std::string version;     // this build's, "1.7"
 	std::string app_name;    // "Genesis Plus GX PS5"
-	std::string app_dir;     // /data/homebrew/<title_id>
+	std::string app_dir;     // the folder the console runs the app from (ProsperoAppPlace.h), /data/homebrew/<title_id>
 	std::string appmeta_dir; // /user/appmeta/<title_id>
 	std::string api_url;     // "" -> https://api.github.com/repos/<repo>/releases/latest
+	// 2.10: set when app_dir can't take an update (an image, a read-only folder, a folder that can't be identified for
+	// sure: ProsperoAppPlace.h): why, and then nothing is downloaded or written (StartInstall fails with it, InstallZip
+	// returns it). From Media Player Classic PS5 1.5 / Stella PS5 (their ShadowMount+ fix).
+	std::string cant_install;
 };
 
 // GET url into out (at most max bytes); progress (when not null) follows the bytes read. The HTTP status, or -1.
@@ -66,6 +70,9 @@ struct Status
 };
 
 void Init(const Config& config, Fetch fetch);
+// Where the update goes (the helper looks it up before each check and install, ProsperoAppPlace.h); cant_install: why
+// it can't go there ("" when it can). An install under way keeps the folder it started with.
+void SetPlace(const std::string& app_dir, const std::string& cant_install);
 // The version installed (the app says which when it asks: a helper of an older build may be the one running).
 void SetCurrentVersion(const std::string& version);
 const Config& CurrentConfig();

@@ -87,10 +87,12 @@ EMU_SRC := coreorbis/main-boot.cpp \
 	frontend/fe_games.cpp frontend/fe_http.cpp frontend/fe_covers.cpp frontend/fe_shelf.cpp frontend/fe_border.cpp frontend/fe_borderimg.cpp frontend/fe_borderfetch.cpp \
 	frontend/fe_prefetch.cpp frontend/fe_coverfetch.cpp frontend/fe_coverworker.cpp frontend/fe_7z.cpp $(NETFS_SRC)
 # the payloads: the helper, and the installer (= helper + install)
-# (the helper also downloads the covers in the background: fe_coverworker.cpp, with the app's HTTPS code)
+# (the helper also downloads the covers in the background: fe_coverworker.cpp, with the app's HTTPS code; 2.10:
+# ProsperoAppPlace.cpp, where the console runs the app from, reads the mount table there -- statfs / getfsstat, from
+# libkernel_sys, which only a payload may load: the app's eboot never links it, tools/check_imports.py checks)
 HELPER_SRC := coreorbis/orbis-shims/orbis_paths.cpp coreorbis/orbis-shims/ProsperoNotify.cpp \
 	coreorbis/orbis-shims/ProsperoHelper.cpp coreorbis/orbis-shims/ProsperoMigrate.cpp coreorbis/orbis-shims/ProsperoCrash.cpp \
-	coreorbis/orbis-shims/ProsperoUpdate.cpp \
+	coreorbis/orbis-shims/ProsperoUpdate.cpp coreorbis/orbis-shims/ProsperoAppPlace.cpp \
 	frontend/fe_http.cpp frontend/fe_coverfetch.cpp frontend/fe_coverworker.cpp frontend/fe_tlshttp.cpp
 # the helper's own HTTPS (fe_tlshttp.cpp): Mbed TLS 3.6 (Apache-2.0), with fe_mbedtls_config.h on its default settings
 MBEDTLS := frontend/third_party/mbedtls
