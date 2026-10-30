@@ -28,6 +28,12 @@ void SettingsMenu();
 // Settings > Network shares: the SMB and NFS shares games are read from (fe_netscreen.cpp).
 void NetworkMenu();
 
+// 2.11: Settings, RetroAchievements (log in / out, hardcore mode), its row's value, and the pause menu's Achievements
+// list (fe_ramenu.cpp)
+void RetroAchievementsMenu();
+std::string RetroAchievementsValue();
+void AchievementsMenu();
+
 // Shows a message box until Cross / Circle is pressed (errors such as a ROM that won't load).
 void MessageBox(const std::string& title, const std::string& text);
 } // namespace fe

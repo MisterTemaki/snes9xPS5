@@ -17,6 +17,7 @@
 #include "fe_border.h"
 #include "fe_games.h"
 #include "fe_i18n.h"
+#include "fe_ra.h"
 #include "fe_cheatlookup.h"
 #include "fe_settings.h"
 #include "fe_shortcuts.h"
@@ -137,6 +138,9 @@ struct State
 	// last frame, for the pause menu
 	std::vector<uint16_t> last;
 	int last_w = 0, last_h = 0;
+	// 2.11: what snes9x.conf asked for the two settings RetroAchievements forbids changing in hardcore (rc_libretro.c's
+	// list for Snes9x: the region forced to PAL, the graphic windows off): ignored while hardcore applies
+	bool conf_force_pal = false, conf_no_windows = false;
 };
 State g;
 
@@ -455,6 +459,39 @@ void StartStep(const char* what)
 	}
 }
 
+// 2.11: RetroAchievements' progress (hit counts...) with a save state, in <state>.ra beside it, as RetroAchievements
+// recommends: a state loaded (outside hardcore) brings back the progress it was saved with, or starts it over.
+void SaveRaProgress(const std::string& state)
+{
+	std::vector<uint8_t> data;
+	const std::string file = state + ".ra";
+	if (!ra::SaveProgress(&data))
+	{
+		unlink(file.c_str()); // an older one would be wrong for this state
+		return;
+	}
+	const std::string part = file + ".part";
+	FILE* f = fopen(part.c_str(), "wb");
+	bool ok = f && fwrite(data.data(), 1, data.size(), f) == data.size();
+	ok = f && fclose(f) == 0 && ok;
+	if (!ok || rename(part.c_str(), file.c_str()) != 0)
+		unlink(part.c_str());
+}
+
+void LoadRaProgress(const std::string& state)
+{
+	std::vector<uint8_t> data;
+	if (FILE* f = fopen((state + ".ra").c_str(), "rb"))
+	{
+		uint8_t buf[65536];
+		size_t n;
+		while ((n = fread(buf, 1, sizeof(buf), f)) > 0 && data.size() < (16u << 20))
+			data.insert(data.end(), buf, buf + n);
+		fclose(f);
+	}
+	ra::LoadProgress(data.empty() ? nullptr : &data);
+}
+
 std::string StatePath(int slot)
 {
 	char ext[8];
@@ -477,6 +514,8 @@ bool8 S9xDeinitUpdate(int width, int height)
 	const fe::Settings& cfg = fe::Config();
 	const ps5video::Rect r = ps5video::DrawSnes(GFX.Screen, GFX.Pitch, width, height,
 		ps5video::Aspect(cfg.aspect), cfg.scanlines, cfg.shader, cfg.smooth);
+	// 2.11: the RetroAchievements notifications over the picture (only inside it: the next frame draws over them)
+	ra::DrawOverlay(r);
 	// keep a copy for the pause menu
 	g.last_w = width;
 	g.last_h = height;
@@ -721,6 +760,8 @@ bool InitCore(int argc, char** argv)
 	Settings.DontSaveOopsSnapshot = TRUE;
 	Settings.StopEmulation = TRUE;
 	CPU.Flags = 0;
+	g.conf_force_pal = Settings.ForcePAL;
+	g.conf_no_windows = Settings.DisableGraphicWindows;
 
 	if (!Memory.Init() || !S9xInitAPU())
 	{
@@ -764,6 +805,11 @@ bool LoadGame(const std::string& path)
 	netfs_prepare_game(path); // a ROM on a share: its MSU-1 files first (nothing for any other path)
 	fe::sevenzip::SetLastLoadError(fe::sevenzip::Error::None);
 	StartStep("load ROM");
+	// 2.11: with a RetroAchievements account and hardcore on, snes9x.conf can't force the PAL region or turn the graphic
+	// windows off (RetroAchievements forbids both for Snes9x in hardcore)
+	const bool ra_strict = fe::Config().ra_hardcore && ra::LoginState() != ra::Login::None;
+	Settings.ForcePAL = g.conf_force_pal && !ra_strict;
+	Settings.DisableGraphicWindows = g.conf_no_windows && !ra_strict;
 	bool loaded = false;
 	try
 	{
@@ -803,6 +849,11 @@ bool LoadGame(const std::string& path)
 		Settings.PAL ? "PAL" : "NTSC");
 	StartStep("frame art");
 	fe::border::Select(path, Memory.ROMCRC32); // reads /data (and maybe the ROM's header on a share): before realtime starts
+	// 2.11: RetroAchievements: the ROM's hash (it reads the file again, so before realtime too), then its set is asked for
+	// in the background; with hardcore the cheats are turned off from the first frame
+	StartStep("achievements");
+	ra::GameStarted(path);
+	HardcoreChanged();
 	netfs_set_realtime(true); // from here nothing on this thread waits for a share
 	StartStep("first frame");
 	return true;
@@ -812,6 +863,7 @@ void CloseGame()
 {
 	if (!g.loaded)
 		return;
+	ra::GameClosed();
 	if (Memory.SRAMSize > 0)
 		S9xAutoSaveSRAM();
 	if (!Cheat.group.empty())
@@ -935,7 +987,8 @@ std::string GameName()
 void ApplySettings()
 {
 	const fe::Settings& cfg = fe::Config();
-	Settings.Transparency = cfg.transparency;
+	// 2.11: RetroAchievements forbids turning Snes9x's transparency off in hardcore (rc_libretro.c)
+	Settings.Transparency = cfg.transparency || ra::HardcoreActive();
 	Settings.DisplayFrameRate = cfg.show_fps;
 	Settings.SuperFXClockMultiplier = cfg.superfx_clock;
 	Settings.Mute = !cfg.audio;
@@ -986,6 +1039,8 @@ bool SaveState(int slot)
 	if (ok)
 		S9xResetSaveTimer(TRUE);
 	OrbisLog("[emu] save state %d -> %s: %s", slot, path.c_str(), ok ? "ok" : "failed, the slot is unchanged");
+	if (ok)
+		SaveRaProgress(path);
 	return ok;
 }
 
@@ -993,6 +1048,12 @@ bool LoadState(int slot)
 {
 	if (!g.loaded)
 		return false;
+	// 2.11: RetroAchievements' hardcore mode: no state is loaded (the menus say so before it gets here)
+	if (ra::HardcoreActive())
+	{
+		OrbisLog("[emu] load state %d: refused, hardcore mode", slot);
+		return false;
+	}
 	const std::string path = StatePath(slot);
 	if (!OrbisIsFile(path))
 		return false;
@@ -1017,6 +1078,8 @@ bool LoadState(int slot)
 		g_reading_state = nullptr;
 	}
 	OrbisLog("[emu] load state %d <- %s: %s", slot, path.c_str(), ok ? "ok" : "failed");
+	if (ok)
+		LoadRaProgress(path);
 	return ok;
 }
 
@@ -1027,8 +1090,34 @@ bool StateExists(int slot)
 
 void Reset()
 {
-	if (g.loaded)
-		S9xSoftReset();
+	if (!g.loaded)
+		return;
+	S9xSoftReset();
+	ra::OnReset(); // the achievements start over with the game (rc_client_reset)
+}
+
+bool LoadStateRefused()
+{
+	return g.loaded && ra::HardcoreActive();
+}
+
+void HardcoreChanged()
+{
+	if (!g.loaded)
+		return;
+	// the cheats stay in the list (and in their file) but nothing of them reaches the game while hardcore applies
+	const bool hardcore = ra::HardcoreActive();
+	if (hardcore && Cheat.enabled)
+	{
+		S9xCheatsDisable();
+		OrbisLog("[emu] hardcore mode: cheats off");
+	}
+	else if (!hardcore && !Cheat.enabled)
+	{
+		S9xCheatsEnable();
+		OrbisLog("[emu] cheats on again (hardcore mode not in force)");
+	}
+	Settings.Transparency = fe::Config().transparency || hardcore;
 }
 
 void AfterMenu()
@@ -1078,6 +1167,8 @@ FrameResult RunFrame()
 	{
 		if (pressed & SCE_PAD_BUTTON_UP)
 			Osd(fe::T(SaveState(cfg.state_slot) ? "State saved to slot %d" : "Could not save slot %d"), cfg.state_slot);
+		else if ((pressed & SCE_PAD_BUTTON_DOWN) && LoadStateRefused())
+			Osd("%s", fe::T("Hardcore mode: loading states is off"));
 		else if (pressed & SCE_PAD_BUTTON_DOWN)
 			Osd(fe::T(LoadState(cfg.state_slot) ? "State loaded from slot %d" : "Slot %d is empty"), cfg.state_slot);
 		else if (pressed & (SCE_PAD_BUTTON_LEFT | SCE_PAD_BUTTON_RIGHT))
@@ -1119,6 +1210,9 @@ FrameResult RunFrame()
 
 	IPPU.RenderThisFrame = !g.fast_forward || (g.frame % 4) == 0;
 	S9xMainLoop();
+	// 2.11: every emulated frame, drawn or not (fast forward), goes through RetroAchievements; then the answers that came
+	ra::Frame();
+	ra::Pump();
 	g.frame++;
 	if (g.frame == 1)
 		StartStep("running");

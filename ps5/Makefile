@@ -21,7 +21,7 @@
 PS5_PAYLOAD_SDK ?= /opt/ps5-payload-sdk
 PS5_HOST ?= ps5
 PS5_PORT ?= 9021
-VERSION ?= 2.10
+VERSION ?= 2.11
 TITLE_ID ?= PPSA99922
 # where the app looks for its updates (Settings, Updates): this repository's GitHub releases
 UPDATE_REPO ?= MisterTemaki/snes9xPS5
@@ -85,14 +85,15 @@ EMU_SRC := coreorbis/main-boot.cpp \
 	coreorbis/orbis-shims/ProsperoCrash.cpp coreorbis/orbis-shims/ProsperoCrt.cpp coreorbis/orbis-shims/ProsperoUpdate.cpp \
 	frontend/fe_emu.cpp frontend/fe_menu.cpp frontend/fe_netscreen.cpp frontend/fe_osk.cpp frontend/fe_ui.cpp frontend/fe_settings.cpp frontend/fe_i18n.cpp frontend/fe_text.cpp \
 	frontend/fe_games.cpp frontend/fe_http.cpp frontend/fe_covers.cpp frontend/fe_shelf.cpp frontend/fe_border.cpp frontend/fe_borderimg.cpp frontend/fe_borderfetch.cpp \
-	frontend/fe_prefetch.cpp frontend/fe_coverfetch.cpp frontend/fe_coverworker.cpp frontend/fe_7z.cpp $(NETFS_SRC)
+	frontend/fe_prefetch.cpp frontend/fe_coverfetch.cpp frontend/fe_coverworker.cpp frontend/fe_7z.cpp \
+	frontend/fe_ra.cpp frontend/fe_ramenu.cpp frontend/fe_ranet.cpp frontend/fe_rahash.cpp $(NETFS_SRC)
 # the payloads: the helper, and the installer (= helper + install)
 # (the helper also downloads the covers in the background: fe_coverworker.cpp, with the app's HTTPS code; 2.10:
 # ProsperoAppPlace.cpp, where the console runs the app from, reads the mount table there -- statfs / getfsstat, from
 # libkernel_sys, which only a payload may load: the app's eboot never links it, tools/check_imports.py checks)
 HELPER_SRC := coreorbis/orbis-shims/orbis_paths.cpp coreorbis/orbis-shims/ProsperoNotify.cpp \
 	coreorbis/orbis-shims/ProsperoHelper.cpp coreorbis/orbis-shims/ProsperoMigrate.cpp coreorbis/orbis-shims/ProsperoCrash.cpp \
-	coreorbis/orbis-shims/ProsperoUpdate.cpp coreorbis/orbis-shims/ProsperoAppPlace.cpp \
+	coreorbis/orbis-shims/ProsperoUpdate.cpp coreorbis/orbis-shims/ProsperoAppPlace.cpp coreorbis/orbis-shims/ProsperoRaProxy.cpp \
 	frontend/fe_http.cpp frontend/fe_coverfetch.cpp frontend/fe_coverworker.cpp frontend/fe_tlshttp.cpp
 # the helper's own HTTPS (fe_tlshttp.cpp): Mbed TLS 3.6 (Apache-2.0), with fe_mbedtls_config.h on its default settings
 MBEDTLS := frontend/third_party/mbedtls
@@ -101,6 +102,20 @@ MBEDTLS_FLAGS := -I$(MBEDTLS)/include -Ifrontend '-DMBEDTLS_USER_CONFIG_FILE="fe
 INSTALLER_SRC := installer/installer_main.cpp $(HELPER_SRC) coreorbis/orbis-shims/ProsperoInstall.cpp
 
 ZLIB_SRC := $(wildcard $(ZLIB)/*.c)
+
+# 2.11: RetroAchievements' client library, rcheevos 12.5.0 (MIT, third_party/rcheevos/README.snes9xps5): rc_client, the
+# server API, the runtime and the SNES hash (rhash, without the disc, encrypted and zip hashers: fe_rahash.cpp unpacks
+# archives itself). C, built into the eboot and the host app; its headers and sources are prerequisites of its objects.
+RCHEEVOS := third_party/rcheevos
+RCHEEVOS_SRC := $(addprefix $(RCHEEVOS)/src/,rc_client.c rc_compat.c rc_util.c rc_version.c \
+	rapi/rc_api_common.c rapi/rc_api_info.c rapi/rc_api_runtime.c rapi/rc_api_user.c \
+	rcheevos/alloc.c rcheevos/condition.c rcheevos/condset.c rcheevos/consoleinfo.c rcheevos/format.c rcheevos/lboard.c \
+	rcheevos/memref.c rcheevos/operand.c rcheevos/rc_validate.c rcheevos/richpresence.c rcheevos/runtime.c \
+	rcheevos/runtime_progress.c rcheevos/trigger.c rcheevos/value.c rhash/hash.c rhash/hash_rom.c rhash/md5.c)
+RCHEEVOS_HDR := $(wildcard $(RCHEEVOS)/include/*.h $(RCHEEVOS)/src/*.h $(RCHEEVOS)/src/*/*.h)
+RCHEEVOS_FLAGS := -I$(RCHEEVOS)/include -I$(RCHEEVOS)/src -DRC_HASH_NO_DISC -DRC_HASH_NO_ENCRYPTED -DRC_HASH_NO_ZIP
+# fe_ra.cpp prints rcheevos's version (src/rc_version.h)
+%/port/frontend/fe_ra.o: EXTRA_FLAGS = -I$(RCHEEVOS)/src
 
 # .7z archives (frontend/fe_7z.cpp): the LZMA SDK's 7z decoder (public domain, third_party/lzma7z/README.snes9xps5),
 # single-threaded, no AES (an archive with a password is refused), no assembler. Every external symbol it defines is
@@ -113,7 +128,7 @@ LZMA7Z_FLAGS := -DZ7_ST -DZ7_PPMD_SUPPORT -DZ7_EXTRACT_ONLY -I$(LZMA7Z) -include
 %/port/frontend/fe_7z.o: EXTRA_FLAGS = -I$(LZMA7Z)
 
 INCS := -Inetfs -I$(ROOT) -I$(ROOT)/apu -I$(ROOT)/apu/bapu -I$(ROOT)/unzip -I$(ZLIB) \
-	-Icoreorbis/include-orbis -Icoreorbis/orbis-shims -Ifrontend
+	-Icoreorbis/include-orbis -Icoreorbis/orbis-shims -Ifrontend -I$(RCHEEVOS)/include
 # the core's defines (the Snes9x core takes no version), and the port's: the core's plus what this build is
 CORE_DEFS := -DRIGHTSHIFT_IS_SAR -DZLIB -DUNZIP_SUPPORT -DSEVENZIP_SUPPORT
 DEFS := $(CORE_DEFS) -DSNES9X_PS5_VERSION='"$(VERSION)"' -DSNES9X_TITLE_ID='"$(TITLE_ID)"' -DSNES9X_UPDATE_REPO='"$(UPDATE_REPO)"'
@@ -166,6 +181,8 @@ $(eval $(call OBJ_DEPS,frontend/fe_borderfetch,frontend/data/snes-border-index.t
 $(eval $(call OBJ_DEPS,frontend/fe_text,frontend/assets/fonts/Roboto-Regular.ttf frontend/assets/fonts/promptfont.otf frontend/assets/fonts/fa-brands-400.otf))
 $(eval $(call OBJ_DEPS,frontend/fe_tlshttp,frontend/data/cacert.pem frontend/fe_mbedtls_config.h))
 $(eval $(call OBJ_DEPS,frontend/fe_7z,$(wildcard $(LZMA7Z)/*.h)))
+$(eval $(call OBJ_DEPS,frontend/fe_ra,$(RCHEEVOS_HDR)))
+$(eval $(call OBJ_DEPS,frontend/fe_rahash,$(RCHEEVOS_HDR)))
 
 # ---------------- PS5 ----------------
 PS5_CC  := $(PS5_PAYLOAD_SDK)/bin/prospero-clang
@@ -185,6 +202,7 @@ PS5_ZLIB_OBJ := $(patsubst $(ZLIB)/%.c,$(PS5_OUT)/zlib/%.o,$(ZLIB_SRC))
 PS5_LIBSMB2_OBJ := $(patsubst $(LIBSMB2)/%.c,$(PS5_OUT)/libsmb2/%.o,$(LIBSMB2_SRC))
 PS5_LIBNFS_OBJ := $(patsubst $(LIBNFS)/%.c,$(PS5_OUT)/libnfs/%.o,$(LIBNFS_SRC))
 PS5_LZMA7Z_OBJ := $(patsubst $(LZMA7Z)/%.c,$(PS5_OUT)/lzma7z/%.o,$(LZMA7Z_SRC))
+PS5_RCHEEVOS_OBJ := $(patsubst $(RCHEEVOS)/src/%.c,$(PS5_OUT)/rcheevos/%.o,$(RCHEEVOS_SRC))
 
 ps5: $(PS5_OUT)/Snes9xPS5.elf
 
@@ -223,6 +241,10 @@ $(PS5_OUT)/libnfs/%.o: $(LIBNFS)/%.c
 $(PS5_OUT)/lzma7z/%.o: $(LZMA7Z)/%.c $(wildcard $(LZMA7Z)/*.h)
 	@mkdir -p $(dir $@)
 	$(PS5_CC) -O2 -fPIC -march=znver2 $(LZMA7Z_FLAGS) -w -c -o $@ $<
+
+$(PS5_OUT)/rcheevos/%.o: $(RCHEEVOS)/src/%.c $(RCHEEVOS_HDR)
+	@mkdir -p $(dir $@)
+	$(PS5_CC) -O2 -fPIC -march=znver2 $(RCHEEVOS_FLAGS) -w -c -o $@ $<
 
 # 1. the helper payload (built into the app, which sends it to the ELF loader when no helper answers)
 $(PS5_OUT)/Snes9xPS5-helper.elf: $(PS5_HELPER_OBJ)
@@ -323,7 +345,7 @@ build/app/app_crt.o build/app/app_cpp_runtime.o: build/app/%.o: $(NATIVE)/toolin
 		-c -o $@ $<
 
 EBOOT_OBJS = build/app/app_crt.o build/app/app_cpp_runtime.o $(PS5_CORE_OBJ) $(PS5_EMU_OBJ) $(PS5_ZLIB_OBJ) \
-	$(PS5_LIBSMB2_OBJ) $(PS5_LIBNFS_OBJ) $(PS5_LZMA7Z_OBJ) $(PS5_OUT)/helper_data.o
+	$(PS5_LIBSMB2_OBJ) $(PS5_LIBNFS_OBJ) $(PS5_LZMA7Z_OBJ) $(PS5_RCHEEVOS_OBJ) $(PS5_OUT)/helper_data.o
 # 2.10: the C++ runtime is the eboot's own, whole: libc++, libc++abi (__cxa_throw, the personality routine, the
 # type_info vtables) and libunwind (which finds the FDEs through ehframe.ld's __eh_frame_hdr_start), named before the
 # system stubs. Up to 2.9 they came after them, and libSceLibcInternal's stub won the personality routine,
@@ -384,6 +406,7 @@ HOST_ZLIB_OBJ := $(patsubst $(ZLIB)/%.c,$(HOST_OUT)/zlib/%.o,$(ZLIB_SRC))
 HOST_LIBSMB2_OBJ := $(patsubst $(LIBSMB2)/%.c,$(HOST_OUT)/libsmb2/%.o,$(LIBSMB2_SRC))
 HOST_LIBNFS_OBJ := $(patsubst $(LIBNFS)/%.c,$(HOST_OUT)/libnfs/%.o,$(LIBNFS_SRC))
 HOST_LZMA7Z_OBJ := $(patsubst $(LZMA7Z)/%.c,$(HOST_OUT)/lzma7z/%.o,$(LZMA7Z_SRC))
+HOST_RCHEEVOS_OBJ := $(patsubst $(RCHEEVOS)/src/%.c,$(HOST_OUT)/rcheevos/%.o,$(RCHEEVOS_SRC))
 
 host: $(HOST_OUT)/snes9x-ps5-host $(HOST_OUT)/snes9x-ps5-installer $(HOST_OUT)/snes9x-ps5-helper
 
@@ -424,6 +447,10 @@ $(HOST_OUT)/lzma7z/%.o: $(LZMA7Z)/%.c $(wildcard $(LZMA7Z)/*.h)
 	@mkdir -p $(dir $@)
 	$(HOST_CC) $(HOST_OPT) $(HOST_SAN) -fno-sanitize=alignment $(LZMA7Z_FLAGS) -w -c -o $@ $<
 
+$(HOST_OUT)/rcheevos/%.o: $(RCHEEVOS)/src/%.c $(RCHEEVOS_HDR)
+	@mkdir -p $(dir $@)
+	$(HOST_CC) $(HOST_OPT) $(HOST_SAN) $(RCHEEVOS_FLAGS) -w -c -o $@ $<
+
 # The host installer carries a stand-in app folder (tests/fake-eboot.bin, tests/fake-libc.prx + the real
 # param/icon/pic); the host app carries the host helper, which it hands to a fake ELF loader in the tests.
 HOST_APP_DEFS = -DAPP_EBOOT='"$(abspath tests/fake-eboot.bin)"' -DAPP_PARAM='"$(abspath app/sce_sys/param.json)"' \
@@ -447,8 +474,8 @@ $(HOST_OUT)/snes9x-ps5-helper: $(HOST_HELPER_OBJ)
 $(HOST_OUT)/snes9x-ps5-installer: $(HOST_INSTALLER_OBJ) $(HOST_OUT)/install_data.o
 	$(HOST_CXX) $(HOST_SAN) -o $@ $^ -lpthread
 
-$(HOST_OUT)/snes9x-ps5-host: $(HOST_CORE_OBJ) $(HOST_EMU_OBJ) $(HOST_ZLIB_OBJ) $(HOST_LIBSMB2_OBJ) $(HOST_LIBNFS_OBJ) $(HOST_LZMA7Z_OBJ) $(HOST_OUT)/helper_data.o
-	$(HOST_CXX) $(HOST_SAN) -o $@ $^ $(NETFS_WRAP_GCC) -lpthread
+$(HOST_OUT)/snes9x-ps5-host: $(HOST_CORE_OBJ) $(HOST_EMU_OBJ) $(HOST_ZLIB_OBJ) $(HOST_LIBSMB2_OBJ) $(HOST_LIBNFS_OBJ) $(HOST_LZMA7Z_OBJ) $(HOST_RCHEEVOS_OBJ) $(HOST_OUT)/helper_data.o
+	$(HOST_CXX) $(HOST_SAN) -o $@ $^ $(NETFS_WRAP_GCC) -lpthread -lm
 
 # netfs's own test: the netfs code, the stub backends and an in-memory share, linked with the same --wrap list
 HOST_NETFS_TEST_OBJ := $(patsubst %.cpp,$(HOST_OUT)/port/%.o,$(NETFS_CORE_SRC) netfs/backend_smb_stub.cpp netfs/backend_nfs_stub.cpp \

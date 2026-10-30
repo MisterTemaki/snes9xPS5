@@ -92,6 +92,8 @@ void Settings::Load()
 			last_rom = val;
 		else if (key == "last_tab")
 			last_tab = Clamp(atoi(val), 0, 2);
+		else if (key == "ra_hardcore")
+			ra_hardcore = atoi(val) != 0;
 	}
 	fclose(f);
 	// If manually-edited ini values conflict, restore distinct, reachable defaults.
@@ -134,6 +136,7 @@ void Settings::Save() const
 	fprintf(f, "last_dir=%s\n", last_dir.c_str());
 	fprintf(f, "last_rom=%s\n", last_rom.c_str());
 	fprintf(f, "last_tab=%d\n", last_tab);
+	fprintf(f, "ra_hardcore=%d\n", ra_hardcore ? 1 : 0);
 	bool ok = ferror(f) == 0;
 	ok = fflush(f) == 0 && ok;
 	ok = fsync(fileno(f)) == 0 && ok;

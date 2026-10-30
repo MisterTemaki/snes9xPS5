@@ -350,6 +350,23 @@ bool DecodePng(const uint8_t* data, size_t size, Image* out, std::string* why)
 	return true;
 }
 
+bool DecodeSmallPng(const uint8_t* data, size_t size, int max_side, Image* out)
+{
+	int w = 0, h = 0, comp = 0;
+	if (size == 0 || size > (1u << 20) || !stbi_info_from_memory(data, int(size), &w, &h, &comp) || w <= 0 || h <= 0 ||
+		w > max_side || h > max_side || stbi_is_16_bit_from_memory(data, int(size)))
+		return false;
+	unsigned char* rgba = stbi_load_from_memory(data, int(size), &w, &h, &comp, 4);
+	if (!rgba)
+		return false;
+	out->px.assign(size_t(w) * h, 0);
+	memcpy(out->px.data(), rgba, out->px.size() * sizeof(uint32_t));
+	stbi_image_free(rgba);
+	out->w = w;
+	out->h = h;
+	return true;
+}
+
 bool FindWindow(const Image& img, ps5video::Rect* window, std::string* why)
 {
 	const int W = img.w, H = img.h;

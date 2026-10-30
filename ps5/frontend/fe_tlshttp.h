@@ -29,6 +29,14 @@ public:
 	// The bytes of the answer read so far go here while a Get runs (the updater's progress); nullptr: nowhere.
 	void SetProgress(std::atomic<size_t>* bytes);
 
+	// 2.11 (RetroAchievements, ProsperoRaProxy.cpp): one request with a body and a User-Agent of the caller's. POST when
+	// `body` is not empty (application/x-www-form-urlencoded), else GET. The answer's body is kept whatever the status
+	// (the server explains its errors in it), up to max_bytes. Tried once (the caller retries), redirects followed only
+	// for a GET (and never from HTTPS to plain HTTP). `what` names the request in the log line instead of its address
+	// and body, which are never logged. The status, or -1 (no answer), -2 (too big), -4 (refused redirect).
+	int Send(const std::string& url, const std::string& body, const std::string& user_agent, const char* what,
+		std::vector<uint8_t>& out, size_t max_bytes);
+
 	struct Impl;
 
 private:

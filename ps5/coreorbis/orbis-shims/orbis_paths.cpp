@@ -22,6 +22,13 @@
 namespace
 {
 std::mutex s_log_mutex;
+// 2.11: texts no log line may show (the RetroAchievements token, a password while it is being sent): each occurrence is
+// written as [redacted]. Guarded by s_log_mutex.
+std::vector<std::string>& Secrets()
+{
+	static std::vector<std::string> v;
+	return v;
+}
 FILE* s_log = nullptr;
 bool s_enabled = true; // the "Debug logs" setting
 std::string s_name;    // the log OrbisLogOpen opened (or would have), to open again when logs are turned on
@@ -188,6 +195,14 @@ void OrbisLog(const char* fmt, ...)
 	std::lock_guard<std::mutex> lock(s_log_mutex);
 	if (!s_enabled)
 		return;
+	if (!Secrets().empty())
+	{
+		std::string l = line;
+		for (const std::string& secret : Secrets())
+			for (size_t at = l.find(secret); at != std::string::npos; at = l.find(secret, at + 10))
+				l.replace(at, secret.size(), "[redacted]");
+		snprintf(line, sizeof(line), "%s", l.c_str());
+	}
 	if (s_log || !s_name.empty())
 	{
 		printf("[snes9x-ps5 %10.3f] %s\n", t, line);
@@ -204,6 +219,34 @@ void OrbisLog(const char* fmt, ...)
 		snprintf(stamped, sizeof(stamped), "[%10.3f] %s\n", t, line);
 		EarlyLines().push_back(stamped);
 	}
+}
+
+void OrbisLogRedact(const std::string& secret)
+{
+	if (secret.size() < 4) // a short text would blank out ordinary words
+		return;
+	std::lock_guard<std::mutex> lock(s_log_mutex);
+	for (const std::string& s : Secrets())
+		if (s == secret)
+			return;
+	if (Secrets().size() >= 16)
+		Secrets().erase(Secrets().begin());
+	Secrets().push_back(secret);
+}
+
+void OrbisLogUnredact(const std::string& secret)
+{
+	std::lock_guard<std::mutex> lock(s_log_mutex);
+	for (size_t i = 0; i < Secrets().size(); i++)
+		if (Secrets()[i] == secret)
+		{
+			// the copy kept for the redaction is wiped before it is let go
+			std::string& s = Secrets()[i];
+			for (char& c : s)
+				*(volatile char*)&c = 0;
+			Secrets().erase(Secrets().begin() + long(i));
+			return;
+		}
 }
 
 void OrbisLogSetEnabled(bool on)

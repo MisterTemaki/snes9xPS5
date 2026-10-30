@@ -11,6 +11,7 @@
 #include "fe_emu.h"
 #include "fe_games.h"
 #include "fe_i18n.h"
+#include "fe_ra.h"
 #include "fe_shelf.h"
 #include "fe_settings.h"
 #include "fe_shortcuts.h"
@@ -305,7 +306,7 @@ std::string SettingValue(int s)
 		case S_SMOOTH: return YesNo(c.smooth);
 		case S_FPS: return YesNo(c.show_fps);
 		case S_AUDIO: return YesNo(c.audio);
-		case S_TRANSPARENCY: return YesNo(c.transparency);
+		case S_TRANSPARENCY: return ra::HardcoreActive() ? T("On (hardcore mode)") : YesNo(c.transparency);
 		case S_SUPERFX: snprintf(buf, sizeof(buf), "%d%%", c.superfx_clock); return buf;
 		case S_COVERS: return YesNo(c.covers_download);
 		case S_LANGUAGE: return LanguageName(c.language);
@@ -333,7 +334,10 @@ void ChangeSetting(int s, int dir)
 		case S_SMOOTH: c.smooth = !c.smooth; break;
 		case S_FPS: c.show_fps = !c.show_fps; break;
 		case S_AUDIO: c.audio = !c.audio; break;
-		case S_TRANSPARENCY: c.transparency = !c.transparency; break;
+		case S_TRANSPARENCY:
+			if (!ra::HardcoreActive()) // RetroAchievements forbids it off in hardcore: the row is greyed
+				c.transparency = !c.transparency;
+			break;
 		case S_COVERS: c.covers_download = !c.covers_download; break;
 		case S_LANGUAGE:
 		{
@@ -435,6 +439,7 @@ void SettingsMenu()
 		rows.push_back({T("Controller shortcuts"), ""});
 		rows.push_back({T("Repair missing covers"), ""});
 		rows.push_back({T("Download all borders"), BorderDownloadValue(), true, true});
+		rows.push_back({"RetroAchievements", RetroAchievementsValue(), true, true});
 		rows.push_back({T("Back"), ""});
 		Header(T("Settings"));
 		DrawOptionBox(T("Settings"), rows, sel, false);
@@ -486,7 +491,12 @@ void SettingsMenu()
 			g_border_ask.queued = DownloadBorders();
 			g_border_ask.at = Now();
 		}
-		if (n.back || n.options || (n.ok && sel == S_COUNT + 4))
+		if (n.ok && sel == S_COUNT + 4)
+		{
+			RetroAchievementsMenu();
+			nav = NavReader();
+		}
+		if (n.back || n.options || (n.ok && sel == S_COUNT + 5))
 		{
 			Config().Save();
 			return;
@@ -672,6 +682,8 @@ PauseAction PauseMenu()
 		I_SLOT,
 		I_CHEATS,
 		I_SHORTCUTS,
+		I_ACHIEVEMENTS, // 2.11: with a RetroAchievements account only
+		I_HARDCORE, // 2.11: the same
 		I_SET0, // the S_* settings follow (not Updates: Settings on the game list has it)
 		I_RESET = I_SET0 + S_UPDATES,
 		I_LIST,
@@ -683,28 +695,60 @@ PauseAction PauseMenu()
 
 	for (;;)
 	{
+		ra::Pump();
 		// the paused game, darkened, under the box
 		ps5video::FillRect(0, 0, W, H, Rgb(0, 0, 0));
 		emu::RedrawLastFrame();
 		ps5video::DarkenRect(0, 0, W, H);
 		ps5video::DarkenRect(0, 0, W, H);
 
+		// the rows shown: without a RetroAchievements account the menu is 2.10's
+		const bool ra_rows = ra::LoginState() != ra::Login::None;
+		const bool hardcore = ra::HardcoreActive();
+		std::vector<int> ids;
+		for (int i = 0; i < I_COUNT; i++)
+			if (ra_rows || (i != I_ACHIEVEMENTS && i != I_HARDCORE))
+				ids.push_back(i);
+		const int count = int(ids.size());
+		sel = std::min(sel, count - 1);
+
 		char slot[64];
-		std::vector<Row> rows(I_COUNT);
-		rows[I_RESUME] = {T("Resume"), ""};
-		snprintf(slot, sizeof(slot), T("Save state (slot %d)"), cfg.state_slot);
-		rows[I_SAVE] = {slot, ""};
-		snprintf(slot, sizeof(slot), T("Load state (slot %d)"), cfg.state_slot);
-		rows[I_LOAD] = {slot, "", emu::StateExists(cfg.state_slot)};
-		snprintf(slot, sizeof(slot), T(emu::StateExists(cfg.state_slot) ? "%d (used)" : "%d (empty)"), cfg.state_slot);
-		rows[I_SLOT] = {T("State slot"), slot};
-		rows[I_CHEATS] = {T("Cheat manager"), ""};
-		rows[I_SHORTCUTS] = {T("Controller shortcuts"), ""};
-		for (int s = 0; s < S_UPDATES; s++)
-			rows[I_SET0 + s] = {SettingLabel(s), SettingValue(s)};
-		rows[I_RESET] = {T("Reset game"), ""};
-		rows[I_LIST] = {T("Back to the game list"), ""};
-		rows[I_QUIT] = {T("Quit Snes9x"), ""};
+		std::vector<Row> rows;
+		for (int id : ids)
+		{
+			Row row;
+			switch (id)
+			{
+				case I_RESUME: row = {T("Resume"), ""}; break;
+				case I_SAVE:
+					snprintf(slot, sizeof(slot), T("Save state (slot %d)"), cfg.state_slot);
+					row = {slot, ""};
+					break;
+				case I_LOAD:
+					snprintf(slot, sizeof(slot), T("Load state (slot %d)"), cfg.state_slot);
+					// greyed in hardcore, with the reason as its value
+					row = {slot, hardcore ? T("Off in hardcore mode") : "", !hardcore && emu::StateExists(cfg.state_slot), true};
+					break;
+				case I_SLOT:
+					snprintf(slot, sizeof(slot), T(emu::StateExists(cfg.state_slot) ? "%d (used)" : "%d (empty)"), cfg.state_slot);
+					row = {T("State slot"), slot};
+					break;
+				case I_CHEATS: row = {T("Cheat manager"), hardcore ? T("Off in hardcore mode") : "", !hardcore, true}; break;
+				case I_SHORTCUTS: row = {T("Controller shortcuts"), ""}; break;
+				case I_ACHIEVEMENTS: row = {T("Achievements"), ra::GameSummary(), true, true}; break;
+				case I_HARDCORE: row = {T("Hardcore mode"), T(ra::HardcoreSetting() ? "On" : "Off")}; break;
+				case I_RESET: row = {T("Reset game"), ""}; break;
+				case I_LIST: row = {T("Back to the game list"), ""}; break;
+				case I_QUIT: row = {T("Quit Snes9x"), ""}; break;
+				default:
+				{
+					const int s = id - I_SET0;
+					row = {SettingLabel(s), SettingValue(s), !(s == S_TRANSPARENCY && hardcore)};
+					break;
+				}
+			}
+			rows.push_back(row);
+		}
 
 		DrawOptionBox(FitText(emu::GameName(), 5, 900).c_str(), rows, sel, true);
 		if (!toast.empty() && Now() < toast_until)
@@ -718,22 +762,36 @@ PauseAction PauseMenu()
 
 		const Nav n = nav.Read();
 		if (n.up)
-			sel = (sel + I_COUNT - 1) % I_COUNT;
+			sel = (sel + count - 1) % count;
 		if (n.down)
-			sel = (sel + 1) % I_COUNT;
+			sel = (sel + 1) % count;
 		if (n.back || n.options || n.menu)
 			return PauseAction::Resume;
 
-		if (sel == I_SLOT && (n.left || n.right || n.ok))
+		const int id = ids[size_t(sel)];
+		if (id == I_SLOT && (n.left || n.right || n.ok))
 			cfg.state_slot = (cfg.state_slot + (n.left ? 9 : 1)) % 10;
-		else if (sel >= I_SET0 && sel < I_SET0 + S_UPDATES && (n.left || n.right || n.ok))
+		else if (id == I_HARDCORE && (n.left || n.right || n.ok))
 		{
-			ChangeSetting(sel - I_SET0, n.left ? -1 : 1);
+			const bool on = !ra::HardcoreSetting();
+			const bool resets = on && ra::GameHasSet();
+			ra::SetHardcore(on); // on: the game is reset (RetroAchievements' rule)
+			toast = T(on ? (resets ? "Hardcore mode on: the game was reset." : "Hardcore mode on.") : "Hardcore mode off.");
+			toast_until = Now() + 2.5;
+		}
+		else if (id >= I_SET0 && id < I_SET0 + S_UPDATES && (n.left || n.right || n.ok))
+		{
+			if (id - I_SET0 == S_TRANSPARENCY && hardcore)
+			{
+				toast = T("Hardcore mode: Transparency stays on.");
+				toast_until = Now() + 2.5;
+			}
+			ChangeSetting(id - I_SET0, n.left ? -1 : 1);
 			cfg.Save();
 		}
 		else if (n.ok)
 		{
-			switch (sel)
+			switch (id)
 			{
 				case I_RESUME: return PauseAction::Resume;
 				case I_SAVE:
@@ -742,6 +800,12 @@ PauseAction PauseMenu()
 					cfg.Save();
 					break;
 				case I_LOAD:
+					if (emu::LoadStateRefused())
+					{
+						toast = T("Hardcore mode: loading states is off");
+						toast_until = Now() + 2.5;
+						break;
+					}
 					if (emu::LoadState(cfg.state_slot))
 					{
 						cfg.Save();
@@ -752,11 +816,21 @@ PauseAction PauseMenu()
 					toast_until = Now() + 2.0;
 					break;
 				case I_CHEATS:
+					if (hardcore)
+					{
+						toast = T("Hardcore mode: cheats are off");
+						toast_until = Now() + 2.5;
+						break;
+					}
 					CheatMenu();
 					nav = NavReader();
 					break;
 				case I_SHORTCUTS:
 					ShortcutMenu();
+					nav = NavReader();
+					break;
+				case I_ACHIEVEMENTS:
+					AchievementsMenu();
 					nav = NavReader();
 					break;
 				case I_RESET:

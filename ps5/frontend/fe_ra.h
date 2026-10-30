@@ -1,0 +1,97 @@
+// Snes9x PS5 (2.11): RetroAchievements (retroachievements.org), with its official client library rcheevos (rc_client,
+// third_party/rcheevos, MIT).
+//
+//   - Account: Settings, RetroAchievements: log in with the user name and the password (on the on-screen keyboard; the
+//     password is masked, sent once and never stored); the server's token is kept in
+//     /data/snes9x/retroachievements/login.txt (owner-only), and the next start logs in with it quietly. Log out deletes it.
+//   - Without a login nothing changes and nothing is sent: no request, no thread.
+//   - A game: identified by its hash (fe_rahash.h); its achievements, leaderboards and rich presence come from the server;
+//     rc_client_do_frame runs after every emulated frame, rc_client_idle about once a second while the game is paused.
+//   - Notifications are small boxes drawn over the picture (DrawOverlay): they never pause or block the game.
+//   - Hardcore mode (on by default, as RetroAchievements asks): loading states and cheats are off (and the menus grey
+//     them), Transparency stays on (RetroAchievements forbids turning Snes9x's transparency off), and the pause menu
+//     follows rc_client_can_pause. Turning it on in a game resets the game; off is allowed at any time. Fast forward
+//     stays (RetroAchievements allows it); the port has no rewind, slow motion or frame advance.
+//   - Network: every request goes through the helper (fe_ranet.h): the app's own HTTPS fails out of its sandbox.
+//
+// Everything here runs on the main thread (the frame loop and the menus): rc_client is never called from another one.
+//
+// SPDX-License-Identifier: MIT
+#pragma once
+
+#include "ProsperoVideo.h"
+
+#include <cstdint>
+#include <string>
+#include <vector>
+
+namespace ra
+{
+// At start, once /data is there: with a saved login, a quiet login with its token (nothing on the screen; a bad or
+// expired token shows in Settings). Without one, nothing at all.
+void Init();
+// At the end: the request thread stopped.
+void Shutdown();
+// Once a frame on every screen (the shelf, menus, the game): answers of the server handed to rc_client; rc_client_idle
+// about once a second while no game frame runs.
+void Pump();
+
+// ---- the account
+enum class Login
+{
+	None, // no account: nothing happens
+	Pending, // a login is under way
+	LoggedIn,
+	Failed, // the last login failed (LoginError says why); a saved token is tried again at the next game
+};
+Login LoginState();
+std::string UserName();
+uint32_t Points(); // the hardcore score, or the softcore one with hardcore off
+// Why the account isn't logged in (or what went wrong with the network), translated; "" when all is well.
+std::string Problem();
+// Starts a login with a password, which is sent once (through the helper) and never kept: `password` is wiped.
+void BeginLogin(const std::string& user, std::string& password);
+void Logout();
+
+// ---- hardcore mode
+bool HardcoreSetting();
+// The setting. On in a game whose achievements are loaded (or loading): the game is reset, as RetroAchievements requires.
+void SetHardcore(bool on);
+// The restrictions apply now: hardcore on, an account, and a game whose achievements are loaded or still loading.
+bool HardcoreActive();
+// Whether the pause menu may open now (rc_client_can_pause in hardcore; always outside it); seconds to wait when not.
+bool CanPause(int* seconds_left);
+
+// ---- the game (fe_emu.cpp calls these)
+void GameStarted(const std::string& rom_path); // after the ROM loaded: the hash, then the set from the server
+void GameClosed();
+void Frame(); // after every emulated frame
+void OnReset(); // the game was reset (rc_client_reset)
+// rc_client's progress (hit counts...) for a save state, and back; Load with no data (a state saved without it) resets it.
+bool SaveProgress(std::vector<uint8_t>* out);
+void LoadProgress(const std::vector<uint8_t>* data);
+// The game's achievements are loaded (the pause menu's Achievements list has something to show)
+bool GameHasSet();
+// "3 of 10 achievements unlocked" (translated), or why there are none ("Unknown game"...), for the pause menu
+std::string GameSummary();
+
+// ---- what the player sees
+// Over the game's picture, after each drawn frame: the notifications (bottom left), the trackers and challenge
+// indicators (top right). Only inside `picture`, which the next frame draws over again.
+void DrawOverlay(const ps5video::Rect& picture);
+
+// The achievement list, for the pause menu's Achievements screen
+struct Item
+{
+	bool section = false; // a heading ("Locked", "Unlocked"...)
+	std::string title, description;
+	uint32_t points = 0;
+	bool unlocked = false;
+	std::string progress; // "12/100" when rc_client measures it
+	float percent = 0;
+};
+std::vector<Item> AchievementItems();
+
+// The User-Agent sent with every request: "Snes9xPS5/<version> (PlayStation 5) Snes9x/<core> rcheevos/<version>"
+std::string UserAgent();
+} // namespace ra

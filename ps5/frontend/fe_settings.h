@@ -28,6 +28,9 @@ struct Settings
 	std::string last_dir; // the browser reopens here
 	std::string last_rom; // and puts the cursor on this file
 	int last_tab = 0; // the shelf's tab (fe_tabs.h): 0 Internal, 1 USB, 2 Network
+	// 2.11: RetroAchievements' hardcore mode (fe_ra.h), on unless the player turns it off, as RetroAchievements asks. It
+	// changes nothing until a RetroAchievements account is logged in.
+	bool ra_hardcore = true;
 
 	void Load();
 	void Save() const;

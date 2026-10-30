@@ -14,6 +14,7 @@
 // SPDX-License-Identifier: MIT
 #pragma once
 
+#include <atomic>
 #include <cstddef>
 #include <cstdint>
 #include <string>
@@ -53,6 +54,20 @@ constexpr int32_t kRetUntouched = -1337;
 // msg1 asks "status", "check", "autocheck" (a notification when there is a newer version), "install" or "ack";
 // the answer's msg1 is the updater's status (update::Encode).
 constexpr int32_t kCmdUpdate = 7;
+// Our own (2.11): one RetroAchievements web request (fe_ra.h), made by the helper: the app's own HTTPS (libSceSsl) fails
+// once it is out of its sandbox, and the helper has its own (Mbed TLS, fe_tlshttp.h). The request: the header with
+// msg1 = the address (https://retroachievements.org/dorequest.php, or a badge picture on media.retroachievements.org;
+// the helper refuses any other), msg2 = the User-Agent, ret = the length of the POST body that follows (0: a GET). The
+// helper answers on the same connection once the server has: the header with ret = kRaOk and msg1 = "<HTTP status>
+// <body length>", then the body; or ret < 0 (kRa*) and msg2 = why. The helper's loop never waits for the server (its
+// own thread does, ProsperoRaProxy.cpp), so the jailbreak and the updater are served meanwhile. A 2.10 helper doesn't
+// know the command: it closes the connection without a word.
+constexpr int32_t kCmdRetroAchievements = 8;
+constexpr int32_t kRaOk = 0, kRaNetwork = -1, kRaRefused = -2, kRaTooBig = -3, kRaBusy = -4;
+constexpr uint32_t kRaMaxPost = 64 * 1024;
+constexpr uint32_t kRaMaxAnswer = 8u << 20;
+// How long the app waits for one answer: the helper's own limits are 10 s to connect and 15 s per read.
+constexpr int kRaTimeoutSeconds = 60;
 
 // The app side: ask for this process. Returns true when a helper answered yes; `how` names it.
 // Every step goes to OrbisLog (kept in memory until boot.log can be opened).
@@ -65,6 +80,27 @@ bool FetchWantedCovers(std::string& text, bool* background = nullptr);
 
 // The app side: one updater request to our own helper (kCmdUpdate). False when no helper of ours answered.
 bool UpdateRequest(const char* what, std::string& reply);
+
+// The app side of kCmdRetroAchievements (blocking: the caller is a worker thread, never the frame loop).
+enum class RaCall
+{
+	Answer, // the server answered: http and body
+	NoHelper, // nobody on the helper's port
+	OldHelper, // a helper that closed the connection without a word: a 2.10 one, which doesn't know the command
+	HelperError, // the helper answered with an error (helper_ret: kRaNetwork, kRaRefused...; why says more)
+};
+struct RaReply
+{
+	RaCall call = RaCall::NoHelper;
+	int helper_ret = 0;
+	int http = 0;
+	std::string body;
+	std::string why;
+};
+// `socket_out`, when given, holds the connection's socket while the call runs (-1 otherwise), so another thread can
+// shutdown() it to stop the call at once (the app quitting).
+RaReply RaRequest(const std::string& url, const std::string& post, const std::string& user_agent,
+	std::atomic<int>* socket_out = nullptr);
 
 // The helper ELF built into the app (helper_data.cpp in the native eboot; nothing elsewhere).
 struct Blob

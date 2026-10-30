@@ -52,5 +52,10 @@ bool OrbisLogEnabled();
 // boot.log onto the disk now (fflush + fsync): before a step that might take the process down (a game's start, the
 // exceptions self-test), so the last line written says where it was (2.10)
 void OrbisLogSync();
+// 2.11: a text no log line may show (the RetroAchievements token; a password while it is sent): from now on every
+// occurrence is written as "[redacted]" (texts under 4 characters are ignored; at most 16 are kept). Unredact forgets
+// one (a password once its login is answered).
+void OrbisLogRedact(const std::string& secret);
+void OrbisLogUnredact(const std::string& secret);
 // The open log's file descriptor, for the crash handler's signal-safe write(); -1 before it is open.
 int OrbisLogFd();

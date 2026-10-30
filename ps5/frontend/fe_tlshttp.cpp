@@ -655,13 +655,21 @@ struct TlsHttp::Impl
 
 	// One GET on the open connection: the status, -2 (too big), or -1 (the connection broke; nothing_back: before
 	// any answer, as a kept connection the server closed meanwhile does).
+	// 2.11: `body` not empty: a POST of it (RetroAchievements); `agent` empty: our own User-Agent; keep_error_body: the
+	// body of any status is kept (up to max_bytes), not only a 200's.
 	int Exchange(const Url& u, std::vector<uint8_t>& out, size_t max_bytes, std::string& location, std::string& why,
-		bool* nothing_back)
+		bool* nothing_back, const std::string& body = std::string(), const std::string& agent = std::string(),
+		bool keep_error_body = false)
 	{
 		*nothing_back = false;
-		const std::string req = "GET " + u.path + " HTTP/1.1\r\nHost: " + u.host +
-			(u.port != (u.tls ? 443 : 80) ? ":" + std::to_string(u.port) : std::string()) +
-			"\r\nUser-Agent: Snes9xPS5/" SNES9X_PS5_VERSION "\r\nAccept: */*\r\nConnection: keep-alive\r\n\r\n";
+		std::string req = std::string(body.empty() ? "GET " : "POST ") + u.path + " HTTP/1.1\r\nHost: " + u.host +
+			(u.port != (u.tls ? 443 : 80) ? ":" + std::to_string(u.port) : std::string()) + "\r\nUser-Agent: " +
+			(agent.empty() ? std::string("Snes9xPS5/" SNES9X_PS5_VERSION) : agent) +
+			"\r\nAccept: */*\r\nConnection: keep-alive\r\n";
+		if (!body.empty())
+			req += "Content-Type: application/x-www-form-urlencoded\r\nContent-Length: " + std::to_string(body.size()) + "\r\n";
+		req += "\r\n";
+		req += body;
 		if (!WriteAll(req))
 		{
 			*nothing_back = true;
@@ -730,8 +738,9 @@ struct TlsHttp::Impl
 		} while (status >= 100 && status < 200);
 		// the body: kept for a 200, read and dropped otherwise (so the connection can serve the next request)
 		out.clear();
-		const size_t limit = status == 200 ? max_bytes : 1u << 20;
-		std::vector<uint8_t>* sink = status == 200 ? &out : nullptr;
+		const bool keep_body = status == 200 || keep_error_body;
+		const size_t limit = keep_body ? max_bytes : 1u << 20;
+		std::vector<uint8_t>* sink = keep_body ? &out : nullptr;
 		size_t got = 0;
 		if (chunked)
 		{
@@ -756,7 +765,7 @@ struct TlsHttp::Impl
 				if (n > limit - got)
 				{
 					Close();
-					return status == 200 ? -2 : status;
+					return keep_body ? -2 : status;
 				}
 				if (!ReadBytes(size_t(n), sink) || !ReadLine(line, 16))
 				{
@@ -771,7 +780,7 @@ struct TlsHttp::Impl
 			if (size_t(length) > limit)
 			{
 				Close();
-				return status == 200 ? -2 : status;
+				return keep_body ? -2 : status;
 			}
 			if (!ReadBytes(size_t(length), sink))
 			{
@@ -789,7 +798,7 @@ struct TlsHttp::Impl
 				if (got + have > limit)
 				{
 					Close();
-					return status == 200 ? -2 : status;
+					return keep_body ? -2 : status;
 				}
 				ReadBytes(have, sink);
 				got += have;
@@ -893,6 +902,68 @@ int TlsHttp::Get(const std::string& start_url, std::vector<uint8_t>& out, size_t
 			usleep(100 * 1000);
 	}
 	if (status != 200)
+		out.clear();
+	return status;
+}
+
+int TlsHttp::Send(const std::string& start_url, const std::string& body, const std::string& user_agent, const char* what,
+	std::vector<uint8_t>& out, size_t max_bytes)
+{
+	out.clear();
+	if (!m->NetUp())
+		return -1;
+	if (!m->SetUpTls())
+		return -1;
+	const double t0 = Now();
+	std::string url = start_url, why;
+	int status = -1, connections = 0;
+	for (int hop = 0; hop <= 3; hop++)
+	{
+		Url u;
+		if (!ParseUrl(url, u))
+		{
+			OrbisLog("[https] %s: not an address I can fetch", what);
+			return -1;
+		}
+		std::string location;
+		bool nothing_back = false;
+		status = -1;
+		why.clear();
+		for (int conn_try = 0; conn_try < 2; conn_try++)
+		{
+			const bool reused = m->fd >= 0 && m->conn_host == u.host && m->conn_port == u.port && m->tls == u.tls;
+			if (!reused)
+			{
+				connections++;
+				why = m->Connect(u);
+				if (!why.empty())
+					break;
+			}
+			status = m->Exchange(u, out, max_bytes, location, why, &nothing_back, body, user_agent, true);
+			if (status == -1)
+				m->Close();
+			// a kept connection the server had closed in the meantime (nothing came back): once more on a new one. The
+			// request never reached the server, so a POST is not sent twice.
+			if (!(status == -1 && reused && nothing_back))
+				break;
+		}
+		if (body.empty() && (status == 301 || status == 302 || status == 303 || status == 307 || status == 308) &&
+			!location.empty())
+		{
+			url = Resolve(u, location);
+			out.clear();
+			if (u.tls && url.compare(0, 7, "http://") == 0)
+			{
+				status = kRefusedRedirect;
+				break;
+			}
+			continue;
+		}
+		break;
+	}
+	OrbisLog("[https] %s %s -> %d, %zu bytes, %.0f ms%s%s%s", body.empty() ? "GET" : "POST", what, status, out.size(),
+		(Now() - t0) * 1000.0, connections ? "" : " (kept connection)", why.empty() ? "" : ": ", why.c_str());
+	if (status < 0)
 		out.clear();
 	return status;
 }

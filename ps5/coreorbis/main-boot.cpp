@@ -30,6 +30,7 @@
 #include "fe_7z.h"
 #include "fe_menu.h"
 #include "fe_prefetch.h"
+#include "fe_ra.h"
 #include "fe_shelf.h"
 #include "fe_settings.h"
 #include "netfs.h"
@@ -101,12 +102,29 @@ bool PlayGame(const std::string& rom)
 				emu::CloseGame();
 				return true;
 			case emu::FrameResult::OpenCheats:
+				// 2.11: RetroAchievements' hardcore mode: no cheats (and no pause through the cheat list)
+				if (ra::HardcoreActive())
+				{
+					emu::Osd("%s", fe::T("Hardcore mode: cheats are off"));
+					emu::AfterMenu();
+					break;
+				}
 				fe::CheatMenu();
 				emu::AfterMenu();
 				ps5video::FillRect(0, 0, ps5video::kWidth, ps5video::kHeight, ps5video::Rgb(0, 0, 0));
 				ps5video::InvalidateSnes();
 				break;
 			case emu::FrameResult::OpenMenu:
+			{
+				// 2.11: in hardcore, RetroAchievements limits how often the game may be paused (pausing over and over
+				// would be a slow motion): rc_client_can_pause
+				int wait = 0;
+				if (!ra::CanPause(&wait))
+				{
+					emu::Osd(fe::T("Hardcore mode: you can pause again in %d s"), wait);
+					emu::AfterMenu();
+					break;
+				}
 				switch (fe::PauseMenu())
 				{
 					case fe::PauseAction::Resume:
@@ -122,6 +140,7 @@ bool PlayGame(const std::string& rom)
 						return false;
 				}
 				break;
+			}
 		}
 	}
 }
@@ -284,6 +303,9 @@ int Run(int argc, char** argv)
 		AutoCheckUpdates();
 	}
 	fe::Config().Load();
+	// 2.11: RetroAchievements: with a saved login, a quiet login in the background (nothing at all without one)
+	if (have_data)
+		ra::Init();
 
 	if (have_data)
 	{
@@ -352,6 +374,7 @@ int Run(int argc, char** argv)
 	}
 
 	OrbisLog("[boot] leaving");
+	ra::Shutdown();
 	fe::ShelfShutdown();
 	fe::Config().Save();
 	emu::DeinitCore();

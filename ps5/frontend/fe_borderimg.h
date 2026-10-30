@@ -37,6 +37,10 @@ struct Image
 // exactly 1920x1080, 16 bits per channel, damaged.
 bool DecodePng(const uint8_t* data, size_t size, Image* out, std::string* why);
 
+// 2.11: a small PNG (a RetroAchievements badge, 64 x 64): any size up to max_side on each side, under 1 MiB. false
+// when it isn't one.
+bool DecodeSmallPng(const uint8_t* data, size_t size, int max_side, Image* out);
+
 // The window of a picture: the bounding box of the clear region (alpha below kClearAlpha, 4-connected) around the
 // centre pixel. false when the centre is not clear or the window is under kMinWindowW x kMinWindowH.
 bool FindWindow(const Image& img, ps5video::Rect* window, std::string* why);

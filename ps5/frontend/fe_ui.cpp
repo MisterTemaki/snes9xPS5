@@ -3,6 +3,7 @@
 
 #include "fe_ui.h"
 
+#include "fe_ra.h"
 #include "fe_settings.h"
 #include "fe_shortcuts.h"
 #include "fe_text.h"
@@ -82,6 +83,7 @@ bool NavReader::Repeat(uint32_t cur, uint32_t down, uint32_t bit, double now, in
 void Present()
 {
 	ps5video::Present(0, 0, 0, 0, true);
+	ra::Pump(); // 2.11: the RetroAchievements answers, on every menu screen
 }
 
 void Header(const char* subtitle)

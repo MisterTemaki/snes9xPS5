@@ -15,6 +15,7 @@
 #include "OrbisPaths.h"
 #include "ProsperoAppPlace.h"
 #include "ProsperoNotify.h"
+#include "ProsperoRaProxy.h"
 #include "ProsperoUpdate.h"
 #include "fe_coverworker.h"
 #include "fe_tlshttp.h"
@@ -381,6 +382,20 @@ bool ServeHelper(void (*on_ready)())
 				snprintf(req.msg1, sizeof(req.msg1), "%s", answer.c_str());
 			}
 			SendUntil(c, &req, sizeof(req), deadline);
+		}
+		else if (got == sizeof(req) && req.magic == kMagic && req.cmd == kCmdRetroAchievements)
+		{
+			// 2.11: a RetroAchievements request (ProsperoRaProxy.h), only for our own app (the title decides, as for the
+			// updater). Queued for the helper's own thread, which answers on this connection: this loop never waits for
+			// the server.
+			if (TitleOf(req.pid) != SNES9X_TITLE_ID)
+			{
+				OrbisLog("[helper] pid %d: RetroAchievements request refused: not our app", req.pid);
+				close(c);
+				continue;
+			}
+			raproxy::Take(c, req, deadline);
+			continue; // the connection is the proxy's now
 		}
 		else
 			OrbisLog("[helper] ignored a request of %zu bytes (magic %x, cmd %d)", got, req.magic, req.cmd);

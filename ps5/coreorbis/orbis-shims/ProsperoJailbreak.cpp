@@ -8,6 +8,7 @@
 
 #include <arpa/inet.h>
 #include <cerrno>
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <netinet/in.h>
@@ -249,6 +250,96 @@ bool UpdateRequest(const char* what, std::string& reply)
 	req.msg1[sizeof(req.msg1) - 1] = 0;
 	reply = req.msg1;
 	return true;
+}
+
+RaReply RaRequest(const std::string& url, const std::string& post, const std::string& user_agent,
+	std::atomic<int>* socket_out)
+{
+	RaReply r;
+	if (url.size() >= sizeof(Request::msg1) || user_agent.size() >= sizeof(Request::msg2) || post.size() > kRaMaxPost)
+	{
+		r.call = RaCall::HelperError;
+		r.helper_ret = kRaRefused;
+		r.why = "request too long";
+		return r;
+	}
+	const int fd = ConnectLocal(PortFromEnv("SNES9X_HELPER_PORT", kHelperPort));
+	if (fd < 0)
+	{
+		r.call = RaCall::NoHelper;
+		r.why = "no helper on the port";
+		return r;
+	}
+	// the server may take its time: kRaTimeoutSeconds per read (ConnectLocal set 5 s)
+	timeval tv = {kRaTimeoutSeconds, 0};
+	setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+	if (socket_out)
+		socket_out->store(fd);
+	Request req;
+	memset(&req, 0, sizeof(req));
+	req.magic = kMagic;
+	req.cmd = kCmdRetroAchievements;
+	req.pid = int32_t(getpid());
+	req.ret = int32_t(post.size());
+	snprintf(req.msg1, sizeof(req.msg1), "%s", url.c_str());
+	snprintf(req.msg2, sizeof(req.msg2), "%s", user_agent.c_str());
+	auto finish = [&](RaCall call, const char* why) {
+		if (socket_out)
+			socket_out->store(-1);
+		close(fd);
+		r.call = call;
+		if (why)
+			r.why = why;
+		return r;
+	};
+	if (!WriteAll(fd, &req, sizeof(req)) || !WriteAll(fd, post.data(), post.size()))
+	{
+		// a 2.10 helper reads the header, then closes: the body may meet a closed connection
+		size_t got = 0;
+		char b;
+		while (recv(fd, &b, 1, 0) > 0)
+			got++;
+		return finish(got == 0 ? RaCall::OldHelper : RaCall::HelperError, "the helper closed the connection");
+	}
+	size_t got = 0;
+	while (got < sizeof(req))
+	{
+		const ssize_t n = recv(fd, reinterpret_cast<char*>(&req) + got, sizeof(req) - got, 0);
+		if (n <= 0)
+			break;
+		got += size_t(n);
+	}
+	if (got == 0)
+		return finish(RaCall::OldHelper, "the helper closed the connection without an answer");
+	if (got != sizeof(req) || req.magic != kMagic || req.cmd != kCmdRetroAchievements)
+		return finish(RaCall::HelperError, "the helper's answer was cut short");
+	req.msg1[sizeof(req.msg1) - 1] = 0;
+	req.msg2[sizeof(req.msg2) - 1] = 0;
+	if (req.ret != kRaOk)
+	{
+		r.helper_ret = req.ret;
+		return finish(RaCall::HelperError, req.msg2);
+	}
+	unsigned long long len = 0;
+	int http = 0;
+	if (sscanf(req.msg1, "%d %llu", &http, &len) != 2 || len > kRaMaxAnswer)
+		return finish(RaCall::HelperError, "a malformed answer from the helper");
+	r.http = http;
+	r.body.resize(size_t(len));
+	size_t have = 0;
+	while (have < r.body.size())
+	{
+		const ssize_t n = recv(fd, &r.body[have], r.body.size() - have, 0);
+		if (n <= 0)
+			break;
+		have += size_t(n);
+	}
+	if (have != r.body.size())
+	{
+		r.body.clear();
+		return finish(RaCall::HelperError, "the answer was cut short");
+	}
+	return finish(RaCall::Answer, nullptr);
 }
 
 bool RequestForSelf(std::string& how)

@@ -44,9 +44,13 @@ enum class FrameResult
 FrameResult RunFrame();
 
 bool SaveState(int slot);
-bool LoadState(int slot);
+bool LoadState(int slot); // refused (false) while RetroAchievements' hardcore mode applies
 bool StateExists(int slot);
-void Reset();
+void Reset(); // also starts the achievements over (fe_ra.h)
+// 2.11: RetroAchievements' hardcore mode applies (fe_ra.h): no state may be loaded
+bool LoadStateRefused();
+// 2.11: hardcore mode started or stopped applying: the cheats off or on again, Transparency forced on or not
+void HardcoreChanged();
 void Osd(const char* fmt, ...) __attribute__((format(printf, 1, 2))); // message drawn in the picture
 
 // Redraws the last frame into the surface (the pause menu draws over it).

@@ -1,0 +1,23 @@
+rcheevos, RetroAchievements' client library, for Snes9x PS5 2.11 (RetroAchievements, frontend/fe_ra.cpp)
+
+Upstream:  https://github.com/RetroAchievements/rcheevos
+Version:   v12.5.0, the latest release tag on 2026-10-30 (tag commit 1433173220a7eaede6a9ed7a18e94117be1821e0,
+           2026-09-13)
+Licence:   MIT (LICENSE in this folder: Copyright (c) 2018 RetroAchievements.org)
+
+What is here: the tag's include/ and src/ folders, LICENSE, README.md and CHANGELOG.md, unchanged. Left out: the Visual
+Studio project and natvis files, Package.swift, module.modulemap, the test/ and validator/ folders.
+
+What is built (ps5/Makefile, RCHEEVOS_SRC): rc_client (src/rc_client.c), the server API (src/rapi: common, info,
+runtime, user; not the editor API), the runtime (src/rcheevos) and the hash (src/rhash: hash.c, hash_rom.c, md5.c),
+with RC_HASH_NO_DISC, RC_HASH_NO_ENCRYPTED and RC_HASH_NO_ZIP: Snes9x PS5 hashes only SNES ROMs, and unpacks .zip/.7z/.gz
+itself (frontend/fe_rahash.cpp) before it hands the ROM's bytes to rc_hash_generate_from_buffer. Not built:
+rc_client_external.c and rc_client_raintegration.c (RAIntegration is a Windows DLL), rc_libretro.c, rapi/rc_api_editor.c,
+and the disc, encrypted-file and zip hashers.
+
+Changes: none.
+
+Newer upstream commits after v12.5.0 (master on 2026-10-30) were looked at: 918ba6d fixes a buffer overflow in
+rc_client_get_user_agent_clause on the path of an external client (RAIntegration) only, which this build doesn't have
+(RC_CLIENT_SUPPORTS_EXTERNAL undefined); the others are refactors (rc_client.c split into files), null checks and
+other consoles. Update to the next release when there is one.

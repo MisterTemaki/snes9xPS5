@@ -7,6 +7,7 @@
 #include "fe_covers.h"
 #include "fe_games.h"
 #include "fe_i18n.h"
+#include "fe_ra.h"
 #include "fe_library.h"
 #include "fe_menu.h"
 #include "fe_osk.h"
@@ -1385,6 +1386,7 @@ std::string Shelf()
 		{
 			// nothing moved: flip a 1-pixel change so the loop still runs at the display's pace
 			ps5video::Present(0, 0, 1, 1, true);
+			ra::Pump(); // 2.11: the RetroAchievements login's answer, on the shelf too
 			continue;
 		}
 		dirty = false;
@@ -1570,6 +1572,7 @@ std::string Shelf()
 		DrawText((W - TextWidth(hint_fit.c_str(), 2)) / 2, H - 54, hint_fit.c_str(), 2, Rgb(205, 200, 228));
 
 		ps5video::Present(0, 0, 0, 0, true);
+		ra::Pump();
 		if (opened > 0)
 		{
 			OrbisLog("[shelf] first frame %.0f ms after the shelf opened (%zu game(s), from %s)", (Now() - opened) * 1000.0,
