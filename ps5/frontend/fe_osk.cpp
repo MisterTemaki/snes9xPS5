@@ -143,10 +143,13 @@ void DrawKey(const KeyBox& b, int row, const std::string& label, bool selected, 
 }
 } // namespace
 
-bool EditText(const std::string& title, std::string& text, bool secret, size_t max_len)
+bool EditText(const std::string& title, std::string& text, bool secret, size_t max_len,
+	const std::function<std::string(const std::string&)>& note)
 {
 	NavReader nav;
 	std::string work = text;
+	std::string noted, note_text; // the text the note was made for, and the note
+	bool have_note = false;
 	size_t cursor = work.size();
 	bool shift = false, symbols = false;
 	int row = 0, col = 0;
@@ -174,7 +177,18 @@ bool EditText(const std::string& title, std::string& text, bool secret, size_t m
 			ps5video::FillRect(cx, ty - 4, 4, kGlyphH * 5 + 8, kAccent);
 		char info[64];
 		snprintf(info, sizeof(info), T(CountChars(work) == 1 ? "%zu character" : "%zu characters"), CountChars(work));
-		DrawText(fx, fy + fh + 18, secret ? T("Hidden as you type.") : "", 2, kDim, false);
+		if (note && !secret)
+		{
+			if (!have_note || noted != work)
+			{
+				noted = work;
+				note_text = note(work);
+				have_note = true;
+			}
+			DrawText(fx, fy + fh + 14, FitText(note_text, 3, fw - 300).c_str(), 3, kAccent, false);
+		}
+		else
+			DrawText(fx, fy + fh + 18, secret ? T("Hidden as you type.") : "", 2, kDim, false);
 		DrawText(fx + fw - TextWidth(info, 2), fy + fh + 18, info, 2, kDim, false);
 
 		for (int r = 0; r <= kFnRow; r++)

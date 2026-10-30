@@ -16,6 +16,7 @@
 #include "fe_coverfetch.h"
 #include "fe_games.h"
 #include "fe_http.h"
+#include "fe_search.h"
 
 #include <atomic>
 #include <condition_variable>
@@ -98,6 +99,9 @@ public:
 
 	// The shelf, every frame: the selection (the worker loads around it) ...
 	void SetFocus(int index) { m_focus = index; m_wake.notify_one(); }
+	// ... and the order the shelf shows the games in (its view: a tab, maybe cut by a search, fe_search.h): the covers
+	// loaded and kept are the selection's neighbours in it. Start forgets it (the library's order).
+	void SetOrder(const std::vector<int>& view);
 	// ... and takes what is ready. Textures far from the focus are dropped to save memory and come back
 	// from the disk cache when needed.
 	void Collect(std::vector<CoverPtr>& slots, int keep_radius);
@@ -137,6 +141,8 @@ private:
 	std::condition_variable m_wake;
 	std::atomic<bool> m_quit{false};
 	std::atomic<int> m_focus{0};
+	search::ViewOrder m_order; // under m_lock
+	std::atomic<bool> m_order_changed{false}; // covers/priority.txt is written again
 	std::vector<uint8_t> m_state; // 0 to load, 1 loading, 2 loaded (resident on the shelf)
 	std::vector<uint8_t> m_fetched; // download tried this session
 	std::deque<std::pair<int, CoverPtr>> m_ready;

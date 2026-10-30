@@ -8,7 +8,9 @@
 #include "fe_games.h"
 #include "fe_i18n.h"
 #include "fe_menu.h"
+#include "fe_osk.h"
 #include "fe_prefetch.h"
+#include "fe_search.h"
 #include "fe_settings.h"
 #include "fe_tabs.h"
 #include "fe_text.h"
@@ -545,6 +547,9 @@ struct ShelfState
 	bool started = false;
 	bool downloads = true;
 	std::string tab_sel[tabs::kCount]; // each tab's selected game, kept between visits to the shelf
+	// 2.10: what the player typed in the shelf's search (fe_search.h), "" for none. It applies to whichever tab is open
+	// and stays while the app runs (a game played and left, another tab); it is not saved.
+	std::string search;
 };
 ShelfState& S()
 {
@@ -820,18 +825,28 @@ std::string Shelf()
 		const bool share_set_up = !netfs_shares().empty();
 		tab = tabs::Resolve(counts, want, tab_chosen || (want == tabs::Network && share_set_up), share_set_up);
 		view = tabs::View(st.games, tab);
+		// 2.10: the search cuts the tab to the games that match; sel, the covers' order and the skip keys all count in
+		// this view (Game(i) / Slot(i) map a place in it to the library)
+		view = search::Filter(st.games, view, st.search);
+		st.covers.SetOrder(view);
 		n = int(view.size());
-		const std::string& path = keep.empty() ? st.tab_sel[tab] : keep;
-		sel = 0;
-		for (int i = 0; i < n; i++)
-			if (Game(i).path == path)
-				sel = i;
+		// the game asked for, else the one the tab had selected (a search may have left either out), else the first
+		sel = -1;
+		for (const std::string* path : {&keep, static_cast<const std::string*>(&st.tab_sel[tab])})
+			for (int i = 0; i < n && sel < 0 && !path->empty(); i++)
+				if (Game(i).path == *path)
+					sel = i;
+		sel = std::max(sel, 0);
 		pos = float(sel);
 		sel_since = Now();
 		if (n > 0)
 			st.covers.SetFocus(view[size_t(sel)]);
 		cfg.last_tab = tab;
-		OrbisLog("[shelf] tab %s: %d game(s)", tabs::Name(tab), n);
+		if (st.search.empty())
+			OrbisLog("[shelf] tab %s: %d game(s)", tabs::Name(tab), n);
+		else
+			OrbisLog("[shelf] tab %s: %d of %d game(s) match the search \"%s\"", tabs::Name(tab), n, counts[tab],
+				st.search.c_str());
 	};
 	// what the shares answer, for the Network tab; true when a line changed (a second ticked, a share came or went)
 	auto RefreshNet = [&](double at) {
@@ -968,6 +983,9 @@ std::string Shelf()
 			{
 				st.downloads = cfg.covers_download;
 				st.covers.Start(st.games, cfg.covers_download && ShelfDownloads(), cfg.covers_download && BackgroundCovers());
+				st.covers.SetOrder(view);
+				if (n > 0)
+					st.covers.SetFocus(view[size_t(sel)]);
 				st.slots.assign(st.games.size(), nullptr);
 			}
 			ps5input::Poll();
@@ -1004,6 +1022,41 @@ std::string Shelf()
 				cfg.Save();
 				CoversRestartIfNeeded(st.games, cfg.covers_download, true, Loading);
 			}
+		}
+		if (down & SCE_PAD_BUTTON_CIRCLE)
+		{
+			// 2.10: search by name (fe_search.h). The on-screen keyboard covers the shelf, so the shelf changes when the
+			// text is done (OPTIONS); meanwhile the line under the field says how many games of the tab match. Cancel
+			// (Circle) leaves the shelf as it was; an empty text shows every game again.
+			const std::vector<int> whole = tabs::View(st.games, tab);
+			auto note = [&](const std::string& typed) -> std::string {
+				char line[160];
+				if (search::Query(typed).empty())
+					snprintf(line, sizeof(line), T("Nothing typed: all %d games"), int(whole.size()));
+				else
+				{
+					const int m = int(search::Filter(st.games, whole, typed).size());
+					if (m == 0)
+						snprintf(line, sizeof(line), "%s", T("No game matches"));
+					else
+						snprintf(line, sizeof(line), T(m == 1 ? "%d game matches" : "%d games match"), m);
+				}
+				return line;
+			};
+			std::string text = st.search;
+			if (EditText(T("Search: type part of a game's name (empty: all games)"), text, false, 64, note))
+			{
+				const std::string keep = n > 0 ? Game(sel).path : std::string();
+				st.search = search::Query(text).empty() ? std::string() : text;
+				if (n > 0)
+					st.tab_sel[tab] = keep;
+				OpenTab(tab, keep);
+				OrbisLog("[shelf] search %s", st.search.empty() ? "cleared: every game" : ("\"" + st.search + "\"").c_str());
+			}
+			ps5input::Poll();
+			prev = ps5input::Pad(0).buttons;
+			last_status = -1;
+			dirty = true;
 		}
 		if (down & SCE_PAD_BUTTON_OPTIONS)
 		{
@@ -1145,6 +1198,17 @@ std::string Shelf()
 				sub += std::string("   ") + T("no cover");
 			CenterText(880, sub, 3, Rgb(175, 170, 205));
 		}
+		else if (!st.search.empty() && counts[tab] > 0)
+		{
+			// 2.10: the search left nothing on this tab: say so, and how to get the games back (never an empty shelf
+			// with no way out: Circle opens the search again, and an empty text shows them all)
+			char line[256];
+			snprintf(line, sizeof(line), T("No game matches \"%s\"."), st.search.c_str());
+			CenterText(330, line, 5, Rgb(240, 240, 250));
+			CenterText(450, T("The search looks in the names on the shelf and in the file names."), 3, Rgb(200, 200, 220));
+			CenterText(540, std::string(icon::Circle) + "  " + T("Change the search, or delete the text to see all games"), 4,
+				Rgb(200, 190, 255));
+		}
 		else if (tab == tabs::Network)
 		{
 			// PSFlycast's empty Network tab says what the share answered
@@ -1211,19 +1275,28 @@ std::string Shelf()
 		{
 			char notice[128];
 			snprintf(notice, sizeof(notice), T("Retrying %d missing covers (box art, then title screens)"), bulk_covers);
-			CenterText(950, notice, 3, Rgb(225, 220, 245));
+			CenterText(962, notice, 3, Rgb(225, 220, 245));
+		}
+		if (!st.search.empty())
+		{
+			// 2.10: the search that is on, and how many games of this tab it shows (under the selected game's lines, over
+			// the button hints)
+			char line[256];
+			snprintf(line, sizeof(line), T("Search: %s (%d)"), st.search.c_str(), n);
+			const std::string fit = FitText(std::string(icon::Circle) + "  " + line, 3, 1100);
+			DrawText((W - TextWidth(fit.c_str(), 3)) / 2, 928, fit.c_str(), 3, Rgb(215, 200, 255));
 		}
 		// hints
 		ps5video::DarkenRect(0, H - 78, W, 78);
-		const std::string sp = "      ";
+		const std::string sp = "     ";
 		const std::string hint = n > 0
-			? std::string(icon::Cross) + " " + T("Play") + sp + icon::DpadLeftRight + " " + T("Browse") + sp + icon::L1 + " " +
-				icon::R1 + " " + T("Tabs") + sp + icon::L2 + " " + icon::R2 + " " + T("Skip 10") + sp + icon::Triangle + " " +
-				T("Settings") + sp + icon::Square + " " + T(tab == tabs::Network ? "Scan again" : "Get cover") + sp + icon::R3 +
-				" " + T("Fix Covers") + sp + icon::Options + " " + T("Quit")
-			: std::string(icon::L1) + " " + icon::R1 + " " + T("Tabs") + sp + icon::Triangle + " " + T("Settings") + sp +
-				(tab == tabs::Network ? std::string(icon::Square) + " " + T("Scan again") + sp : std::string()) + icon::Options +
-				" " + T("Quit");
+			? std::string(icon::Cross) + " " + T("Play") + sp + icon::DpadLeftRight + " " + T("Browse") + sp + icon::Circle + " " +
+				T("Search") + sp + icon::L1 + " " + icon::R1 + " " + T("Tabs") + sp + icon::L2 + " " + icon::R2 + " " + T("Skip 10") +
+				sp + icon::Triangle + " " + T("Settings") + sp + icon::Square + " " + T(tab == tabs::Network ? "Scan again" : "Get cover") +
+				sp + icon::R3 + " " + T("Fix Covers") + sp + icon::Options + " " + T("Quit")
+			: std::string(icon::Circle) + " " + T("Search") + sp + icon::L1 + " " + icon::R1 + " " + T("Tabs") + sp + icon::Triangle +
+				" " + T("Settings") + sp + (tab == tabs::Network ? std::string(icon::Square) + " " + T("Scan again") + sp : std::string()) +
+				icon::Options + " " + T("Quit");
 		const std::string hint_fit = FitText(hint, 2, W - 40);
 		DrawText((W - TextWidth(hint_fit.c_str(), 2)) / 2, H - 54, hint_fit.c_str(), 2, Rgb(205, 200, 228));
 

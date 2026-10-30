@@ -6,6 +6,7 @@ Steps, one per line ('#' starts a comment):
     frame N          the next press happens at flip N
     press NAME [n]   NAME is UP DOWN LEFT RIGHT CROSS CIRCLE SQUARE TRIANGLE OPTIONS L1 R1 L2 R2; n times (default 1)
     field TEXT       Cross on a text row, TEXT typed on the keyboard, OPTIONS (Done)
+    type TEXT        TEXT typed on a keyboard that has just opened (no Cross before, no Done after: the shelf's search)
     wait N           N flips with no press
 
 Prints the script, "flip:hex buttons;..." ending with the last release, and the flip after it on stderr.
@@ -113,19 +114,22 @@ class Script:
         self.press("CROSS")
         self.shift = False
 
-    def field(self, text):
-        self.press("CROSS")
+    def type_text(self, text):
         self.row = self.col = 0
         self.shift = self.symbols = False
         for ch in text:
             self.type_char(ch)
+
+    def field(self, text):
+        self.press("CROSS")
+        self.type_text(text)
         self.press("OPTIONS")
 
 
 def main():
     s = Script()
     for line in sys.stdin:
-        line = line.split("#", 1)[0].strip() if not line.lstrip().startswith("field") else line.strip()
+        line = line.split("#", 1)[0].strip() if not line.lstrip().startswith(("field", "type")) else line.strip()
         if not line:
             continue
         cmd, _, arg = line.partition(" ")
@@ -138,6 +142,8 @@ def main():
             s.press(parts[0], int(parts[1]) if len(parts) > 1 else 1)
         elif cmd == "field":
             s.field(arg)
+        elif cmd == "type":
+            s.type_text(arg)
         else:
             raise SystemExit("unknown step: " + line)
     print("0:0;" + ";".join("%d:%x" % e for e in s.events))

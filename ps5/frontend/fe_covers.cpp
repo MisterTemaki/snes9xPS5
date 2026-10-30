@@ -645,6 +645,7 @@ void CoverService::Start(const std::vector<GameInfo>& games, bool allow_download
 	m_quit = false;
 	m_state.assign(games.size(), 0);
 	m_fetched.assign(games.size(), 0);
+	m_order.Clear(games.size());
 	m_ready.clear();
 	m_downloaded = 0;
 	int need = 0;
@@ -668,6 +669,16 @@ void CoverService::Stop()
 	m_http.Term();
 }
 
+void CoverService::SetOrder(const std::vector<int>& view)
+{
+	{
+		std::lock_guard<std::mutex> lock(m_lock);
+		m_order.Set(view, m_games.size());
+	}
+	m_order_changed = true;
+	m_wake.notify_one();
+}
+
 void CoverService::Collect(std::vector<CoverPtr>& slots, int keep_radius)
 {
 	if (slots.size() != m_games.size())
@@ -682,7 +693,7 @@ void CoverService::Collect(std::vector<CoverPtr>& slots, int keep_radius)
 	}
 	const int focus = m_focus;
 	for (size_t i = 0; i < slots.size(); i++)
-		if (slots[i] && std::abs(int(i) - focus) > keep_radius)
+		if (slots[i] && !m_order.Near(int(i), focus, keep_radius))
 		{
 			slots[i] = nullptr;
 			if (m_state[i] == 2)
@@ -819,9 +830,13 @@ void CoverService::Run()
 	{
 		const int focus = m_focus;
 		int best = -1;
-		for (int i = std::max(0, focus - kLoadRadius); i <= std::min(int(m_games.size()) - 1, focus + kLoadRadius); i++)
-			if (m_state[size_t(i)] == 0 && (best < 0 || std::abs(i - focus) < std::abs(best - focus)))
+		// the nearest cover not loaded yet, in the shelf's order (2.10: its view, fe_search.h; the library's before)
+		for (int i : m_order.Around(focus, kLoadRadius))
+			if (m_state[size_t(i)] == 0)
+			{
 				best = i;
+				break;
+			}
 		if (best >= 0)
 		{
 			m_state[size_t(best)] = 1;
@@ -883,13 +898,15 @@ void CoverService::Run()
 
 void CoverService::PollBackground(int focus)
 {
-	const int lo = std::max(0, focus - kLoadRadius), hi = std::min(int(m_games.size()) - 1, focus + kLoadRadius);
+	// the games around the selection in the shelf's order, nearest first
+	std::vector<int> around;
 	// 1. covers the helper saved since: their placeholder cards are loaded again
 	std::vector<int> cards;
 	std::map<int, long long> refetching;
 	{
 		std::lock_guard<std::mutex> lock(m_lock);
-		for (int i = lo; i <= hi; i++)
+		around = m_order.Around(focus, kLoadRadius);
+		for (int i : around)
 			if (m_state[size_t(i)] == 2 && m_placeholder[size_t(i)])
 				cards.push_back(i);
 		refetching = m_refetching;
@@ -924,19 +941,17 @@ void CoverService::PollBackground(int focus)
 		}
 	}
 	// 2. the covers around the selection go first: covers/priority.txt, nearest first
-	if (focus != m_prio_focus)
+	if (m_order_changed.exchange(false) || focus != m_prio_focus)
 	{
 		m_prio_focus = focus;
 		std::string text;
-		for (int d = 0; d <= kLoadRadius; d++)
-			for (int sgn = -1; sgn <= 1; sgn += 2)
-			{
-				const int i = focus + sgn * d;
-				if ((d == 0 && sgn > 0) || i < lo || i > hi || !NeedsDownload(i))
-					continue;
-				const GameInfo& game = m_games[size_t(i)];
-                text += ThumbnailName(CoverNameFor(game)) + ".png\t" + CoverUrlForGame(game) + "\n";
-			}
+		for (int i : around)
+		{
+			if (!NeedsDownload(i))
+				continue;
+			const GameInfo& game = m_games[size_t(i)];
+			text += ThumbnailName(CoverNameFor(game)) + ".png\t" + CoverUrlForGame(game) + "\n";
+		}
 		if (text != m_last_prio)
 		{
 			m_last_prio = text;
