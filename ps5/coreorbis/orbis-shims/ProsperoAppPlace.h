@@ -44,4 +44,3 @@ struct AppPlace
 // the mount table ("<mount point>|<fs type>|<from>|ro or rw;..." in mount order; a path takes the longest mount point
 // it is in, the last of a point's mounts), SNES9X_HOST_NO_STATFS / SNES9X_HOST_NO_GETFSSTAT make those fail.
 AppPlace FindAppPlace(const std::string& title_id, const std::string& default_dir);
-

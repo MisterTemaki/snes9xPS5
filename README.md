@@ -18,12 +18,12 @@ Everything outside `ps5/` is the original Snes9x source, unchanged, apart from t
 [README-Snes9x.md](README-Snes9x.md)) and, since 2.9, a `.7z` case in the ROM loader (`memmap.cpp`, `memmap.h`: the
 archive is unpacked by the port, `ps5/frontend/fe_7z.cpp`).
 
-> **Status (2.9):** 2.6 runs on the console: the app opens from its icon, the shelf, the controller, video and sound
-> work, and games play. 2.7's new parts (network shares, shelf tabs, borders), 2.8's Smooth picture and 2.9's `.7z`
-> games have **not been run on a PS5 yet**. It
-> builds with the ps5-payload-dev SDK and passes 415 host tests (one, the sound-queue timing, depends on the test
-> machine's load), which run the same code on Linux with the PS5 calls simulated, plus the network-share unit and
-> loopback tests. If something fails, turn on Settings, Debug logs: the logs in `/data/snes9x/logs/` say where.
+> **Status (2.10):** 2.6 runs on the console: the app opens from its icon, the shelf, the controller, video and sound
+> work, and games play. 2.7's new parts (network shares, shelf tabs, borders), 2.8's Smooth picture, 2.9's `.7z`
+> games and 2.10's search and fixes have **not been run on a PS5 yet**. It
+> builds with the ps5-payload-dev SDK and passes 462 host tests (one, the sound-queue timing, depends on the test
+> machine's load), which run the same code on Linux with the PS5 calls simulated, plus the network-share, search and
+> other unit and loopback tests. If something fails, turn on Settings, Debug logs: the logs in `/data/snes9x/logs/` say where.
 
 ## How it works (the PS5SX2 model)
 
@@ -52,9 +52,23 @@ written to PS5SX2's folders (`/data/PCSX2`, `/data/homebrew/PPSA99203`).
 
 ## Versions
 
-Every release carries its version in the file name: `Snes9xPS5-v2.9.elf` and `snes9x-ps5-v2.9-src.zip`
+Every release carries its version in the file name: `Snes9xPS5-v2.10.elf` and `snes9x-ps5-v2.10-src.zip`
 (`make dist`). When updating, replace the old ELF with the new one in your autoload or Payload Manager. In this
 README, "`Snes9xPS5.elf`" always means the current release's ELF.
+
+**2.10:** **Search by name on the shelf**: **Circle** opens the on-screen keyboard; type part of a game's name and the
+shelf shows only the games that match (capitals and accents don't matter: `pokemon` finds *Pokémon*; the file name
+counts too). See [Search](#search-by-name). With it, the fixes of a full code audit:
+- **C++ exceptions:** the app's C++ runtime was split between its own copy and the console's (the mix that made Stella
+  PS5 1.0 crash at its first exception); it is now entirely the app's own, and a failed memory allocation is reported
+  instead of stopping the app. A check at every build refuses an app that would need a module a title can't load.
+- **Updates with ShadowMountPlus:** when ShadowMountPlus runs the app from another folder (a USB or extended drive, or
+  another folder it scans), an update (from Settings, Updates, or a new payload) now goes into that folder, through
+  ShadowMountPlus's mount; up to 2.9 it went into `/data/homebrew/PPSA99922`, so the copy the console runs stayed old.
+  An app inside an image ShadowMountPlus mounted is never written: the message says to update the image.
+- The helper's HTTPS: a malformed answer can't make it read past its limit, and a redirect from HTTPS to plain HTTP is
+  not followed. A rebuild with a new version number now rebuilds what carries it. The crash report catches SIGSYS and
+  is written whole; with the debug logs on, each step of a game's start is logged.
 
 **2.9:** **7-Zip archives (`.7z`)**, asked for by CroCop86: a `.7z` holding a ROM is a game, as a `.zip` is, on the
 console's drive, USB drives and network shares. It is named by the CRC the archive stores (so it gets its No-Intro
@@ -158,7 +172,10 @@ From 2.6 on, the app updates itself from this repository's GitHub releases, as
   against the zip's own list (`PPSA99922/manifest.sha256`). Each file is written beside the old one, then all are
   put in place with `eboot.bin` last; files the new version no longer has are removed, and the home screen's
   copy of the art is refreshed. If anything fails before that, nothing has changed.
-- Only `/data/homebrew/PPSA99922/` changes. Games, saves and settings aren't touched.
+- Only the app's folder changes: `/data/homebrew/PPSA99922/`, or, since 2.10, the folder ShadowMountPlus runs the app
+  from (a USB or extended drive's `homebrew` folder, say), written through its mount. An app inside an image
+  ShadowMountPlus mounted (`.ffpkg`, `.exfat`...) can't be updated this way: the screen says so, and nothing is
+  downloaded. Games, saves and settings aren't touched.
 - **Your autoload:** the app updated this way is newer than the ELF in your autoload. The older ELF sees that and
   leaves the app alone (its notification says so), and its helper still serves the newer app. Put the new ELF in
   your autoload when you can: a new version may come with a new helper.
@@ -184,10 +201,10 @@ notification of the app to Spanish (Español), Portuguese (Brazil) (Português (
 
 1. **Send `Snes9xPS5.elf`** with PS5 Payload Manager, or from a PC on the same network:
    ```sh
-   nc -q0 PS5_IP 9021 < Snes9xPS5-v2.9.elf
+   nc -q0 PS5_IP 9021 < Snes9xPS5-v2.10.elf
    ```
    It installs the app in `/data/homebrew/PPSA99922/` (`eboot.bin`, `sce_module/libc.prx`, `param.json`, the
-   icon and the backgrounds), shows **"Snes9x PS5 2.9 installed. Open it from the Snes9x PS5 icon on the home
+   icon and the backgrounds), shows **"Snes9x PS5 2.10 installed. Open it from the Snes9x PS5 icon on the home
    screen."** and stays running as the helper.
 2. **Open the Snes9x PS5 icon.** The game shelf appears and the controller works.
 3. **Copy your ROMs** (`.sfc .smc .swc .fig .bs .st .zip .7z .gz`) to `/data/snes9x/roms`, over FTP for example, or
@@ -346,9 +363,26 @@ On the test PC a frame takes about 15 ms on 2 cores.
 | L1 / R1 | next / previous tab (Internal, USB, Network) |
 | L2 / R2 | skip 10 games |
 | Cross | play |
+| Circle | search by name (see [Search](#search-by-name)) |
 | Triangle | settings |
 | Square | download this game's cover again (the cover it has stays until the new one has arrived); on the Network tab: scan the shares again |
+| R3 | look again for the covers that are missing (box art, then title screens) |
 | OPTIONS | quit Snes9x (asks first) |
+
+### Search by name
+
+**Circle** on the shelf opens the on-screen keyboard (D-pad and Cross type; Square deletes, Triangle is a space, L2 is
+Shift, R2 the symbols page; **OPTIONS** is Done, **Circle** cancels). Type part of a game's name; the line under the
+field says how many games match as you type. Done shows only those games on the shelf, with **Search: mario (3)**
+under the selected game.
+
+- A game matches when the text is part of the name the shelf shows or of its file name. Capitals and accents don't
+  matter (`pokemon` finds *Pokémon*, `zelda3` finds a `zelda3.smc` the shelf calls *The Legend of Zelda*).
+- **Circle** again opens the keyboard with the text: change it, or delete it all and press Done to see every game.
+  Cancel leaves the shelf as it was.
+- When nothing matches, the shelf says so and how to get the games back.
+- The search applies to the open tab and stays when you change tabs, play a game and come back; it is forgotten when
+  the app closes.
 
 **In a game** (buttons by position, as on the SNES pad)
 
@@ -641,7 +675,10 @@ If something fails, send the files in `/data/snes9x/logs/`: `boot.log` (the app)
 - the controller handle and its first read;
 - the shelf and the cover thread, stage by stage.
 
-Since 1.6.1, if the app dies on a signal (the PS5's "Game or App Error" screen), a `== CRASH ==` block is written
+With the debug logs on, `boot.log` also says `[boot] exceptions: ok (...)` at the start (a check that C++ exceptions
+work in the app, 2.10) and `[emu] start: <step>` for each step of a game's start.
+
+Since 1.6.1, if the app dies on a signal (the PS5's "Game or App Error" screen, SIGSYS included since 2.10), a `== CRASH ==` block is written
 at the end of `boot.log`: the signal, the address, the **stage** each thread was in (`stage[...]`), and the return
 addresses. That block points to the exact line of code that failed.
 
@@ -662,15 +699,17 @@ make ps5 -j$(nproc)              # build/ps5/Snes9xPS5.elf (installer + helper, 
 make send PS5_HOST=192.168.0.10  # sends it to elfldr (port 9021)
 make dist                        # build/dist/Snes9xPS5-v<version>.elf, the release zip, the source zip
 make app                         # only build/app/PPSA99922/, to copy by hand
-make test                        # Linux builds (app, installer, helper) + 222 tests (ASan/UBSan)
+make test                        # Linux builds (app, installer, helper) + 462 tests (ASan/UBSan) and the unit tests
 ```
 
 The build has three stages:
 
 1. `Snes9xPS5-helper.elf`, the helper alone.
 2. `eboot.bin`: a PIE with the boilerplate's `app_crt.cpp` and the emulator's objects.
-   - It is linked against the SDK's stubs and static libc++, with `ps5-pie.ld` + `ehframe.ld` and every symbol
-     local.
+   - It is linked against the SDK's stubs and static libc++, libc++abi and libunwind (named first, so the whole C++
+     runtime is the app's own), with `ps5-pie.ld` + `ehframe.ld` and every symbol local.
+   - `tools/check_imports.py` then checks the PIE: only the system modules a title may load (the eleven of 2.9's
+     eboot), no symbol that only `libkernel_sys` / `libkernel_web` has, no C++ runtime symbol taken from the system.
    - Then it goes through `ps5-native-tool link` and `self --sign`, exactly like PS5SX2's `link-vk.sh`.
    - `libc.prx` goes with it, generated by `libc_builder` and checked against the published SHA-256
      (`proto/native/libc.prx.sha256`).
@@ -695,12 +734,14 @@ The build has three stages:
     `helper_data.cpp` builds the helper into the app;
   - `ProsperoInstall.cpp` + `install_data.cpp`: the app folder built into the installer, the install, and the
     `/user/appmeta` art;
+  - `ProsperoAppPlace.cpp`: where ShadowMountPlus runs the app from (the installer and the helper only: it reads the
+    mount table, which a title can't);
   - `ProsperoCrash.cpp`: the crash printer and stage markers;
   - `ProsperoNotify.cpp`: system notifications (the same kernel toast as PS5SX2);
   - `orbis_paths.cpp`: `/data/snes9x`, USB drives and the logs.
 - **`ps5/coreorbis/include-orbis/ProsperoSce.h`**: prototypes of the system functions (the SDK ships the import
   stubs but not the headers).
-- **`ps5/frontend/`**: the 3D shelf (`fe_shelf.cpp`), covers (`fe_covers.cpp`, `fe_prefetch.cpp`), the library
+- **`ps5/frontend/`**: the 3D shelf (`fe_shelf.cpp`, its search `fe_search.h`), covers (`fe_covers.cpp`, `fe_prefetch.cpp`), the library
   and No-Intro names (`fe_games.cpp`, `data/snes-nointro.tsv`), HTTPS (`fe_http.cpp`; the helper's own: `fe_tlshttp.cpp`, `fe_mbedtls_config.h`, `data/cacert.pem`, with
   Mbed TLS 3.6.7 in `third_party/mbedtls`), the helper's background downloads (`fe_coverworker.cpp`,
   `fe_coverfetch.cpp`), `.7z` archives (`fe_7z.cpp`, over the LZMA SDK in `third_party/lzma7z`), text with PS5SX2's fonts
