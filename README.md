@@ -21,7 +21,7 @@ archive is unpacked by the port, `ps5/frontend/fe_7z.cpp`).
 > **Status (2.10):** 2.6 runs on the console: the app opens from its icon, the shelf, the controller, video and sound
 > work, and games play. 2.7's new parts (network shares, shelf tabs, borders), 2.8's Smooth picture, 2.9's `.7z`
 > games and 2.10's search and fixes have **not been run on a PS5 yet**. It
-> builds with the ps5-payload-dev SDK and passes 497 host tests (one, the sound-queue timing, depends on the test
+> builds with the ps5-payload-dev SDK and passes 509 host tests (one, the sound-queue timing, depends on the test
 > machine's load), which run the same code on Linux with the PS5 calls simulated, plus the network-share, search and
 > other unit and loopback tests. If something fails, turn on Settings, Debug logs: the logs in `/data/snes9x/logs/` say where.
 
@@ -285,11 +285,17 @@ author's line with the GitHub mark: **github.com/MisterTemaki** (PS5SX2 shows it
   - **First start** (or no saved list, or a saved list that is damaged or from another format version): the shelf
     scans the folders as before, with "Looking for games..." and its progress, and then saves the list.
   - **Later starts:** the shelf appears at once from the saved list (the games of a USB or extended drive that isn't
-    plugged in are left out) while the folders are checked in the background, with nothing on the screen. If
+    plugged in are left out) while the folders are checked in the background, with nothing on the screen (if the
+    console refuses the app a second thread, that check runs before the shelf, with "Looking for games..."). If
     games were added, removed or renamed, the shelf updates quietly: the tab, the search and the selected game stay
     (if that game is gone, its neighbour is selected).
-  - **Back from a game:** the shelf comes back as it was, with no scan. The folders are only checked again (in the
-    background) when a drive was plugged in or removed during the game.
+  - **Back from a game:** the shelf comes back as it was, with no scan. The folders are checked again, in the
+    background, only when:
+    - a USB or extended drive was plugged in or removed, or a network share connected or dropped, during the game
+      (an unplugged drive's games leave the shelf at once);
+    - the check of the start had not finished when the game started (it is stopped for the game, and runs again);
+    - the game you picked turned out to be missing;
+    - games on a share were named by their CRC in the background meanwhile (their names come with the check).
   - A game deleted since the last start may still be on the shelf for a moment: picking it says "The file is no
     longer there." and returns to the shelf, which then drops it.
   - **Covers of new games** found by the background check: the Snes9x helper downloads them in the background as
@@ -720,7 +726,7 @@ make ps5 -j$(nproc)              # build/ps5/Snes9xPS5.elf (installer + helper, 
 make send PS5_HOST=192.168.0.10  # sends it to elfldr (port 9021)
 make dist                        # build/dist/Snes9xPS5-v<version>.elf, the release zip, the source zip
 make app                         # only build/app/PPSA99922/, to copy by hand
-make test                        # Linux builds (app, installer, helper) + 497 tests (ASan/UBSan) and the unit tests
+make test                        # Linux builds (app, installer, helper) + 509 tests (ASan/UBSan) and the unit tests
 ```
 
 The build has three stages:
