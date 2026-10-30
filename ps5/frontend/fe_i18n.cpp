@@ -441,6 +441,45 @@ const Entry kTable[] = {
 		"Buscar: digite parte do nome de um jogo (vazio: todos os jogos)",
 		"Rechercher : tapez une partie du nom d'un jeu (vide : tous les jeux)",
 		"Suchen: einen Teil eines Spielnamens eingeben (leer: alle Spiele)"},
+	// ---- why an update can't go where ShadowMount+ runs the app (coreorbis/orbis-shims/ProsperoPlaceText.h, 2.10)
+	{"Snes9x PS5 runs from an image ShadowMount+ mounted (%s): an update can't be written into it. Update the image with "
+	 "the new version's folder.",
+		"Snes9x PS5 se ejecuta desde una imagen montada por ShadowMount+ (%s): no se puede escribir una actualización en "
+		"ella. Actualiza la imagen con la carpeta de la nueva versión.",
+		"O Snes9x PS5 roda a partir de uma imagem montada pelo ShadowMount+ (%s): não é possível gravar uma atualização "
+		"nela. Atualize a imagem com a pasta da nova versão.",
+		"Snes9x PS5 tourne depuis une image montée par ShadowMount+ (%s) : impossible d'y écrire une mise à jour. Mettez "
+		"l'image à jour avec le dossier de la nouvelle version.",
+		"Snes9x PS5 läuft aus einem von ShadowMount+ eingebundenen Image (%s): Dort kann kein Update geschrieben werden. "
+		"Aktualisiere das Image mit dem Ordner der neuen Version."},
+	{"Snes9x PS5 runs from %s, which is read-only: an update can't be written there. Update that folder by hand.",
+		"Snes9x PS5 se ejecuta desde %s, que es de solo lectura: no se puede escribir una actualización ahí. Actualiza esa "
+		"carpeta a mano.",
+		"O Snes9x PS5 roda a partir de %s, que é somente leitura: não é possível gravar uma atualização ali. Atualize essa "
+		"pasta manualmente.",
+		"Snes9x PS5 tourne depuis %s, en lecture seule : impossible d'y écrire une mise à jour. Mettez ce dossier à jour à "
+		"la main.",
+		"Snes9x PS5 läuft aus %s, das schreibgeschützt ist: Dort kann kein Update geschrieben werden. Aktualisiere diesen "
+		"Ordner von Hand."},
+	{"Snes9x PS5 runs from %s, where no file can be written: the update can't be installed. Update that folder by hand.",
+		"Snes9x PS5 se ejecuta desde %s, donde no se puede escribir ningún archivo: la actualización no se puede instalar. "
+		"Actualiza esa carpeta a mano.",
+		"O Snes9x PS5 roda a partir de %s, onde nenhum arquivo pode ser gravado: a atualização não pode ser instalada. "
+		"Atualize essa pasta manualmente.",
+		"Snes9x PS5 tourne depuis %s, où aucun fichier ne peut être écrit : la mise à jour ne peut pas être installée. "
+		"Mettez ce dossier à jour à la main.",
+		"Snes9x PS5 läuft aus %s, wo keine Datei geschrieben werden kann: Das Update lässt sich nicht installieren. "
+		"Aktualisiere diesen Ordner von Hand."},
+	{"ShadowMount+ runs Snes9x PS5 from %s, which isn't there now (a drive not connected?). Nothing was written: try "
+	 "again once it is.",
+		"ShadowMount+ ejecuta Snes9x PS5 desde %s, que ahora no está (¿una unidad sin conectar?). No se escribió nada: "
+		"inténtalo de nuevo cuando esté.",
+		"O ShadowMount+ roda o Snes9x PS5 a partir de %s, que não está lá agora (uma unidade desconectada?). Nada foi "
+		"gravado: tente de novo quando estiver.",
+		"ShadowMount+ lance Snes9x PS5 depuis %s, qui n'est pas là pour l'instant (un disque non branché ?). Rien n'a été "
+		"écrit : réessayez quand il le sera.",
+		"ShadowMount+ startet Snes9x PS5 aus %s, das gerade nicht da ist (ein Laufwerk nicht angeschlossen?). Nichts wurde "
+		"geschrieben: Versuche es erneut, sobald es da ist."},
 	// ---- the on-screen keyboard (its title says what the field is)
 	{"Server: an IP address like 192.168.1.50", "Servidor: una dirección IP como 192.168.1.50",
 		"Servidor: um endereço IP como 192.168.1.50", "Serveur : une adresse IP comme 192.168.1.50",

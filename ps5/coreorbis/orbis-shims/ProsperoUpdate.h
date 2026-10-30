@@ -73,6 +73,9 @@ void Init(const Config& config, Fetch fetch);
 // Where the update goes (the helper looks it up before each check and install, ProsperoAppPlace.h); cant_install: why
 // it can't go there ("" when it can). An install under way keeps the folder it started with.
 void SetPlace(const std::string& app_dir, const std::string& cant_install);
+// 2.10 review: where to look the place up -- called at the start of each check and install, on the updater's own thread
+// (it touches the app's folder, which may be on a slow drive: the helper's request loop answers the app within 5 s)
+void SetPlaceLookup(std::function<void()> lookup);
 // The version installed (the app says which when it asks: a helper of an older build may be the one running).
 void SetCurrentVersion(const std::string& version);
 const Config& CurrentConfig();

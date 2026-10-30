@@ -411,6 +411,7 @@ Release g_found;
 bool g_busy = false;
 bool g_notify = false;
 std::function<void(const std::string&)> g_on_newer;
+std::function<void()> g_place_lookup; // set once at the start, before any thread
 std::atomic<size_t> g_bytes{0}, g_files{0}, g_files_total{0};
 
 std::string ApiUrl()
@@ -422,6 +423,8 @@ std::string ApiUrl()
 
 void* CheckMain(void*)
 {
+	if (g_place_lookup)
+		g_place_lookup();
 	std::vector<uint8_t> data;
 	const std::string url = ApiUrl();
 	OrbisLog("[update] checking %s", url.c_str());
@@ -465,10 +468,21 @@ void* CheckMain(void*)
 
 void* InstallMain(void*)
 {
+	if (g_place_lookup)
+		g_place_lookup(); // the folder as it is now (2.10 review: here, not in the helper's request)
 	Release r;
-	Config c; // 2.10: a copy, taken under the lock (the helper's request loop sets the version and the place meanwhile)
+	Config c; // 2.10: a copy, taken under the lock (the helper's request loop sets the version meanwhile)
 	{
 		std::lock_guard<std::mutex> l(g_mu);
+		if (!g_config.cant_install.empty())
+		{
+			// said before anything is downloaded
+			OrbisLog("[update] not installed: %s", g_config.cant_install.c_str());
+			g_busy = false;
+			g_status.phase = Phase::Failed;
+			g_status.error = g_config.cant_install;
+			return nullptr;
+		}
 		r = g_found;
 		c = g_config;
 		g_status.phase = Phase::Downloading;
@@ -730,6 +744,12 @@ void Init(const Config& config, Fetch fetch)
 	std::lock_guard<std::mutex> l(g_mu);
 	g_config = config;
 	g_fetch = std::move(fetch);
+}
+
+void SetPlaceLookup(std::function<void()> lookup)
+{
+	std::lock_guard<std::mutex> l(g_mu);
+	g_place_lookup = std::move(lookup);
 }
 
 void SetPlace(const std::string& app_dir, const std::string& cant_install)

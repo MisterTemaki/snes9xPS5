@@ -21,20 +21,23 @@ struct AppPlace
 	std::string fs;     // the source's file system ("ufs", "exfatfs", "nullfs"...), "" when unknown
 	bool writable = true;
 	bool image = false;  // the source is inside an image mounted by ShadowMount+ (under /mnt/shadowmnt)
-	bool unsure = false; // the folder couldn't be identified for sure (or isn't there): nothing is written anywhere
+	bool unsure = false; // ShadowMount+ names a folder that isn't there now: nothing is written anywhere
+	bool fallback = false; // 2.10 review: a mount that can't be read as ShadowMount+'s: default_dir, as 2.9 wrote
 	bool via_link = false; // no mount yet: the folder from ShadowMount+'s link (/user/app/<TITLE_ID>/mount.lnk)
 	bool image_pending = false; // that folder is in an image ShadowMount+ hasn't mounted yet (not written)
-	std::string reason; // !writable: why, a sentence for the user (English, through T())
+	std::string reason; // !writable: why, a sentence for the user (English; ProsperoPlaceText.h, translated by the app)
 	std::string log;    // what was found, for boot.log
 };
 
-// The rules (an update is never written where it isn't sure to be the app the console runs):
+// The rules (never worse than 2.9, which always wrote default_dir; an image is never written):
 // - the mount's top layer must be nullfs (through it the files are written); under another layer (a backport's
 //   unionfs) the nullfs beneath gives the folder, written directly, never through the layer on top;
 // - the source named by the mount (f_mntfromname, cut at 87 bytes by the system) is used only when it is whole,
 //   its sce_sys/param.json names the app and its eboot.bin is the one the mount shows; otherwise only the mount;
 // - every folder written has a sce_sys/param.json naming the app;
-// - statfs(2) failing: getfsstat(2); neither answering while the mount point is there: nothing written;
+// - a read-only mount of a folder whose own file system takes files: the folder itself is written (2.10 review);
+// - statfs(2) failing: getfsstat(2); neither answering, a mount that isn't nullfs and has no nullfs layer, or a source
+//   that can't be identified: default_dir, as 2.9 (2.10 review: it wrote nothing before);
 // - no mount (a payload autoloaded before ShadowMount+ has mounted the app): ShadowMount+'s link
 //   /user/app/<TITLE_ID>/mount.lnk names the folder (not there: nothing written, no second copy; in an image -- under
 //   /mnt/shadowmnt, or mount_img.lnk beside it -- never written; a link that isn't an absolute path is ignored).

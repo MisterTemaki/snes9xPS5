@@ -8,6 +8,7 @@
 //
 // SPDX-License-Identifier: MIT
 #include "ProsperoAppPlace.h"
+#include "ProsperoPlaceText.h"
 
 #include <fcntl.h>
 #include <sys/stat.h>
@@ -232,15 +233,6 @@ bool IsImage(const MountInfo& u, const std::string& source)
 	return InImages(u.on) || InImages(source);
 }
 
-void SetImage(AppPlace& a)
-{
-	a.writable = false;
-	a.image = true;
-	a.reason = "Snes9x PS5 runs from an image that ShadowMount+ mounted (" + a.source +
-			   "): an update can't be written into it. Update the image the way you made it, with the new version's "
-			   "folder.";
-}
-
 std::string Line(const char* fmt, const std::string& a, const std::string& b = "", const std::string& c = "")
 {
 	char line[1024];
@@ -248,12 +240,44 @@ std::string Line(const char* fmt, const std::string& a, const std::string& b = "
 	return line;
 }
 
-void Unsure(AppPlace& a, const std::string& what, const std::string& log)
+// a reason for the user (ProsperoPlaceText.h): the template with the folder in it
+std::string Reason(const char* fmt, const std::string& folder)
+{
+	char text[1024];
+	snprintf(text, sizeof(text), fmt, folder.c_str());
+	return text;
+}
+
+void SetImage(AppPlace& a)
+{
+	a.writable = false;
+	a.image = true;
+	a.reason = Reason(placetext::kImage, a.source);
+}
+
+// The folder can't be told for sure, and the evidence says writing /data/homebrew would make a second copy (ShadowMount+
+// names a folder that isn't there now): nothing is written.
+void Unsure(AppPlace& a, const std::string& reason, const std::string& log)
 {
 	a.writable = false;
 	a.unsure = true;
-	a.reason = "Snes9x PS5: " + what + " Nothing is written (no second copy is made either).";
+	a.reason = reason;
 	a.log += log;
+}
+
+// 2.10 review: something is mounted on /system_ex/app/<TITLE_ID> that can't be read as ShadowMount+'s folder mount (no
+// mount table, not nullfs, a source that can't be identified). 2.9 wrote default_dir whatever was mounted; nothing says
+// that is wrong here, so it is done again (never worse than 2.9), and the log says why.
+void FallBack(AppPlace& a, const std::string& default_dir, const std::string& log)
+{
+	a.writable = true;
+	a.unsure = false;
+	a.fallback = true;
+	a.via_link = false;
+	a.mount.clear(); // the version compared and the folder written are default_dir's, as in 2.9
+	a.source = a.dir = default_dir;
+	a.reason.clear();
+	a.log += log + "; files go to " + default_dir + ", as 2.9 wrote them";
 }
 
 // a.source found: what it is on, and where its files can be written (candidates: through the mount first)
@@ -278,16 +302,30 @@ void Finish(AppPlace& a, const std::string& title_id, bool mount_ro, const std::
 		a.log += ": an image, not written";
 		return;
 	}
-	if (mount_ro || u.ro)
+	if (u.ok && u.ro)
 	{
 		a.writable = false;
-		a.reason = "Snes9x PS5 runs from " + a.source +
-				   ", which is read-only: an update can't be written there. Update that folder the way you put it there.";
+		a.reason = Reason(placetext::kReadOnly, a.source);
 		a.log += ": read-only, not written";
 		return;
 	}
-	std::string tried;
+	// 2.10 review: a read-only mount of a folder whose own file system takes files (a nullfs mounted ro over
+	// /data/homebrew/<TITLE_ID>): not through the mount, but the folder itself (2.9 wrote it too)
+	std::vector<std::string> usable;
 	for (const std::string& d : candidates)
+		if (!(mount_ro && d == a.mount))
+			usable.push_back(d);
+	if (mount_ro)
+		a.log += usable.empty() ? ": the mount is read-only" : ": the mount is read-only, the folder itself is written";
+	if (usable.empty())
+	{
+		a.writable = false;
+		a.reason = Reason(placetext::kReadOnly, a.source);
+		a.log += ", not written";
+		return;
+	}
+	std::string tried;
+	for (const std::string& d : usable)
 	{
 		tried += (tried.empty() ? "" : " nor ") + d;
 		if (NamesTitle(d, title_id) && CanWrite(d))
@@ -298,8 +336,7 @@ void Finish(AppPlace& a, const std::string& title_id, bool mount_ro, const std::
 		}
 	}
 	a.writable = false;
-	a.reason = "Snes9x PS5 runs from " + a.source + ", where it can't write a file: an update can't be "
-			   "installed there. Update that folder the way you put it there.";
+	a.reason = Reason(placetext::kNoWrite, a.source);
 	a.log += ": neither " + tried + " takes a file";
 }
 
@@ -369,10 +406,9 @@ void NoMount(AppPlace& a, const std::string& title_id, const std::string& defaul
 	if (!Exists(target))
 	{
 		a.source = a.dir = target;
-		Unsure(a,
-			"ShadowMount+ runs the app from " + target +
-				", which isn't there now (a drive not connected yet?). Send the payload again once it is.",
-			" and ShadowMount+'s link names " + target + ", which isn't there: not written");
+		Unsure(a, Reason(placetext::kGone, target),
+			" and ShadowMount+'s link names " + target + ", which isn't there: not written (" + default_dir +
+				" would be a second copy)");
 		return;
 	}
 	if (!NamesTitle(target, title_id))
@@ -404,8 +440,7 @@ AppPlace FindAppPlace(const std::string& title_id, const std::string& default_di
 		if (!have_table)
 		{
 			a.log = mount + ": ";
-			Unsure(a, "what is mounted on " + mount + " can't be read, so the folder the console runs isn't known.",
-				"neither statfs nor getfsstat answers: not written");
+			FallBack(a, default_dir, "neither statfs nor getfsstat answers");
 			return a;
 		}
 		top = Lookup(table, mount);
@@ -435,8 +470,7 @@ AppPlace FindAppPlace(const std::string& title_id, const std::string& default_di
 	a.log = mount + " is a " + top.type + " mount";
 	if (!layer)
 	{
-		Unsure(a, mount + " is a " + top.type + " mount, not ShadowMount+'s folder mount: the folder the console runs isn't known.",
-			", no nullfs mount of a folder under it: not written");
+		FallBack(a, default_dir, ", no nullfs mount of a folder under it");
 		return a;
 	}
 	if (!through_mount)
@@ -466,6 +500,6 @@ AppPlace FindAppPlace(const std::string& title_id, const std::string& default_di
 		Finish(a, title_id, top.ro, {mount});
 		return a;
 	}
-	Unsure(a, "the folder mounted on " + mount + " can't be identified for sure.", why + ": not written");
+	FallBack(a, default_dir, why);
 	return a;
 }

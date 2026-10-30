@@ -238,7 +238,8 @@ std::string EnvOr(const char* name, const char* fallback)
 // the mount --, else /data/homebrew/<TITLE_ID>. Up to 2.9 an update always went to /data/homebrew/<TITLE_ID>: for an app
 // that ShadowMount+ runs from a USB or extended drive (or another folder) it made a second copy there and left the copy
 // the console runs as it was. Looked up again before each check and install: the helper may have started (autoloaded)
-// before ShadowMount+ mounted the app.
+// before ShadowMount+ mounted the app. (2.10 review: on the updater's thread, at the start of each check and install --
+// it reads and writes in the app's folder, which may be on a slow drive -- not in the request the app waits 5 s for.)
 void RefreshPlace(bool log)
 {
 	const AppPlace p = FindAppPlace(SNES9X_TITLE_ID, EnvOr("SNES9X_PS5_HOMEBREW", "/data/homebrew") + "/" SNES9X_TITLE_ID);
@@ -268,14 +269,12 @@ void InitUpdater()
 		ProsperoNotify("Snes9x PS5 %s is available: Settings, Updates.", v.c_str());
 		ProsperoNotifyFlush();
 	});
-	RefreshPlace(true);
+	update::SetPlaceLookup([] { RefreshPlace(true); });
 }
 
 // One updater request from the app: "status", "check", "autocheck", "install", "ack". The answer: the status.
 std::string UpdateCommand(const char* what)
 {
-	if (!strcmp(what, "check") || !strcmp(what, "autocheck") || !strcmp(what, "install"))
-		RefreshPlace(strcmp(what, "autocheck") != 0);
 	if (!strcmp(what, "check"))
 		update::StartCheck(false);
 	else if (!strcmp(what, "autocheck"))
