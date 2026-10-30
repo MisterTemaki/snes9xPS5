@@ -9,6 +9,10 @@ whole chain works: CPU, PPU, the port's scaler and tiler, and the pad -> Snes9x 
 
 sram / sram2: an NTSC ROM with 2 KiB of battery RAM that writes $42 / $43 to its first byte ($70:0000), as a game
 saving does.
+ra (2.11, RetroAchievements): an NTSC ROM with 2 KiB of battery RAM that writes $5A to its second byte ($70:0001) at
+reset, and in each NMI counts the frames in work RAM $0011 (INC, wrapping at 256) and stores the joypad's high byte in
+$0010 ($80 while B is held). The fake server's achievements read those bytes (RetroAchievements' addresses $000010,
+$000011 and $020001: work RAM, then the cartridge RAM).
 msu: an NTSC ROM that also starts MSU-1 track 1 at full volume, playing and repeating (write $2004/$2005 =
 track 1, $2006 = volume $FF, $2007 = play + repeat), as an MSU-1 patched game does.
 """
@@ -18,8 +22,9 @@ import sys
 out = sys.argv[1]
 region = sys.argv[2] if len(sys.argv) > 2 else "ntsc"
 msu = region == "msu"
+ra = region == "ra"
 sram = {"sram": 0x42, "sram2": 0x43}.get(region)
-if msu or sram:
+if msu or sram or ra:
     region = "ntsc"
 
 rom = bytearray([0xFF] * 0x8000)
@@ -39,7 +44,10 @@ reset = bytes([
     0xA9, 0x03, 0x8D, 0x07, 0x20,  # LDA #$03; STA $2007  play + repeat
 ]) if msu else b"") + (bytes([
     0xA9, sram, 0x8F, 0x00, 0x00, 0x70,  # LDA #value; STA $700000  the battery RAM's first byte
-]) if sram else b"") + bytes([
+]) if sram else b"") + (bytes([
+    0xA9, 0x5A, 0x8F, 0x01, 0x00, 0x70,  # LDA #$5A; STA $700001  the battery RAM's second byte
+    0x64, 0x10, 0x64, 0x11,  # STZ $10; STZ $11   joypad copy, frame counter
+]) if ra else b"") + bytes([
     0xA9, 0x81, 0x8D, 0x00, 0x42,  # LDA #$81; STA $4200  NMI + auto joypad read
     0xCB,                    # loop: WAI
     0x80, 0xFD,              # BRA loop
@@ -47,7 +55,13 @@ reset = bytes([
 nmi = bytes([
     0x48,                    # PHA
     0xAD, 0x10, 0x42,        # LDA $4210       acknowledge NMI
+]) + (bytes([
+    0xE6, 0x11,              # INC $11         frame counter (work RAM $7E0011)
+]) if ra else b"") + bytes([
     0xAD, 0x19, 0x42,        # LDA $4219       joypad 1 high byte: B Y Sel Start U D L R
+]) + (bytes([
+    0x85, 0x10,              # STA $10         the joypad's high byte (work RAM $7E0010)
+]) if ra else b"") + bytes([
     0x29, 0x80,              # AND #$80        B
     0xF0, 0x0F,              # BEQ red
     0x9C, 0x21, 0x21,        # STZ $2121
@@ -66,9 +80,9 @@ rom[0x0100:0x0100 + len(nmi)] = nmi
 title = b"SNES9X PS5 TEST".ljust(21, b" ")
 rom[0x7FC0:0x7FD5] = title
 rom[0x7FD5] = 0x20          # LoROM, slow
-rom[0x7FD6] = 0x02 if sram else 0x00  # ROM + RAM + battery, or ROM only
+rom[0x7FD6] = 0x02 if (sram or ra) else 0x00  # ROM + RAM + battery, or ROM only
 rom[0x7FD7] = 0x05          # 32 KiB
-rom[0x7FD8] = 0x01 if sram else 0x00  # 2 KiB of battery RAM, or none
+rom[0x7FD8] = 0x01 if (sram or ra) else 0x00  # 2 KiB of battery RAM, or none
 rom[0x7FD9] = 0x01 if region == "ntsc" else 0x02  # USA / Europe
 rom[0x7FDA] = 0x00
 rom[0x7FDB] = 0x00

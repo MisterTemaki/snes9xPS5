@@ -72,6 +72,8 @@ bool SaveProgress(std::vector<uint8_t>* out);
 void LoadProgress(const std::vector<uint8_t>* data);
 // The game's achievements are loaded (the pause menu's Achievements list has something to show)
 bool GameHasSet();
+// The game's title on RetroAchievements ("" before its set is loaded)
+std::string GameTitle();
 // "3 of 10 achievements unlocked" (translated), or why there are none ("Unknown game"...), for the pause menu
 std::string GameSummary();
 

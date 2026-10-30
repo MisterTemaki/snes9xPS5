@@ -81,8 +81,8 @@ void RetroAchievementsMenu()
 		rows[I_BACK] = {T("Back"), ""};
 		Header("RetroAchievements");
 		DrawOptionBox("RetroAchievements", rows, sel, false);
-		// under the box: what is wrong, what hardcore does, what is kept
-		int y = 690;
+		// under the box (DrawOptionBox centres it: 4 rows end at y 703): what is wrong, what hardcore does, what is kept
+		int y = 740;
 		const std::string problem = ra::Problem();
 		if (!problem.empty())
 		{
@@ -160,7 +160,8 @@ void AchievementsMenu()
 		DrawText(bx + 40, 84, FitText(T("Achievements"), 5, bw / 2).c_str(), 5, kAccent);
 		const std::string summary = ra::GameSummary() + "  -  " + T(ra::HardcoreSetting() ? "Hardcore mode" : "Softcore mode");
 		DrawText(bx + bw - 40 - TextWidth(FitText(summary, 3, bw / 2).c_str(), 3), 100, FitText(summary, 3, bw / 2).c_str(), 3, kDim);
-		DrawText(bx + 40, 170, FitText(emu::GameName(), 3, bw - 80).c_str(), 3, kText);
+		const std::string title = ra::GameTitle().empty() ? emu::GameName() : ra::GameTitle();
+		DrawText(bx + 40, 170, FitText(title, 3, bw - 80).c_str(), 3, kText);
 		if (count == 0)
 			DrawText(bx + 40, list_y + 20, FitText(T("No achievements to show for this game."), 3, bw - 80).c_str(), 3, kDim);
 		for (int i = 0; i < visible && top + i < count; i++)

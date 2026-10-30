@@ -295,6 +295,11 @@ void Take(int fd, const jailbreak::Request& req_in, int64_t deadline_ms)
 			OrbisLogRedact(UrlDecode(*s));
 		}
 	job.what = Describe(job.url, job.post);
+#ifndef __PROSPERO__
+	// the host tests: the body logged on purpose, to show the password and the token never reach a log line
+	if (getenv("SNES9X_HOST_LOG_SECRETS"))
+		OrbisLog("[ra] (test) body of %s: %s", job.what.c_str(), job.post.c_str());
+#endif
 	if (got != job.post.size())
 	{
 		OrbisLog("[ra] pid %d: %s cut short (%zu of %zu bytes)", req.pid, job.what.c_str(), got, job.post.size());

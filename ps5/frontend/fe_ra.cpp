@@ -114,6 +114,26 @@ std::string Fmt(const char* fmt, ...)
 	return buf;
 }
 
+// A form value as rcheevos's URL builder writes it (letters, digits and -_.~ as they are, the rest as %XX): the password
+// also appears this way in the request's body, so both forms are kept out of the logs
+std::string FormEncoded(const std::string& v)
+{
+	static const char* hex = "0123456789ABCDEF";
+	std::string out;
+	for (unsigned char c : v)
+	{
+		if ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '-' || c == '_' || c == '.' || c == '~')
+			out += char(c);
+		else
+		{
+			out += '%';
+			out += hex[c >> 4];
+			out += hex[c & 15];
+		}
+	}
+	return out;
+}
+
 void Wipe(std::string& s)
 {
 	for (char& c : s)
@@ -250,9 +270,16 @@ void FetchBadge(const rc_client_achievement_t* ach)
 			return;
 		}
 	}
-	char url[512];
-	if (rc_client_achievement_get_image_url(ach, RC_CLIENT_ACHIEVEMENT_STATE_UNLOCKED, url, sizeof(url)) != RC_OK)
+	char buf[512];
+	if (rc_client_achievement_get_image_url(ach, RC_CLIENT_ACHIEVEMENT_STATE_UNLOCKED, buf, sizeof(buf)) != RC_OK)
 		return;
+	std::string url = buf;
+#ifndef __PROSPERO__
+	// the host tests: rc_client names the pictures' host itself; they come from the test server instead
+	const char* media = "https://media.retroachievements.org";
+	if (const char* host = getenv("SNES9X_RA_HOST"); host && url.compare(0, strlen(media), media) == 0)
+		url = host + url.substr(strlen(media));
+#endif
 	net::Send(url, std::string(), UserAgent(), "badge " + name, [name, file](const net::Answer& a) {
 		fe::border::Image img;
 		if (a.outcome != net::Outcome::Http || a.http != 200 ||
@@ -346,6 +373,11 @@ std::string WhatOf(const char* post)
 void ServerCall(const rc_api_request_t* request, rc_client_server_callback_t callback, void* callback_data, rc_client_t*)
 {
 	const std::string post = request->post_data ? request->post_data : "";
+#ifndef __PROSPERO__
+	// the host tests: the body logged on purpose, to show the password and the token never reach a log line
+	if (getenv("SNES9X_HOST_LOG_SECRETS"))
+		OrbisLog("[ra] (test) body: %s", post.c_str());
+#endif
 	net::Send(request->url, post, UserAgent(), WhatOf(request->post_data), [callback, callback_data](const net::Answer& a) {
 		rc_api_server_response_t r;
 		memset(&r, 0, sizeof(r));
@@ -484,6 +516,7 @@ void OnLogin(int result, const char* error_message, rc_client_t* client, void*)
 	{
 		// the password's request is answered: it is no longer anywhere
 		OrbisLogUnredact(g.password_sent);
+		OrbisLogUnredact(FormEncoded(g.password_sent));
 		Wipe(g.password_sent);
 	}
 	g.login_result = result;
@@ -494,7 +527,10 @@ void OnLogin(int result, const char* error_message, rc_client_t* client, void*)
 		g.login = Login::LoggedIn;
 		g.issue = Issue::None;
 		if (user->token)
+		{
 			OrbisLogRedact(user->token);
+			OrbisLogRedact(FormEncoded(user->token));
+		}
 		// the token, kept for the next start (written again only when it changed: a token login gets the same one)
 		std::string saved_user, saved_token;
 		ReadLogin(&saved_user, &saved_token);
@@ -520,6 +556,7 @@ void BeginTokenLogin(const std::string& user, std::string& token)
 	g.login_with_token = true;
 	g.login_tried_at = Now();
 	OrbisLogRedact(token);
+	OrbisLogRedact(FormEncoded(token));
 	OrbisLog("[ra] logging in as %s with the saved token", user.c_str());
 	rc_client_begin_login_with_token(g.client, user.c_str(), token.c_str(), OnLogin, nullptr);
 	Wipe(token);
@@ -675,6 +712,7 @@ void BeginLogin(const std::string& user, std::string& password)
 	// redacted from every log line until the server has answered (rc_client keeps it only to build the request)
 	g.password_sent = password;
 	OrbisLogRedact(password);
+	OrbisLogRedact(FormEncoded(password));
 	g.login = Login::Pending;
 	g.login_with_token = false;
 	g.login_tried_at = Now();
@@ -832,6 +870,12 @@ void LoadProgress(const std::vector<uint8_t>* data)
 bool GameHasSet()
 {
 	return g.client && g.game == GameRa::Active && rc_client_has_achievements(g.client);
+}
+
+std::string GameTitle()
+{
+	const rc_client_game_t* game = g.client && g.game == GameRa::Active ? rc_client_get_game_info(g.client) : nullptr;
+	return game && game->title ? game->title : "";
 }
 
 std::string GameSummary()
