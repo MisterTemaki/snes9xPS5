@@ -18,11 +18,13 @@ Everything outside `ps5/` is the original Snes9x source, unchanged, apart from t
 [README-Snes9x.md](README-Snes9x.md)) and, since 2.9, a `.7z` case in the ROM loader (`memmap.cpp`, `memmap.h`: the
 archive is unpacked by the port, `ps5/frontend/fe_7z.cpp`).
 
-> **Status (2.10):** 2.6 runs on the console: the app opens from its icon, the shelf, the controller, video and sound
+> **Status (2.11):** 2.6 runs on the console: the app opens from its icon, the shelf, the controller, video and sound
 > work, and games play. 2.10 was run on a PS5 before release: the shelf opened from its saved list (3,250 games on
-> a USB drive), the exceptions check passed, the search worked, a game played, and the update check ran. 2.7's
+> a USB drive), the exceptions check passed, the search worked, a game played, and the update check ran. 2.11's
+> **RetroAchievements have not been run on a PS5, nor against the real retroachievements.org**: they were tested on
+> Linux against a local stand-in of RetroAchievements' server (see [RetroAchievements](#retroachievements)). 2.7's
 > network shares and borders, 2.8's Smooth picture and 2.9's `.7z` games have **not been run on a PS5 yet**. It
-> builds with the ps5-payload-dev SDK and passes 509 host tests (one, the sound-queue timing, depends on the test
+> builds with the ps5-payload-dev SDK and passes 567 host tests (one, the sound-queue timing, depends on the test
 > machine's load), which run the same code on Linux with the PS5 calls simulated, plus the network-share, search and
 > other unit and loopback tests. If something fails, turn on Settings, Debug logs: the logs in `/data/snes9x/logs/` say where.
 
@@ -53,9 +55,17 @@ written to PS5SX2's folders (`/data/PCSX2`, `/data/homebrew/PPSA99203`).
 
 ## Versions
 
-Every release carries its version in the file name: `Snes9xPS5-v2.10.elf` and `snes9x-ps5-v2.10-src.zip`
+Every release carries its version in the file name: `Snes9xPS5-v2.11.elf` and `snes9x-ps5-v2.11-src.zip`
 (`make dist`). When updating, replace the old ELF with the new one in your autoload or Payload Manager. In this
 README, "`Snes9xPS5.elf`" always means the current release's ELF.
+
+**2.11:** **RetroAchievements** ([retroachievements.org](https://retroachievements.org)), with RetroAchievements' own
+client library, rcheevos 12.5.0: log in from Settings, RetroAchievements; games are recognised by their ROM, and
+achievements unlock as you play, with small notifications over the game, leaderboards, rich presence and an
+Achievements list in the pause menu. Hardcore mode is on by default (no loading of states, no cheats). Without an account
+nothing changes and nothing is sent. **Send the 2.11 payload once** (`Snes9xPS5-v2.11.elf`): the helper makes the
+requests, and a 2.10 helper doesn't know them. Not yet tried on a PS5 or against the real server: see
+[RetroAchievements](#retroachievements), and its note on hardcore mode.
 
 **2.10:** **Search by name on the shelf**: **Circle** opens the on-screen keyboard; type part of a game's name and the
 shelf shows only the games that match (capitals and accents don't matter: `pokemon` finds *Pokémon*; the file name
@@ -209,10 +219,10 @@ notification of the app to Spanish (Español), Portuguese (Brazil) (Português (
 
 1. **Send `Snes9xPS5.elf`** with PS5 Payload Manager, or from a PC on the same network:
    ```sh
-   nc -q0 PS5_IP 9021 < Snes9xPS5-v2.10.elf
+   nc -q0 PS5_IP 9021 < Snes9xPS5-v2.11.elf
    ```
    It installs the app in `/data/homebrew/PPSA99922/` (`eboot.bin`, `sce_module/libc.prx`, `param.json`, the
-   icon and the backgrounds), shows **"Snes9x PS5 2.10 installed. Open it from the Snes9x PS5 icon on the home
+   icon and the backgrounds), shows **"Snes9x PS5 2.11 installed. Open it from the Snes9x PS5 icon on the home
    screen."** and stays running as the helper.
 2. **Open the Snes9x PS5 icon.** The game shelf appears and the controller works.
 3. **Copy your ROMs** (`.sfc .smc .swc .fig .bs .st .zip .7z .gz`) to `/data/snes9x/roms`, over FTP for example, or
@@ -240,6 +250,7 @@ the helper is already running only installs and exits.
 | `/data/snes9x/borders` | borders around the picture (optional, see Borders) |
 | `/data/snes9x/logs` | `boot.log` (the app), `installer.log` (installer/helper), `helper.log` (the helper the app starts), and the previous session's `.prev.log` files |
 | `/data/snes9x/snes9x-ps5.ini` | the menu settings |
+| `/data/snes9x/retroachievements` | `login.txt`: your RetroAchievements login (the server's token, never your password; the owner's only); `badges/`: the achievement pictures already seen |
 | `/data/snes9x/snes9x.conf` | optional: Snes9x's own configuration file, for advanced options |
 
 ### The home-screen app
@@ -424,7 +435,7 @@ under the selected game.
 
 | Combination | Does |
 |---|---|
-| L3 + R3 | pause menu (save/load state, slot, cheat manager, controller shortcuts, the settings, reset, back to the list, quit) |
+| L3 + R3 | pause menu (save/load state, slot, cheat manager, controller shortcuts, Achievements and Hardcore mode with a RetroAchievements account, the settings, reset, back to the list, quit) |
 | L2 + R3 | cheat manager |
 | touchpad + OPTIONS | back to the game list |
 | L2 + Up / Down | save / load the state in the current slot |
@@ -452,6 +463,83 @@ and the choice is kept.
   `python3 ps5/tools/install_libretro_cheats.py --roms ./my-roms --database
   "./libretro-database/cht/Nintendo - Super Nintendo Entertainment System" --output ./ps5-cheats`, then copy
   `ps5-cheats/` to `/data/snes9x/cheats/`.
+
+## RetroAchievements
+
+[RetroAchievements](https://retroachievements.org) adds achievements, leaderboards and rich presence (what you are doing
+in the game, shown on your profile) to SNES games. Snes9x PS5 uses RetroAchievements' own client library, **rcheevos
+12.5.0** (MIT, `ps5/third_party/rcheevos`), through its `rc_client` interface, as current emulators do.
+
+**Logging in**
+
+1. Make an account on [retroachievements.org](https://retroachievements.org) (on a computer or a phone).
+2. On the shelf: **Triangle** (Settings) > **RetroAchievements** (the last row) > **Log in**.
+3. Type your user name on the on-screen keyboard (OPTIONS is Done), then your password: it is shown as `*****`.
+4. The screen says **Logged in as** *name* **(points)**; the Settings row says the same. Next time the app logs in by
+   itself at start, quietly. If that login no longer works (a changed password, an expired login), nothing pops up:
+   Settings, RetroAchievements says what is wrong and offers **Log in** again.
+5. **Log out** on the same screen deletes the saved login.
+
+Without an account nothing changes: the menus are 2.10's, and the app sends nothing to RetroAchievements.
+
+**Playing**
+
+- When a game starts, the app works out its RetroAchievements hash from the ROM (the way RetroAchievements does: the ROM
+  file without a copier header; for a `.zip`, `.7z` or `.gz` the ROM inside it, so a zipped ROM is the same game as the
+  loose one; ROMs on a network share and MSU-1 ROMs too) and asks for the game's achievements.
+- A small box at the bottom left of the picture says **N of M achievements unlocked** and whether hardcore is on, or **No
+  achievements for this game**, or **Unknown game: no achievements** (a ROM RetroAchievements doesn't know: a hack, a bad
+  dump, a different revision).
+- Each unlock shows its title, description, points and badge (the badge picture is downloaded once and kept in
+  `retroachievements/badges/`). Leaderboard attempts (started, failed, submitted, your rank), a mastered game, and the
+  live leaderboard value and challenge markers (top right) show the same way. The boxes never pause or slow the game and go
+  away by themselves after a few seconds.
+- **Pause menu > Achievements**: every achievement of the game, locked or unlocked, with its description, points and,
+  where the set measures it, the progress (`60/100`). Read-only.
+
+**Hardcore mode** (Settings, RetroAchievements, or the pause menu; **on by default**, as RetroAchievements asks)
+
+- Hardcore unlocks count double on RetroAchievements and are the ones its leaderboards use. In hardcore, as
+  RetroAchievements requires: **no state can be loaded** (saving one still works), **no cheats** (the cheats stay in their
+  file and the list, but none reaches the game; the cheat manager is closed), and **Transparency stays on** (RetroAchievements
+  forbids turning Snes9x's transparency off; likewise `snes9x.conf` can't force PAL or turn off the graphic windows). The
+  pause menu shows those rows greyed with *Off in hardcore mode*. Pausing many times in a row is limited, as
+  RetroAchievements' library asks (pausing over and over would be a slow motion): "you can pause again in N s".
+- Fast forward (R2) stays: RetroAchievements allows it. Snes9x PS5 has no rewind, slow motion or frame advance.
+- **Turning hardcore on during a game resets the game** (RetroAchievements doesn't allow switching in the middle of a
+  session). Turning it off is allowed at any time.
+- The restrictions apply only while the game has achievements or leaderboards: for an unknown game, a game without a set,
+  or with no connection, states and cheats work as usual.
+- **Important: hardcore unlocks need RetroAchievements' approval of the emulator.** RetroAchievements' server turns
+  hardcore unlocks from an emulator it doesn't recognise (by its User-Agent, here `Snes9xPS5/2.11 (PlayStation 5)
+  Snes9x/1.63 rcheevos/12.5`) into softcore unlocks, and may show a "Warning: Unsupported Emulator" notice at game start.
+  Snes9x PS5 has not been submitted to RetroAchievements for that approval. Until it is approved, unlocks are recorded,
+  as softcore.
+
+**Network and privacy**
+
+- The app can't use the console's HTTPS once it is out of its sandbox, so the **helper** (the payload) makes the requests
+  to `https://retroachievements.org/dorequest.php` and fetches the badges from `https://media.retroachievements.org`, with
+  its own HTTPS (Mbed TLS, certificates checked). It fetches nothing else for the app. The game never waits for it.
+- Your **password** is sent once, when you log in, and never stored or logged. What is kept is the **token** the server
+  answers with, in `/data/snes9x/retroachievements/login.txt`, readable by its owner only. The token and the password are
+  blanked out of every log line (`[redacted]`), in the app's log and the helper's.
+- Sent to RetroAchievements while you play: your user name and token, the game's hash, the unlocks and leaderboard
+  scores, and every two minutes the rich presence text. Nothing about your other games or files.
+- **No network, or the server down:** the game plays normally and one box says achievements are unavailable. An unlock
+  earned while the connection is lost is kept and sent again by itself (rcheevos retries, waiting up to two minutes between
+  tries, also once you are back on the shelf); the boxes say *Offline* and then *Back online*. rcheevos keeps such
+  unlocks in memory only: one still waiting when the app closes is lost (the achievement unlocks again the next time its
+  conditions are met).
+- **An older helper** (2.10's, still running from your autoload): it doesn't know these requests, and the app says so:
+  "Update the helper: send the Snes9xPS5-v2.11.elf payload." Put the 2.11 ELF in your autoload.
+
+**What has been tested:** the whole chain on Linux, the real helper in front of a local stand-in of RetroAchievements'
+server that answers in the format rcheevos's own tests record (login with a password and with the token, a wrong password,
+an expired token, the game's set, unlocks from the game's memory, a leaderboard, rich presence, mastery, hardcore's rules,
+no network, the server lost and back, an older helper, the logs), and the hash of headered, unheadered, zipped, 7-Zip and
+gzip ROMs against RetroAchievements' rule. **Not tested:** the real retroachievements.org (its TLS, its answers with a
+real account and real game sets) and anything on a PS5.
 
 ## CRT shaders
 
@@ -727,7 +815,7 @@ make ps5 -j$(nproc)              # build/ps5/Snes9xPS5.elf (installer + helper, 
 make send PS5_HOST=192.168.0.10  # sends it to elfldr (port 9021)
 make dist                        # build/dist/Snes9xPS5-v<version>.elf, the release zip, the source zip
 make app                         # only build/app/PPSA99922/, to copy by hand
-make test                        # Linux builds (app, installer, helper) + 509 tests (ASan/UBSan) and the unit tests
+make test                        # Linux builds (app, installer, helper) + 567 tests (ASan/UBSan) and the unit tests
 ```
 
 The build has three stages:
@@ -769,7 +857,9 @@ The build has three stages:
   - `orbis_paths.cpp`: `/data/snes9x`, USB drives and the logs.
 - **`ps5/coreorbis/include-orbis/ProsperoSce.h`**: prototypes of the system functions (the SDK ships the import
   stubs but not the headers).
-- **`ps5/frontend/`**: the 3D shelf (`fe_shelf.cpp`, its search `fe_search.h`), covers (`fe_covers.cpp`, `fe_prefetch.cpp`), the library
+- **`ps5/frontend/`**: RetroAchievements (`fe_ra.cpp` with rcheevos's rc_client, `fe_ramenu.cpp` its screens,
+  `fe_ranet.cpp` its requests through the helper, `fe_rahash.cpp` the ROM's hash; the helper's side is
+  `coreorbis/orbis-shims/ProsperoRaProxy.cpp`), the 3D shelf (`fe_shelf.cpp`, its search `fe_search.h`), covers (`fe_covers.cpp`, `fe_prefetch.cpp`), the library
   and No-Intro names (`fe_games.cpp`, `data/snes-nointro.tsv`), HTTPS (`fe_http.cpp`; the helper's own: `fe_tlshttp.cpp`, `fe_mbedtls_config.h`, `data/cacert.pem`, with
   Mbed TLS 3.6.7 in `third_party/mbedtls`), the helper's background downloads (`fe_coverworker.cpp`,
   `fe_coverfetch.cpp`), `.7z` archives (`fe_7z.cpp`, over the LZMA SDK in `third_party/lzma7z`), text with PS5SX2's fonts
@@ -795,6 +885,9 @@ The build has three stages:
 - **ps5-payload-dev SDK** (John Törnblom): toolchain, CRT, kernel access and import stubs (GPLv3+).
   - The payloads are linked with the SDK's CRT;
   - the app is linked with the SDK's static libc++.
+- **rcheevos** 12.5.0 ([github.com/RetroAchievements/rcheevos](https://github.com/RetroAchievements/rcheevos),
+  Copyright (c) 2018 RetroAchievements.org): MIT (`ps5/third_party/rcheevos/LICENSE`), RetroAchievements' client
+  library, built into the app unchanged (`ps5/third_party/rcheevos/README.snes9xps5` says which files).
 - **ps5-native-app-boilerplate** (BlackBearReloaded, GPL-3.0-or-later): `ps5-native-tool`, `app_crt.cpp`,
   `app_cpp_runtime.cpp`, `ps5-pie.ld` and the `libc.prx` generator, via PS5SX2 and PS5_Vulkan (mihawk-99).
 - **PS5SX2** (Spyros): the PS5 layer's pattern (Prospero* shims, kernel toast, `/data` layout, the sandbox request,
