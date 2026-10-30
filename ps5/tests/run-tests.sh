@@ -537,10 +537,10 @@ expect "[ $rc = 0 ] && $CHECK $T/dump/flip00090.ppm 960 540 255 0 0 >/dev/null" 
 expect "[ ! -e $T/root/logs/boot.log ] && ! grep -q '^\[snes9x-ps5' $T/out.txt" "debug logs off by default: no boot.log, nothing on stdout"
 expect "grep -q '^debug_logs=0' $T/root/snes9x-ps5.ini" "the settings file has debug_logs=0"
 expect "! grep -q 'runtime error\|AddressSanitizer' $T/out.txt" "no sanitizer reports"
-# Settings (Triangle) -> Debug logs (Up seven times from Shader: Back, Download all borders, Repair missing covers, Controller shortcuts, Network shares, Updates, Debug logs) -> Off
+# Settings (Triangle) -> Debug logs (Up eight times from Shader: Back, RetroAchievements, Download all borders, Repair missing covers, Controller shortcuts, Network shares, Updates, Debug logs) -> Off
 T=$(newroot t18b)
 python3 tests/make_test_rom.py "$T/root/roms/test.sfc" ntsc >/dev/null
-rc=$(run "$T" "0:0;30:$TRIANGLE;32:0;50:$UP;52:0;60:$UP;62:0;70:$UP;72:0;80:$UP;82:0;90:$UP;92:0;100:$UP;102:0;110:$UP;112:0;120:$CROSS;122:0;140:$CIRCLE;142:0;$(SHELFQUIT_AT 170)" "")
+rc=$(run "$T" "0:0;30:$TRIANGLE;32:0;45:$UP;47:0;50:$UP;52:0;60:$UP;62:0;70:$UP;72:0;80:$UP;82:0;90:$UP;92:0;100:$UP;102:0;110:$UP;112:0;120:$CROSS;122:0;140:$CIRCLE;142:0;$(SHELFQUIT_AT 170)" "")
 expect "[ $rc = 0 ]" "exit code 0 (got $rc)"
 expect "grep -q '^debug_logs=0' $T/root/snes9x-ps5.ini" "Debug logs Off saved"
 expect "tail -1 $T/root/logs/boot.log | grep -q 'debug logs turned off'" "the last line of boot.log says the logs were turned off"
@@ -548,7 +548,7 @@ expect "tail -1 $T/root/logs/boot.log | grep -q 'debug logs turned off'" "the la
 T=$(newroot t18c)
 python3 tests/make_test_rom.py "$T/root/roms/test.sfc" ntsc >/dev/null
 echo "debug_logs=0" >>"$T/root/snes9x-ps5.ini"
-rc=$(run "$T" "0:0;30:$TRIANGLE;32:0;50:$UP;52:0;60:$UP;62:0;70:$UP;72:0;80:$UP;82:0;90:$UP;92:0;100:$UP;102:0;110:$UP;112:0;120:$CROSS;122:0;140:$CIRCLE;142:0;$(SHELFQUIT_AT 170)" "")
+rc=$(run "$T" "0:0;30:$TRIANGLE;32:0;45:$UP;47:0;50:$UP;52:0;60:$UP;62:0;70:$UP;72:0;80:$UP;82:0;90:$UP;92:0;100:$UP;102:0;110:$UP;112:0;120:$CROSS;122:0;140:$CIRCLE;142:0;$(SHELFQUIT_AT 170)" "")
 expect "grep -q '^debug_logs=1' $T/root/snes9x-ps5.ini" "Debug logs On saved"
 expect "head -1 $T/root/logs/boot.log | grep -q 'debug logs turned on'" "boot.log starts at the switch (nothing from before it)"
 expect "! grep -q 'runtime error\|AddressSanitizer' $T/out.txt" "no sanitizer reports"
@@ -940,7 +940,7 @@ expect "waitfor22 $T/inst2.txt 'a newer version is installed'" "an older payload
 expect "grep -q 'eboot v9.9' $T/homebrew/PPSA99922/eboot.bin && grep -q 'new art' $T/appmeta/PPSA99922/icon0.png" "and leaves the update (and its art) as they are"
 expect "$UPD check 9.9 --until uptodate,available,failed | grep -q '^uptodate|9.9|'" "the app says which version it is: an older helper finds it up to date"
 stop22
-# the app: at start the daily check (the helper finds 9.9); Settings (Triangle), Up six times to "Updates" (Back, Download all borders, Repair missing covers, Controller shortcuts, Network shares) (it shows
+# the app: at start the daily check (the helper finds 9.9); Settings (Triangle), Up seven times to "Updates" (Back, RetroAchievements, Download all borders, Repair missing covers, Controller shortcuts, Network shares) (it shows
 # "Install 9.9"), Cross: the helper installs it
 T2=$(newroot t22b)
 (cd "$SRV" && exec python3 -m http.server $SPORT --bind 127.0.0.1 >/dev/null 2>&1) &
@@ -948,7 +948,7 @@ SNES9X_UPDATE_API=http://127.0.0.1:$SPORT/latest.json SNES9X_PS5_ROOT=$T2/root S
 	ASAN_OPTIONS=detect_leaks=0 timeout 120 "$INSTALLER" >"$T2/inst.txt" 2>&1 &
 waitfor22 $T2/root/logs/installer.log 'listening on 127.0.0.1'
 python3 tests/make_test_rom.py "$T2/root/roms/test.sfc" ntsc >/dev/null
-rc=$(SNES9X_HOST_REALTIME=1 SNES9X_PS5_APPMETA=$T2/appmeta run "$T2" "0:0;30:$TRIANGLE;32:0;40:$UP;42:0;46:$UP;48:0;52:$UP;54:0;58:$UP;60:0;64:$UP;66:0;70:$UP;72:0;78:$CROSS;80:0;150:$CIRCLE;152:0;170:$OPTIONS;172:0;180:$CROSS;182:0" "70,140")
+rc=$(SNES9X_HOST_REALTIME=1 SNES9X_PS5_APPMETA=$T2/appmeta run "$T2" "0:0;30:$TRIANGLE;32:0;36:$UP;38:0;40:$UP;42:0;46:$UP;48:0;52:$UP;54:0;58:$UP;60:0;64:$UP;66:0;70:$UP;72:0;78:$CROSS;80:0;150:$CIRCLE;152:0;170:$OPTIONS;172:0;180:$CROSS;182:0" "70,140")
 expect "grep -q 'daily check asked of the helper' $T2/root/logs/boot.log && [ -f $T2/root/update-check.txt ]" "at start: the daily check asked of the helper"
 expect "grep -q 'update install' $T2/root/logs/installer.log && grep -q 'eboot v9.9' $T2/homebrew/PPSA99922/eboot.bin" "Cross on \"Install 9.9\": the helper installs it"
 expect "grep -q 'is available: Settings, Updates' $T2/inst.txt $T2/root/logs/installer.log" "the daily check found 9.9: a notification says so"
@@ -1048,8 +1048,8 @@ expect "$CHECK $T/dump/flip00400.ppm 960 420 0 255 0 >/dev/null" "the shelf show
 expect "! grep -q 'runtime error\|AddressSanitizer' $T/out.txt" "no sanitizer reports"
 
 echo "== 31. the Network shares screen: add, change, test and remove a share with the on-screen keyboard (Settings, Network shares)"
-# tests/osk_pad.py turns the steps into a pad script (the keyboard's layout is its model). Settings is Triangle on the shelf; Up five times from
-# Shader reaches Network shares (Back, Download all borders, Repair missing covers, Controller shortcuts, Network shares). Every run ends: Circle twice, OPTIONS, Cross.
+# tests/osk_pad.py turns the steps into a pad script (the keyboard's layout is its model). Settings is Triangle on the shelf; Up six times from
+# Shader reaches Network shares (Back, RetroAchievements (2.11), Download all borders, Repair missing covers, Controller shortcuts, Network shares). Every run ends: Circle twice, OPTIONS, Cross.
 net_pad() { python3 tests/osk_pad.py 2>/dev/null; }
 net_quit='press CIRCLE 2
 press OPTIONS
@@ -1061,7 +1061,7 @@ mkdir -p "$T/share"
 PAD=$(net_pad <<STEPS
 frame 40
 press TRIANGLE
-press UP 5
+press UP 6
 press CROSS
 press CROSS
 field 10.0.0.5
@@ -1094,7 +1094,7 @@ printf '# my shares\nsmb://old/x   # my note\nnfs://nas/export/snes\n' >"$T/root
 PAD=$(net_pad <<STEPS
 frame 40
 press TRIANGLE
-press UP 5
+press UP 6
 press CROSS
 press CROSS
 press DOWN 3
@@ -1127,7 +1127,7 @@ T=$(newroot t31c)
 PAD=$(net_pad <<STEPS
 frame 40
 press TRIANGLE
-press UP 5
+press UP 6
 press CROSS
 press CROSS
 press DOWN 10
@@ -1432,7 +1432,7 @@ python3 tests/make_test_rom.py "$T/root/roms/Super Mario World.sfc" ntsc >/dev/n
 printf 'border=1\nborder_download=0\n' >>"$T/root/snes9x-ps5.ini"
 rc=$(run "$T" "0:0;$(QUITAT 60)" "" "$T/root/roms/Super Mario World.sfc")
 expect "[ $rc = 0 ] && ! grep -q 'asking the helper' $T/root/logs/boot.log && [ ! -e $T/root/borders/priority.txt ] && grep -q '^border_download=0$' $T/root/snes9x-ps5.ini" "border_download=0: the helper is not asked (and the setting is kept)"
-# Settings > Download all borders (the row before Back: Up twice from the top), with two ROMs of one game, the same game's Europe
+# Settings > Download all borders (2.11: Up three times from the top: Back, RetroAchievements, Download all borders), with two ROMs of one game, the same game's Europe
 # release (The Bezel Project has a border for each region), a Japan-only game (its border is in The Bezel Project's Super Famicom
 # repository) and one ROM without a border
 T=$(newroot t36c)
@@ -1442,7 +1442,7 @@ python3 tests/make_test_rom.py "$T/root/roms/Super Mario World (Europe).sfc" pal
 python3 tests/make_test_rom.py "$T/root/roms/Star Ocean (Japan).sfc" ntsc >/dev/null
 python3 tests/make_test_rom.py "$T/root/roms/Totally Unknown Homebrew.sfc" ntsc >/dev/null
 export SNES9X_BORDER_URL="http://127.0.0.1:$PORT/GameBezels/"
-rc=$(run "$T" "0:0;30:$TRIANGLE;32:0;40:$UP;42:0;46:$UP;48:0;52:$CROSS;54:0;66:$CIRCLE;68:0;76:$OPTIONS;78:0;86:$CROSS;88:0" "")
+rc=$(run "$T" "0:0;30:$TRIANGLE;32:0;36:$UP;38:0;40:$UP;42:0;46:$UP;48:0;52:$CROSS;54:0;66:$CIRCLE;68:0;76:$OPTIONS;78:0;86:$CROSS;88:0" "")
 unset SNES9X_BORDER_URL
 expect "[ $rc = 0 ] && grep -q '\[border\] user asked for the borders of the library: 3 to download' $T/root/logs/boot.log" "Download all borders: three pictures for the library (two ROMs share one, the Europe release and the Japan-only game have their own, the unknown one has none)"
 expect "[ \$(wc -l <$T/root/borders/wanted.txt) = 3 ] && grep -q '^Super Mario World (USA).png.http://127.0.0.1:$PORT/GameBezels/Super%20Mario%20World%20%28USA%29.png\$' $T/root/borders/wanted.txt && grep -q '^Super Mario World (Europe).png.http://127.0.0.1:$PORT/GameBezels/Super%20Mario%20World%20%28Europe%29.png\$' $T/root/borders/wanted.txt && grep -q '^Star Ocean (Japan).png.http://127.0.0.1:$PORT/GameBezels/Star%20Ocean%20%28Japan%29.png\$' $T/root/borders/wanted.txt" "borders/wanted.txt lists all three for the helper"
@@ -1505,12 +1505,12 @@ T=$(newroot t27en)
 python3 tests/make_test_rom.py "$T/root/roms/test.sfc" ntsc >/dev/null
 rc=$(SNES9X_HOST_I18N_MISSING=$T/missing.txt run "$T" "0:0;100:$L3R3;105:0;120:$UP;122:0;130:$CROSS;132:0" "" "$T/root/roms/test.sfc")
 expect "[ $rc = 0 ] && [ ! -s $T/missing.txt ] && grep -q '^language=0$' $T/root/snes9x-ps5.ini" "English by default (language=0): nothing is looked up"
-# Settings, Language (Up eight times from Shader: Back, Download all borders, Repair missing covers, Controller
-# shortcuts, Network shares, Updates, Debug logs, Language), Right: Spanish, saved
+# Settings, Language (Up nine times from Shader: Back, RetroAchievements (2.11), Download all borders, Repair missing
+# covers, Controller shortcuts, Network shares, Updates, Debug logs, Language), Right: Spanish, saved
 T=$(newroot t27b)
 python3 tests/make_test_rom.py "$T/root/roms/test.sfc" ntsc >/dev/null
 pad="0:0;30:$TRIANGLE;32:0"; f=50
-for i in $(seq 1 8); do pad="$pad;$f:$UP;$((f + 2)):0"; f=$((f + 8)); done
+for i in $(seq 1 9); do pad="$pad;$f:$UP;$((f + 2)):0"; f=$((f + 8)); done
 pad="$pad;$f:$RIGHT;$((f + 2)):0;$((f + 20)):$CIRCLE;$((f + 22)):0;$((f + 40)):$OPTIONS;$((f + 42)):0;$((f + 50)):$CROSS;$((f + 52)):0"
 rc=$(run "$T" "$pad" "")
 expect "[ $rc = 0 ] && grep -q '^language=1$' $T/root/snes9x-ps5.ini" "Settings, Language, Right: Spanish (language=1) saved"
@@ -1862,7 +1862,7 @@ expect "sums41 $I | cmp -s - $T/img.sums && [ -z \"\$(find $M -name '*.new')\" ]
 # times to Updates ("Install 9.10", the start's daily check found it), Cross; the screen dumped for the report
 T3=$T/de; mkdir -p $T3/root/roms $T3/dump; printf 'shader=0\nlanguage=4\n' >$T3/root/snes9x-ps5.ini
 python3 tests/make_test_rom.py "$T3/root/roms/test.sfc" ntsc >/dev/null
-rc=$(SNES9X_HOST_I18N_MISSING=$T3/missing.txt SNES9X_HOST_REALTIME=1 run "$T3" "0:0;30:$TRIANGLE;32:0;40:$UP;42:0;46:$UP;48:0;52:$UP;54:0;58:$UP;60:0;64:$UP;66:0;70:$UP;72:0;78:$CROSS;80:0;150:$CIRCLE;152:0;170:$OPTIONS;172:0;180:$CROSS;182:0" "140")
+rc=$(SNES9X_HOST_I18N_MISSING=$T3/missing.txt SNES9X_HOST_REALTIME=1 run "$T3" "0:0;30:$TRIANGLE;32:0;36:$UP;38:0;40:$UP;42:0;46:$UP;48:0;52:$UP;54:0;58:$UP;60:0;64:$UP;66:0;70:$UP;72:0;78:$CROSS;80:0;150:$CIRCLE;152:0;170:$OPTIONS;172:0;180:$CROSS;182:0" "140")
 expect "[ $rc = 0 ] && grep -q 'update install' $T/root/logs/helper.log && grep -q 'not installed: Snes9x PS5 runs from an image' $T/root/logs/helper.log" "the app asked for the install; the helper refused it (an image)"
 expect "! grep -q 'runs from\|ShadowMount' $T3/missing.txt 2>/dev/null" "the reason is shown translated (German)"
 UPDERR=$T3/dump/flip00140.ppm
