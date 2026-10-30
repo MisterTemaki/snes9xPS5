@@ -32,6 +32,7 @@ export SNES9X_HELPER_PORT=$((20000 + RANDOM % 10000)) SNES9X_ELFLDR_PORT=$((3000
 export SNES9X_LOGS_DEFAULT=1
 CHECK="python3 $PWD/tests/check_ppm.py"
 WORK=${WORK:-$(mktemp -d)}
+mkdir -p "$WORK" # (2.10 review) a WORK given that doesn't exist yet
 PASS=0
 FAIL=0
 
@@ -54,7 +55,7 @@ run() { # dir pad dumps [args...]
 	shift 3
 	SNES9X_HOST_OFFLINE=${OFFLINE-1} SNES9X_COVER_URL=${COVER_URL-} \
 	SNES9X_PS5_ROOT=$t/root SNES9X_PS5_HOMEBREW=$t/homebrew SNES9X_HOST_DUMP_DIR=$t/dump SNES9X_HOST_DUMP=$dumps SNES9X_HOST_MAX_FLIPS=${MAXFLIPS-5000} \
-		SNES9X_HOST_PAD=$pad ASAN_OPTIONS=detect_leaks=0 timeout 120 "$BIN" "$@" >"$t/out.txt" 2>&1
+		SNES9X_HOST_PAD=$pad ASAN_OPTIONS=detect_leaks=0${ASAN_EXTRA:+:$ASAN_EXTRA} timeout 120 "$BIN" "$@" >"$t/out.txt" 2>&1
 	echo $?
 }
 
@@ -1855,8 +1856,40 @@ rm -rf $M/shadowmnt $SX/app/PPSA99922 && mkdir -p $M/shadowmnt/img1 && cp -r $U 
 sums41 $I >$T/img.sums
 helper41 SNES9X_HOST_MOUNTS="$SX/app/PPSA99922|nullfs|$I|rw;$M/shadowmnt/img1|ufs|/dev/lvd2|ro"
 rel41 v9.10 99.100.000
-expect "$UPD check 9.9 --until available,failed | grep -q '^available|9.10|' && $UPD install 9.9 --until done,failed | grep -q '^failed|.*image that ShadowMount+ mounted'" "an image ShadowMount+ mounted can't take the update: refused, saying why"
+expect "$UPD check 9.9 --until available,failed | grep -q '^available|9.10|' && $UPD install 9.9 --until done,failed | grep -q '^failed|.*image ShadowMount+ mounted'" "an image ShadowMount+ mounted can't take the update: refused, saying why"
 expect "sums41 $I | cmp -s - $T/img.sums && [ -z \"\$(find $M -name '*.new')\" ]" "... nothing written into it"
+# (2.10 review) the app shows why in the interface's language (German, the longest), on two lines: Settings (Triangle), Up six
+# times to Updates ("Install 9.10", the start's daily check found it), Cross; the screen dumped for the report
+T3=$T/de; mkdir -p $T3/root/roms $T3/dump; printf 'shader=0\nlanguage=4\n' >$T3/root/snes9x-ps5.ini
+python3 tests/make_test_rom.py "$T3/root/roms/test.sfc" ntsc >/dev/null
+rc=$(SNES9X_HOST_I18N_MISSING=$T3/missing.txt SNES9X_HOST_REALTIME=1 run "$T3" "0:0;30:$TRIANGLE;32:0;40:$UP;42:0;46:$UP;48:0;52:$UP;54:0;58:$UP;60:0;64:$UP;66:0;70:$UP;72:0;78:$CROSS;80:0;150:$CIRCLE;152:0;170:$OPTIONS;172:0;180:$CROSS;182:0" "140")
+expect "[ $rc = 0 ] && grep -q 'update install' $T/root/logs/helper.log && grep -q 'not installed: Snes9x PS5 runs from an image' $T/root/logs/helper.log" "the app asked for the install; the helper refused it (an image)"
+expect "! grep -q 'runs from\|ShadowMount' $T3/missing.txt 2>/dev/null" "the reason is shown translated (German)"
+UPDERR=$T3/dump/flip00140.ppm
+if [ -n "${SHOTS:-}" ] && [ -f "$UPDERR" ]; then
+	mkdir -p "$SHOTS" && python3 -c "import sys; from PIL import Image; Image.open(sys.argv[1]).save(sys.argv[2])" "$UPDERR" "$SHOTS/4-update-error.png" && echo "  (screen saved: $SHOTS/4-update-error.png)"
+fi
+# (2.10 review) a read-only mount of a folder whose own file system takes files (nullfs ro over /data/homebrew/PPSA99922):
+# the payload writes the folder itself, as 2.9 did (2.10 before the review: "read-only", nothing written)
+pkill -f 'build/host/snes9x-ps5-(installer|helper)' 2>/dev/null; sleep 0.3
+H3=$M/hb3/PPSA99922; rm -rf $M/hb3 $SX/app/PPSA99922 && mkdir -p $M/hb3 && cp -r $U $H3 && ver41 $H3 00.900.000 && echo "eboot old" >$H3/eboot.bin
+ln -s $H3 $SX/app/PPSA99922
+env SNES9X_SYSTEM_EX=$SX SNES9X_SHADOWMNT=$M/shadowmnt SNES9X_USER_APP=$M/userapp SNES9X_PS5_ROOT=$T/root SNES9X_PS5_HOMEBREW=$M/hb3 \
+	SNES9X_PS5_APPMETA=$T/appmeta SNES9X_HOST_MOUNTS="$SX/app/PPSA99922|nullfs|$H3|ro" ASAN_OPTIONS=detect_leaks=0 timeout 60 "$INSTALLER" >"$T/inst-ro.txt" 2>&1 &
+waitfor41 $T/inst-ro.txt 'listening on 127.0.0.1'
+stop41
+(cd "$SRV" && exec python3 -m http.server $SPORT --bind 127.0.0.1 >/dev/null 2>&1) &
+expect "grep -q 'the mount is read-only, the folder itself is written' $T/inst-ro.txt && grep -q '\"contentVersion\": \"$CVER\"' $H3/sce_sys/param.json && ! grep -q 'eboot old' $H3/eboot.bin" "a read-only mount of a writable folder: the folder itself is brought up to date"
+# (2.10 review) a mount that isn't ShadowMount+'s (not nullfs, no nullfs layer): /data/homebrew/PPSA99922, as 2.9 wrote
+pkill -f 'build/host/snes9x-ps5-(installer|helper)' 2>/dev/null; sleep 0.3
+rm -rf $M/hb4 $SX/app/PPSA99922 && ln -s $U $SX/app/PPSA99922
+env SNES9X_SYSTEM_EX=$SX SNES9X_SHADOWMNT=$M/shadowmnt SNES9X_USER_APP=$M/userapp SNES9X_PS5_ROOT=$T/root SNES9X_PS5_HOMEBREW=$M/hb4 \
+	SNES9X_PS5_APPMETA=$T/appmeta SNES9X_HOST_MOUNTS="$SX/app/PPSA99922|unionfs|<above>|rw" ASAN_OPTIONS=detect_leaks=0 timeout 60 "$INSTALLER" >"$T/inst-un.txt" 2>&1 &
+waitfor41 $T/inst-un.txt 'listening on 127.0.0.1'
+stop41
+(cd "$SRV" && exec python3 -m http.server $SPORT --bind 127.0.0.1 >/dev/null 2>&1) &
+expect "grep -q 'as 2.9 wrote them' $T/inst-un.txt && grep -q '\"contentVersion\": \"$CVER\"' $M/hb4/PPSA99922/sce_sys/param.json && grep -q 'Snes9x PS5 $VER installed' $T/inst-un.txt" "a mount that can't be read as ShadowMount+'s: the payload installs in /data/homebrew, as 2.9 did"
+rm -f $SX/app/PPSA99922
 # j. 2.10 after 2.9 (every comparison is by number: as text or as a decimal, 2.10 would come before 2.9)
 pkill -f 'build/host/snes9x-ps5-(installer|helper)' 2>/dev/null; sleep 0.3
 rm -rf $SX/app/PPSA99922
@@ -1873,8 +1906,40 @@ SNES9X_PS5_ROOT=$T2/root SNES9X_PS5_HOMEBREW=$T2/homebrew SNES9X_PS5_APPMETA=$T2
 waitfor41 $T2/inst.txt 'listening on 127.0.0.1'
 stop41
 expect "grep -q '\"contentVersion\": \"$CVER\"' $T2/homebrew/PPSA99922/sce_sys/param.json && ! grep -q 'a newer version is installed' $T2/inst.txt" "the payload over a 2.9 app (02.090.000): installs this version, not \"a newer version is installed\""
-expect "! grep -q 'runtime error\|AddressSanitizer' $T/inst1.txt $T/helper.txt $T2/inst.txt" "no sanitizer reports"
+expect "! grep -q 'runtime error\|AddressSanitizer' $T/inst1.txt $T/helper.txt $T2/inst.txt $T/inst-ro.txt $T/inst-un.txt $T3/out.txt" "no sanitizer reports"
 [ "$M" != "$T" ] && rm -rf "$M"
+# k. (2.10 review) a damaged state declaring a 2 GiB block: the load fails and the game goes on; nothing that big is
+#    allocated (ASan capped at 256 MiB: up to the review, snapshot.cpp's `new char[rem]` asked for it and ASan stopped the app)
+T=$(newroot t41-state)
+python3 tests/make_test_rom.py "$T/root/roms/test.sfc" ntsc >/dev/null
+rc=$(run "$T" "0:0;100:$(printf %x $((0x$L2 | 0x$UP)));105:0;$(QUIT41 200)" "" "$T/root/roms/test.sfc")
+python3 tests/damage_state.py "$T/root/states/test.000" >/dev/null
+DOWN41=$(printf %x $((0x$L2 | 0x$DOWN)))
+rc=$(ASAN_EXTRA=max_allocation_size_mb=256 run "$T" "0:0;100:$DOWN41;105:0;$(QUIT41 200)" "190" "$T/root/roms/test.sfc")
+expect "[ $rc = 0 ] && grep -q 'load state 0 <- .*: failed' $T/root/logs/boot.log && $CHECK $T/dump/flip00190.ppm 960 540 255 0 0 >/dev/null && ! grep -q 'AddressSanitizer' $T/out.txt" "a state declaring a 2 GiB block: \"failed\", the game goes on, no huge allocation (exit $rc)"
+# l. (2.10 review) an allocation that fails while the core reads a state (SNES9X_HOST_STATE_THROW=1 throws std::bad_alloc
+#    with the file open): the load fails and the file is closed (the app's open files, /proc/<pid>/fd, a second after);
+#    =2 leaves it open, as up to the review
+for v in 1 2; do
+	T=$(newroot t41-throw$v)
+	python3 tests/make_test_rom.py "$T/root/roms/test.sfc" ntsc >/dev/null
+	rc=$(run "$T" "0:0;100:$(printf %x $((0x$L2 | 0x$UP)));105:0;$(QUIT41 200)" "" "$T/root/roms/test.sfc")
+	SNES9X_HOST_STATE_THROW=$v SNES9X_HOST_OFFLINE=1 SNES9X_PS5_ROOT=$T/root SNES9X_PS5_HOMEBREW=$T/homebrew SNES9X_HOST_DUMP_DIR=$T/dump \
+		SNES9X_HOST_DUMP= SNES9X_HOST_MAX_FLIPS=1000 SNES9X_HOST_REALTIME=1 SNES9X_HOST_PAD="0:0;100:$DOWN41;105:0;$(QUIT41 400)" \
+		ASAN_OPTIONS=detect_leaks=0 timeout 120 "$BIN" "$T/root/roms/test.sfc" >"$T/out.txt" 2>&1 &
+	apid=$!
+	fd="?"
+	if waitfor41 $T/root/logs/boot.log 'load state 0: out of memory'; then
+		sleep 1
+		cpid=$(pgrep -P $apid | head -1) # the app (timeout's child)
+		ls -l /proc/$cpid/fd 2>/dev/null | grep -q 'states/test.000' && fd=open || fd=closed
+	fi
+	wait $apid
+	echo "$fd" >$WORK/t41-throw$v.fd
+	cp $T/out.txt $WORK/t41-throw$v.txt
+done
+expect "grep -q 'the state file closed' $WORK/t41-throw1.txt && [ \"\$(cat $WORK/t41-throw1.fd)\" = closed ]" "a std::bad_alloc while a state is read: the load fails, the state file is closed ($(cat $WORK/t41-throw1.fd 2>/dev/null))"
+expect "[ \"\$(cat $WORK/t41-throw2.fd)\" = open ]" "... the same with the close left out (=2, the code before the review): the file stays open ($(cat $WORK/t41-throw2.fd 2>/dev/null))"
 
 echo "== 42. search by name on the shelf (2.10): Circle opens the keyboard, the shelf shows the games that match (name or file name, any case, accents folded); no match says so; Cancel keeps the shelf; the search stays across tabs; the skip keys and Cross count in the filtered shelf"
 # eight games; the shelf sorts them by name: Donkey Kong Country, F-Zero, Mario Paint, Pokémon Gold (Hack), Super Mario Kart,

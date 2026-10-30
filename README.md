@@ -60,12 +60,16 @@ README, "`Snes9xPS5.elf`" always means the current release's ELF.
 shelf shows only the games that match (capitals and accents don't matter: `pokemon` finds *Pokémon*; the file name
 counts too). See [Search](#search-by-name). With it, the fixes of a full code audit:
 - **C++ exceptions:** the app's C++ runtime was split between its own copy and the console's (the mix that made Stella
-  PS5 1.0 crash at its first exception); it is now entirely the app's own, and a failed memory allocation is reported
-  instead of stopping the app. A check at every build refuses an app that would need a module a title can't load.
+  PS5 1.0 crash at its first exception); it is now entirely the app's own. When memory runs out while a ROM is loaded or
+  a state is saved or loaded, that load or save fails with a message and the game goes on; anywhere else the app still
+  stops, and the crash log (`boot.log`, debug logs on) says where. A damaged state file can no longer make the app ask
+  for gigabytes. A check at every build refuses an app that would need a module a title can't load.
 - **Updates with ShadowMountPlus:** when ShadowMountPlus runs the app from another folder (a USB or extended drive, or
   another folder it scans), an update (from Settings, Updates, or a new payload) now goes into that folder, through
   ShadowMountPlus's mount; up to 2.9 it went into `/data/homebrew/PPSA99922`, so the copy the console runs stayed old.
-  An app inside an image ShadowMountPlus mounted is never written: the message says to update the image.
+  An app inside an image ShadowMountPlus mounted is never written: Settings, Updates says to update the image (in the
+  interface's language). Without ShadowMountPlus, or with a mount the app can't read, updates go to
+  `/data/homebrew/PPSA99922` as before.
 - The helper's HTTPS: a malformed answer can't make it read past its limit, and a redirect from HTTPS to plain HTTP is
   not followed. A rebuild with a new version number now rebuilds what carries it. The crash report catches SIGSYS and
   is written whole; with the debug logs on, each step of a game's start is logged.
@@ -360,7 +364,7 @@ On the test PC a frame takes about 15 ms on 2 cores.
 | Button | Does |
 |---|---|
 | Left / Right (D-pad or stick) | change game (hold to speed up) |
-| L1 / R1 | next / previous tab (Internal, USB, Network) |
+| L1 / R1 | previous / next tab (Internal, USB, Network) |
 | L2 / R2 | skip 10 games |
 | Cross | play |
 | Circle | search by name (see [Search](#search-by-name)) |
