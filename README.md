@@ -24,7 +24,7 @@ archive is unpacked by the port, `ps5/frontend/fe_7z.cpp`).
 > **RetroAchievements have not been run on a PS5, nor against the real retroachievements.org**: they were tested on
 > Linux against a local stand-in of RetroAchievements' server (see [RetroAchievements](#retroachievements)). 2.7's
 > network shares and borders, 2.8's Smooth picture and 2.9's `.7z` games have **not been run on a PS5 yet**. It
-> builds with the ps5-payload-dev SDK and passes 567 host tests (one, the sound-queue timing, depends on the test
+> builds with the ps5-payload-dev SDK and passes 585 host tests (one, the sound-queue timing, depends on the test
 > machine's load), which run the same code on Linux with the PS5 calls simulated, plus the network-share, search and
 > other unit and loopback tests. If something fails, turn on Settings, Debug logs: the logs in `/data/snes9x/logs/` say where.
 
@@ -827,7 +827,7 @@ make ps5 -j$(nproc)              # build/ps5/Snes9xPS5.elf (installer + helper, 
 make send PS5_HOST=192.168.0.10  # sends it to elfldr (port 9021)
 make dist                        # build/dist/Snes9xPS5-v<version>.elf, the release zip, the source zip
 make app                         # only build/app/PPSA99922/, to copy by hand
-make test                        # Linux builds (app, installer, helper) + 567 tests (ASan/UBSan) and the unit tests
+make test                        # Linux builds (app, installer, helper) + 585 tests (ASan/UBSan) and the unit tests
 ```
 
 The build has three stages:

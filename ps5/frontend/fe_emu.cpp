@@ -842,6 +842,8 @@ bool LoadGame(const std::string& path)
 	}
 	if (!loaded)
 	{
+		g.patched.clear();
+		g.patched.shrink_to_fit();
 		OrbisLog("[emu] LoadROM failed");
 		netfs_end_game();
 		g.rom_path.clear();
@@ -873,7 +875,7 @@ bool LoadGame(const std::string& path)
 	// 2.11: RetroAchievements: the ROM's hash (it reads the file again, so before realtime too), then its set is asked for
 	// in the background; with hardcore the cheats are turned off from the first frame
 	StartStep("achievements");
-	ra::GameStarted(path, g.patched.empty() ? nullptr : &g.patched);
+	ra::GameStarted(path, Settings.IsPatched && !g.patched.empty() ? &g.patched : nullptr);
 	g.patched.clear();
 	g.patched.shrink_to_fit();
 	HardcoreChanged();
