@@ -2199,10 +2199,20 @@ static int UnfreezeBlock (STREAM stream, const char *name, uint8 *block, int siz
 
 	if (rem)
 	{
-		char	*junk = new char[rem];
-		len = READ_STREAM(junk, rem, stream);
-		delete [] junk;
-		if (len != rem)
+		// Snes9x PS5 2.10: the rest of a block longer than this build's is skipped through a small buffer. It was read
+		// into `new char[rem]`, a size that comes from the file (up to 2 GiB): a damaged or foreign state allocated that
+		// much, and on the console a failed allocation ends the app.
+		char	junk[4096];
+		int		skipped = 0;
+		while (skipped < rem)
+		{
+			const int want = rem - skipped < (int) sizeof(junk) ? rem - skipped : (int) sizeof(junk);
+			const int got = (int) READ_STREAM(junk, want, stream);
+			if (got <= 0)
+				break;
+			skipped += got;
+		}
+		if (skipped != rem)
 		{
 			REVERT_STREAM(stream, rewind, 0);
 			return (WRONG_FORMAT);

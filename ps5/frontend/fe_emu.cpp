@@ -599,14 +599,42 @@ std::string S9xGetFilenameInc(std::string ext, enum s9x_getdirtype dirtype)
 	return dir + "/" + base + ".999" + ext;
 }
 
+namespace
+{
+// 2.10 review: the state file the core is reading (S9xUnfreezeGame opens it through S9xOpenSnapshotFile and closes it
+// through S9xCloseSnapshotFile). A std::bad_alloc thrown between the two skips the close; emu::LoadState closes it then.
+STREAM g_reading_state = nullptr;
+
+// The host tests (SNES9X_HOST_STATE_THROW): 1 throws std::bad_alloc while the state file is open, as an allocation that
+// fails in the core would; 2 the same, and LoadState leaves the file open as up to the review (a variant that shows the
+// leak). Never on the console.
+int HostStateThrow()
+{
+#ifdef __PROSPERO__
+	return 0;
+#else
+	const char* v = getenv("SNES9X_HOST_STATE_THROW");
+	return v ? atoi(v) : 0;
+#endif
+}
+} // namespace
+
 bool8 S9xOpenSnapshotFile(const char* filepath, bool8 read_only, STREAM* file)
 {
 	*file = OPEN_STREAM(filepath, read_only ? "rb" : "wb");
+	if (*file && read_only)
+	{
+		g_reading_state = *file;
+		if (HostStateThrow())
+			throw std::bad_alloc();
+	}
 	return *file != nullptr;
 }
 
 void S9xCloseSnapshotFile(STREAM file)
 {
+	if (file == g_reading_state)
+		g_reading_state = nullptr;
 	CLOSE_STREAM(file);
 }
 
@@ -968,9 +996,11 @@ bool LoadState(int slot)
 	const std::string path = StatePath(slot);
 	if (!OrbisIsFile(path))
 		return false;
-	// 2.10: a damaged or foreign state file can declare a block of up to 2 GiB (snapshot.cpp, UnfreezeBlock: `new
-	// char[rem]`): the allocation's std::bad_alloc is the load failing, not the app ending. The blocks are read into
-	// copies before any is applied, so the game goes on as it was.
+	// 2.10: an allocation that fails while the core reads a state (std::bad_alloc) is the load failing, not the app
+	// ending. The blocks are read into copies before any is applied, so the game goes on as it was. (The block a damaged
+	// state could make huge is skipped without an allocation since the review: snapshot.cpp, UnfreezeBlock.) The state
+	// file is closed here when the throw skipped the core's close; the copies already read (fixed sizes, at most a few
+	// hundred KiB) are not freed: only a real shortage of memory gets here.
 	bool ok = false;
 	try
 	{
@@ -978,7 +1008,13 @@ bool LoadState(int slot)
 	}
 	catch (const std::bad_alloc&)
 	{
-		OrbisLog("[emu] load state %d: out of memory reading %s (a damaged state?)", slot, path.c_str());
+		OrbisLog("[emu] load state %d: out of memory reading %s", slot, path.c_str());
+		if (g_reading_state && HostStateThrow() != 2)
+		{
+			CLOSE_STREAM(g_reading_state);
+			OrbisLog("[emu] load state %d: the state file closed", slot);
+		}
+		g_reading_state = nullptr;
 	}
 	OrbisLog("[emu] load state %d <- %s: %s", slot, path.c_str(), ok ? "ok" : "failed");
 	return ok;
