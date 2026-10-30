@@ -10,6 +10,7 @@
 
 #include "ProsperoCrash.h"
 
+#include <cstdlib>
 #include <functional>
 #include <pthread.h>
 
@@ -25,6 +26,11 @@ public:
 	// Starts fn on a thread with a `stack_bytes` stack. Falls back to the default stack if that is refused.
 	BigThread(std::function<void()> fn, size_t stack_bytes)
 	{
+#ifndef __PROSPERO__
+		// the host tests: SNES9X_HOST_NO_THREADS=1 stands for a system that refuses every new thread
+		if (const char* e = getenv("SNES9X_HOST_NO_THREADS"); e && *e == '1')
+			return;
+#endif
 		auto* holder = new std::function<void()>(std::move(fn));
 		pthread_attr_t attr;
 		pthread_attr_init(&attr);

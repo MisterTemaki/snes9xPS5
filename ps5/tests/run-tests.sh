@@ -4,6 +4,23 @@
 # de-tiled to PPM and checked.
 set -u
 cd "$(dirname "$0")/.."
+# ONLY="41 42" bash tests/run-tests.sh runs only those groups (2.10): the set-up before group 1, the groups named, and
+# from the others only their helper functions and pad constants (later groups use some of them); then the summary.
+if [ -n "${ONLY:-}" ] && [ -z "${S9X_ONLY_FILTERED:-}" ]; then
+	only_script=tests/.only-$$.sh
+	awk -v only=" $ONLY " '
+		/^echo "== [0-9]+[a-z]?\. / { match($0, /== [0-9]+[a-z]?\./); g = substr($0, RSTART + 3, RLENGTH - 4); keep = index(only, " " g " ") > 0; started = 1 }
+		/^echo$/ && started { keep = 1 }
+		!started || keep { print; next }
+		infn { print; if ($0 ~ /^}/) infn = 0; next }
+		/^[A-Za-z_][A-Za-z_0-9]*\(\) *\{/ { print; if ($0 !~ /}[^}]*$/ || $0 ~ /\{ *(#.*)?$/) infn = 1; next }
+		/^[A-Z][A-Z0-9_]*=[0-9]+(; *[A-Z][A-Z0-9_]*=[0-9]+)*$/ { print }
+	' "$0" >"$only_script"
+	S9X_ONLY_FILTERED=1 bash "$only_script"
+	rc=$?
+	rm -f "$only_script"
+	exit $rc
+fi
 BIN=$PWD/build/host/snes9x-ps5-host
 INSTALLER=$PWD/build/host/snes9x-ps5-installer
 HELPER=$PWD/build/host/snes9x-ps5-helper

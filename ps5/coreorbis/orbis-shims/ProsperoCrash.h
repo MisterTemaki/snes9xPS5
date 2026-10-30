@@ -2,7 +2,7 @@
 //
 // 1.6 reached the shelf on the console and then died with "PPSA99009 crashed before KStuff was paused",
 // with no line after "[covers] ... to download" in boot.log: an unhandled fault, and nothing said where.
-// This installs signal handlers (SIGSEGV/SIGBUS/SIGILL/SIGFPE/SIGABRT/SIGTRAP) on a separate signal stack
+// This installs signal handlers (SIGSEGV/SIGBUS/SIGILL/SIGFPE/SIGABRT/SIGTRAP, and SIGSYS since 2.10) on a separate signal stack
 // (so a stack overflow can still be reported), modelled on PS5SX2's orbis-shims/ProsperoCrash.cpp. On a
 // fault it writes one block to boot.log: the signal, the fault address, rip, the current stage of each
 // thread group, and a short list of return addresses, each as an offset from an anchor symbol so the
@@ -21,6 +21,7 @@ enum class Area
 	Shelf, // main thread, the game list
 	Cover, // the cover worker
 	Pool,  // the shelf's render threads
+	Emu,   // the frontend's thread, a game's start (2.10)
 	Count
 };
 

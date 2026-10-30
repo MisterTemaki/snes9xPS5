@@ -23,6 +23,7 @@
 
 #include "OrbisPaths.h"
 #include "ProsperoAudio.h"
+#include "ProsperoCrash.h"
 #include "ProsperoInput.h"
 #include "ProsperoSce.h"
 #include "ProsperoVideo.h"
@@ -50,6 +51,7 @@
 #include <cstdlib>
 #include <fstream>
 #include <map>
+#include <new>
 #include <cstdio>
 #include <cstring>
 #include <ctime>
@@ -441,6 +443,18 @@ bool SyncCheatsFromFile(bool immediate, bool search = false)
     return ok;
 }
 
+// 2.10: each step of a game's start, logged and put on the disk before it runs (with the debug logs on), and its stage
+// marked for the crash report: a game that takes the app down while it starts says at which step.
+void StartStep(const char* what)
+{
+	S9X_STAGE(Emu, what);
+	if (OrbisLogEnabled())
+	{
+		OrbisLog("[emu] start: %s", what);
+		OrbisLogSync();
+	}
+}
+
 std::string StatePath(int slot)
 {
 	char ext[8];
@@ -718,18 +732,31 @@ bool LoadGame(const std::string& path)
 	CloseGame();
 	g.rom_path = path;
 	OrbisLog("[emu] loading %s", path.c_str());
+	StartStep("share files");
 	netfs_prepare_game(path); // a ROM on a share: its MSU-1 files first (nothing for any other path)
 	fe::sevenzip::SetLastLoadError(fe::sevenzip::Error::None);
-	if (!Memory.LoadROM(path.c_str()))
+	StartStep("load ROM");
+	bool loaded = false;
+	try
+	{
+		loaded = Memory.LoadROM(path.c_str());
+	}
+	catch (const std::bad_alloc&)
+	{
+		OrbisLog("[emu] LoadROM: out of memory");
+	}
+	if (!loaded)
 	{
 		OrbisLog("[emu] LoadROM failed");
 		netfs_end_game();
 		g.rom_path.clear();
 		return false;
 	}
+	StartStep("battery save");
 	const std::string srm = S9xGetFilename(".srm", SRAM_DIR);
 	Memory.LoadSRAM(srm.c_str());
 
+	StartStep("cheats");
 	S9xDeleteCheats();
 	S9xCheatsEnable();
 	g.cheat_file = g.cheat_seen = FileStamp();
@@ -746,8 +773,10 @@ bool LoadGame(const std::string& path)
 	ApplySettings();
 	OrbisLog("[emu] \"%s\" %s, %d fps, %s", Memory.ROMName, Memory.ROMFilename.c_str(), Memory.ROMFramesPerSecond,
 		Settings.PAL ? "PAL" : "NTSC");
+	StartStep("border");
 	fe::border::Select(path, Memory.ROMCRC32); // reads /data (and maybe the ROM's header on a share): before realtime starts
 	netfs_set_realtime(true); // from here nothing on this thread waits for a share
+	StartStep("first frame");
 	return true;
 }
 
@@ -906,8 +935,17 @@ bool SaveState(int slot)
 	// disk or a power cut leaves the slot's old state as it was (S9xFreezeGame overwrites in place and can't tell)
 	const std::string path = StatePath(slot), part = path + ".part";
 	const uint32 size = S9xFreezeSize();
-	std::vector<uint8> buf(size);
-	bool ok = size > 0 && S9xFreezeGameMem(buf.data(), size);
+	std::vector<uint8> buf;
+	bool ok = false;
+	try
+	{
+		buf.resize(size);
+		ok = size > 0 && S9xFreezeGameMem(buf.data(), size);
+	}
+	catch (const std::bad_alloc&)
+	{
+		OrbisLog("[emu] save state %d: out of memory", slot);
+	}
 	if (ok)
 	{
 		gzFile gz = gzopen(part.c_str(), "wb");
@@ -930,7 +968,18 @@ bool LoadState(int slot)
 	const std::string path = StatePath(slot);
 	if (!OrbisIsFile(path))
 		return false;
-	const bool ok = S9xUnfreezeGame(path.c_str());
+	// 2.10: a damaged or foreign state file can declare a block of up to 2 GiB (snapshot.cpp, UnfreezeBlock: `new
+	// char[rem]`): the allocation's std::bad_alloc is the load failing, not the app ending. The blocks are read into
+	// copies before any is applied, so the game goes on as it was.
+	bool ok = false;
+	try
+	{
+		ok = S9xUnfreezeGame(path.c_str());
+	}
+	catch (const std::bad_alloc&)
+	{
+		OrbisLog("[emu] load state %d: out of memory reading %s (a damaged state?)", slot, path.c_str());
+	}
 	OrbisLog("[emu] load state %d <- %s: %s", slot, path.c_str(), ok ? "ok" : "failed");
 	return ok;
 }
@@ -1035,6 +1084,8 @@ FrameResult RunFrame()
 	IPPU.RenderThisFrame = !g.fast_forward || (g.frame % 4) == 0;
 	S9xMainLoop();
 	g.frame++;
+	if (g.frame == 1)
+		StartStep("running");
 	// A cheat added to the file while the game runs is picked up within a few seconds: one stat a second, no search.
 	if (g.frame % 60 == 0 && SyncCheatsFromFile(false))
 		Osd(fe::T("Cheats updated: %d"), CheatCount());

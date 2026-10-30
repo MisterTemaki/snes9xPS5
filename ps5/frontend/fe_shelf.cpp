@@ -104,9 +104,17 @@ public:
 	{
 		unsigned n = std::thread::hardware_concurrency();
 		n = std::clamp(n == 0 ? 4u : n, 2u, 6u);
+		// 2.10 (as Stella PS5 1.0.2): only the threads that really started count (the caller's band plus theirs), as in
+		// ProsperoCrt.cpp's pool: Run() waits for m_count - 1 answers, and a thread the system refused never answers --
+		// the shelf waited for ever on its first frame
 		for (unsigned i = 1; i < n; i++)
-			m_threads.emplace_back([this, i] { Worker(int(i)); }, 2 * 1024 * 1024);
-		m_count = int(n);
+		{
+			ps5::BigThread t([this, i] { Worker(int(i)); }, 2 * 1024 * 1024);
+			if (!t.joinable())
+				break;
+			m_threads.push_back(std::move(t));
+		}
+		m_count = 1 + int(m_threads.size());
 	}
 	~Pool()
 	{

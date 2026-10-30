@@ -263,3 +263,13 @@ void OrbisLogClose()
 		s_log = nullptr;
 	}
 }
+
+void OrbisLogSync()
+{
+	std::lock_guard<std::mutex> lock(s_log_mutex);
+	if (s_log)
+	{
+		fflush(s_log);
+		fsync(fileno(s_log));
+	}
+}

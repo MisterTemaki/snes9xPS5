@@ -109,11 +109,24 @@ LZMA7Z_SRC := $(addprefix $(LZMA7Z)/,7zAlloc.c 7zArcIn.c 7zBuf.c 7zCrc.c 7zCrcOp
 	Bra86.c BraIA64.c CpuArch.c Delta.c Lzma2Dec.c LzmaDec.c Ppmd7.c Ppmd7Dec.c)
 LZMA7Z_FLAGS := -DZ7_ST -DZ7_PPMD_SUPPORT -DZ7_EXTRACT_ONLY -I$(LZMA7Z) -include $(LZMA7Z)/s9x7z_prefix.h
 %/port/frontend/fe_7z.o: EXTRA_FLAGS = -I$(LZMA7Z)
-%/port/frontend/fe_7z.o: $(wildcard $(LZMA7Z)/*.h)
 
 INCS := -Inetfs -I$(ROOT) -I$(ROOT)/apu -I$(ROOT)/apu/bapu -I$(ROOT)/unzip -I$(ZLIB) \
 	-Icoreorbis/include-orbis -Icoreorbis/orbis-shims -Ifrontend
-DEFS := -DRIGHTSHIFT_IS_SAR -DZLIB -DUNZIP_SUPPORT -DSEVENZIP_SUPPORT -DSNES9X_PS5_VERSION='"$(VERSION)"' -DSNES9X_TITLE_ID='"$(TITLE_ID)"' -DSNES9X_UPDATE_REPO='"$(UPDATE_REPO)"'
+# the core's defines (the Snes9x core takes no version), and the port's: the core's plus what this build is
+CORE_DEFS := -DRIGHTSHIFT_IS_SAR -DZLIB -DUNZIP_SUPPORT -DSEVENZIP_SUPPORT
+DEFS := $(CORE_DEFS) -DSNES9X_PS5_VERSION='"$(VERSION)"' -DSNES9X_TITLE_ID='"$(TITLE_ID)"' -DSNES9X_UPDATE_REPO='"$(UPDATE_REPO)"'
+# 2.10: every object built with DEFS depends on this file, which changes only when one of those values changes. Up to
+# 2.9 a new VERSION (or TITLE_ID, UPDATE_REPO) rebuilt nothing: a release built over an earlier build kept the old
+# version in the eboot and the payloads (the version the app tells the helper, the installer's notification, the
+# shelf's line). The file is written while the Makefile is read (by make -n too), only when its text differs ...
+DEFS_STAMP := build/defs.stamp
+DEFS_TEXT := $(VERSION) $(TITLE_ID) $(UPDATE_REPO)
+ifneq ($(shell cat $(DEFS_STAMP) 2>/dev/null),$(DEFS_TEXT))
+$(shell mkdir -p build && printf '%s\n' '$(DEFS_TEXT)' >$(DEFS_STAMP))
+endif
+# ... and made again when something removed it after the Makefile was read (make clean ps5: clean deletes build/)
+$(DEFS_STAMP):
+	@mkdir -p $(dir $@) && printf '%s\n' '$(DEFS_TEXT)' >$@
 WARN := -Wall -Wno-unused-function -Wno-unused-variable -Wno-unused-but-set-variable -Wno-missing-braces \
 	-Wno-char-subscripts -Wno-deprecated-declarations -Wno-sign-compare -Wno-unused-value \
 	-Wno-parentheses -Wno-unknown-warning-option
@@ -123,29 +136,38 @@ PORT_WARN := -Wall -Wextra -Werror -Wno-unused-parameter -Wno-missing-field-init
 GAMEDB_DEFS := -DGAMEDB_TSV='"$(abspath frontend/data/snes-nointro.tsv)"' -DEXTRACRC_TSV='"$(abspath frontend/data/snes-extra-crc.tsv)"' -DDBART_TSV='"$(abspath frontend/data/snes-db-art.tsv)"'
 %/port/frontend/fe_games.o: EXTRA_FLAGS = $(GAMEDB_DEFS)
 %/port/frontend/fe_covers.o: EXTRA_FLAGS = -Wno-error -Wno-sign-compare -Wno-unused-but-set-variable -Wno-implicit-fallthrough -DCOVER_MANIFEST_TXT='"$(abspath frontend/data/snes-cover-index.txt)"' -DTITLE_MANIFEST_TXT='"$(abspath frontend/data/snes-title-index.txt)"' -DSNAP_MANIFEST_TXT='"$(abspath frontend/data/snes-snap-index.txt)"'
-%/port/frontend/fe_covers.o: frontend/data/snes-cover-index.txt frontend/data/snes-title-index.txt frontend/data/snes-snap-index.txt
-%/port/frontend/fe_games.o: frontend/data/snes-nointro.tsv frontend/data/snes-extra-crc.tsv frontend/data/snes-db-art.tsv
 # the border pack code: the built-in frame is embedded in fe_border.o; stb_image in fe_borderimg.o has warnings of its own
 %/port/frontend/fe_border.o: EXTRA_FLAGS = -DBORDER_DEFAULT_PNG='"$(abspath frontend/assets/borders/default.png)"'
-%/port/frontend/fe_border.o: frontend/assets/borders/default.png
 # the names of the borders The Bezel Project has are embedded in fe_borderfetch.o (the pictures are downloaded, ADR 006)
 %/port/frontend/fe_borderfetch.o: EXTRA_FLAGS = -DBORDER_INDEX_TXT='"$(abspath frontend/data/snes-border-index.txt)"'
-%/port/frontend/fe_borderfetch.o: frontend/data/snes-border-index.txt
 %/port/frontend/fe_borderimg.o: EXTRA_FLAGS = -Wno-error -Wno-sign-compare -Wno-unused-but-set-variable -Wno-implicit-fallthrough
 # the UI fonts (PS5SX2's: PCSX2's Roboto Regular and PromptFont) built into fe_text.o
 %/port/frontend/fe_text.o: EXTRA_FLAGS = -DFE_FONT_DIR='"$(abspath frontend/assets/fonts)"' -Wno-error -Wno-sign-compare -Wno-unused-function
-%/port/frontend/fe_text.o: frontend/assets/fonts/Roboto-Regular.ttf frontend/assets/fonts/promptfont.otf \
-	frontend/assets/fonts/fa-brands-400.otf
 # the helper's HTTPS client: Mbed TLS's headers, and Mozilla's CA list built in
 %/port/frontend/fe_tlshttp.o: EXTRA_FLAGS = $(MBEDTLS_FLAGS) -DCACERT_PEM='"$(abspath frontend/data/cacert.pem)"'
-%/port/frontend/fe_tlshttp.o: frontend/data/cacert.pem frontend/fe_mbedtls_config.h
 # the helper payload is installer_main.cpp without the install step
 %/port/installer/helper_main.o: EXTRA_FLAGS = -DSNES9X_HELPER_ONLY
+
+# What an object is built from besides its own source and headers, for both builds. 2.10: explicit targets. Up to 2.9
+# these were pattern rules without a recipe (%/port/frontend/fe_games.o: frontend/data/...), which add no prerequisite
+# to the rule that builds the object: a new No-Intro table, cover index, CA list, font, built-in border or LZMA SDK
+# header left the old one in the eboot.
+PS5_OUT := build/ps5
+HOST_OUT := build/host
+define OBJ_DEPS
+$(PS5_OUT)/port/$(1).o $(HOST_OUT)/port/$(1).o: $(2)
+endef
+$(eval $(call OBJ_DEPS,frontend/fe_covers,frontend/data/snes-cover-index.txt frontend/data/snes-title-index.txt frontend/data/snes-snap-index.txt))
+$(eval $(call OBJ_DEPS,frontend/fe_games,frontend/data/snes-nointro.tsv frontend/data/snes-extra-crc.tsv frontend/data/snes-db-art.tsv))
+$(eval $(call OBJ_DEPS,frontend/fe_border,frontend/assets/borders/default.png))
+$(eval $(call OBJ_DEPS,frontend/fe_borderfetch,frontend/data/snes-border-index.txt))
+$(eval $(call OBJ_DEPS,frontend/fe_text,frontend/assets/fonts/Roboto-Regular.ttf frontend/assets/fonts/promptfont.otf frontend/assets/fonts/fa-brands-400.otf))
+$(eval $(call OBJ_DEPS,frontend/fe_tlshttp,frontend/data/cacert.pem frontend/fe_mbedtls_config.h))
+$(eval $(call OBJ_DEPS,frontend/fe_7z,$(wildcard $(LZMA7Z)/*.h)))
 
 # ---------------- PS5 ----------------
 PS5_CC  := $(PS5_PAYLOAD_SDK)/bin/prospero-clang
 PS5_CXX := $(PS5_PAYLOAD_SDK)/bin/prospero-clang++
-PS5_OUT := build/ps5
 # The PS5's CPU is Zen 2 (PS5SX2 builds with the same -march).
 PS5_OPT := -O3 -fPIC -march=znver2 -fno-strict-aliasing
 # the payloads: notifications, and the kernel access the helper needs (libkernel_sys: sceKernelGetAppInfo)
@@ -166,21 +188,21 @@ ps5: $(PS5_OUT)/Snes9xPS5.elf
 
 $(PS5_OUT)/core/%.o: $(ROOT)/%.cpp
 	@mkdir -p $(dir $@)
-	$(PS5_CXX) -std=c++17 $(PS5_OPT) $(DEFS) $(INCS) $(WARN) -c -o $@ $<
+	$(PS5_CXX) -std=c++17 $(PS5_OPT) $(CORE_DEFS) $(INCS) $(WARN) -c -o $@ $<
 
 $(PS5_OUT)/core/%.o: $(ROOT)/%.c
 	@mkdir -p $(dir $@)
-	$(PS5_CC) $(PS5_OPT) $(DEFS) $(INCS) -w -c -o $@ $<
+	$(PS5_CC) $(PS5_OPT) $(CORE_DEFS) $(INCS) -w -c -o $@ $<
 
 $(PS5_OUT)/mbedtls/%.o: $(MBEDTLS)/library/%.c frontend/fe_mbedtls_config.h
 	@mkdir -p $(dir $@)
 	$(PS5_CC) -Os -fPIC -march=znver2 $(MBEDTLS_FLAGS) -c -o $@ $<
 
-$(PS5_OUT)/port/%.o: %.cpp coreorbis/include-orbis/*.h coreorbis/orbis-shims/*.h frontend/*.h netfs/*.h
+$(PS5_OUT)/port/%.o: %.cpp coreorbis/include-orbis/*.h coreorbis/orbis-shims/*.h frontend/*.h netfs/*.h $(DEFS_STAMP)
 	@mkdir -p $(dir $@)
 	$(PS5_CXX) -std=c++17 $(PS5_OPT) $(DEFS) $(INCS) $(PORT_WARN) $(EXTRA_FLAGS) -c -o $@ $<
 
-$(PS5_OUT)/port/installer/helper_main.o: installer/installer_main.cpp coreorbis/include-orbis/*.h coreorbis/orbis-shims/*.h
+$(PS5_OUT)/port/installer/helper_main.o: installer/installer_main.cpp coreorbis/include-orbis/*.h coreorbis/orbis-shims/*.h $(DEFS_STAMP)
 	@mkdir -p $(dir $@)
 	$(PS5_CXX) -std=c++17 $(PS5_OPT) $(DEFS) $(INCS) $(PORT_WARN) $(EXTRA_FLAGS) -c -o $@ $<
 
@@ -204,7 +226,7 @@ $(PS5_OUT)/lzma7z/%.o: $(LZMA7Z)/%.c $(wildcard $(LZMA7Z)/*.h)
 $(PS5_OUT)/Snes9xPS5-helper.elf: $(PS5_HELPER_OBJ)
 	$(PS5_CXX) -o $@ $^ $(PS5_PAYLOAD_LIBS)
 
-$(PS5_OUT)/helper_data.o: coreorbis/orbis-shims/helper_data.cpp coreorbis/orbis-shims/ProsperoJailbreak.h $(PS5_OUT)/Snes9xPS5-helper.elf
+$(PS5_OUT)/helper_data.o: coreorbis/orbis-shims/helper_data.cpp coreorbis/orbis-shims/ProsperoJailbreak.h $(PS5_OUT)/Snes9xPS5-helper.elf $(DEFS_STAMP)
 	$(PS5_CXX) -std=c++17 $(PS5_OPT) $(DEFS) $(INCS) $(PORT_WARN) -DHELPER_ELF='"$(abspath $(PS5_OUT)/Snes9xPS5-helper.elf)"' -c -o $@ $<
 
 # 3. the installer + helper, with the app folder built in
@@ -217,7 +239,7 @@ APP_DATA_DEFS = -DAPP_EBOOT='"$(abspath $(APP_OUT)/eboot.bin)"' -DAPP_PARAM='"$(
 	-DAPP_LIBC='"$(abspath $(APP_OUT)/sce_module/libc.prx)"' \
 	$(if $(shell cmp -s app/sce_sys/pic0.dds app/sce_sys/pic1.dds && echo same),-DAPP_PIC1_IS_PIC0)
 
-$(PS5_OUT)/install_data.o: coreorbis/orbis-shims/install_data.cpp coreorbis/orbis-shims/ProsperoInstall.h $(APP_FILES)
+$(PS5_OUT)/install_data.o: coreorbis/orbis-shims/install_data.cpp coreorbis/orbis-shims/ProsperoInstall.h $(APP_FILES) $(DEFS_STAMP)
 	$(PS5_CXX) -std=c++17 $(PS5_OPT) $(DEFS) $(INCS) $(PORT_WARN) $(APP_DATA_DEFS) -c -o $@ $<
 
 $(PS5_OUT)/Snes9xPS5.elf: $(PS5_INSTALLER_OBJ) $(PS5_OUT)/install_data.o
@@ -259,8 +281,11 @@ LIBC_BUILDER := $(NATIVE)/build/host/libc-builder
 LLD ?= ld.lld
 NATIVE_CLANG = PS5_PAYLOAD_SDK=$(PS5_PAYLOAD_SDK) sh $(NATIVE)/tooling/prospero-clang18
 SDK_LIB := $(PS5_PAYLOAD_SDK)/target/lib
-# every system-module stub but the two PS5SX2 leaves out (link-vk.sh)
-APP_STUBS = $(filter-out %/libScePosixForWebKit.so %/libSceGLSlimVSH.so,$(sort $(wildcard $(SDK_LIB)/*.so)))
+# every system-module stub but the two PS5SX2 leaves out (link-vk.sh), and not libkernel_sys / libkernel_web either
+# (2.10): a title can't load them (Media Player Classic PS5 1.5 picked libkernel_sys up through statfs and crashed at
+# launch); with them left out such a symbol is a link error. tools/check_imports.py checks the result.
+APP_STUBS = $(filter-out %/libScePosixForWebKit.so %/libSceGLSlimVSH.so %/libkernel_sys.so %/libkernel_web.so,\
+	$(sort $(wildcard $(SDK_LIB)/*.so)))
 
 $(NATIVE_TOOL): $(NATIVE)/tooling/native/native_app_builder.cpp $(NATIVE)/tooling/native/elf_object.cpp \
 		$(NATIVE)/tooling/native/self_container.cpp $(NATIVE)/tooling/native/sce_module_writer.cpp
@@ -285,21 +310,33 @@ $(APP_OUT)/sce_module/libc.prx: build/app/libc.prx
 
 app: $(APP_FILES)
 
+# app_cpp_runtime.cpp (operator new / delete) with exceptions (2.10, as Stella PS5 1.0.2): a failed allocation throws
+# std::bad_alloc, as the C++ standard says, instead of stopping the app with SIGILL; the eboot's C++ runtime is whole
+# (below), so the throw reaches the catch the code has for it, or std::terminate, which the crash log reports
+APP_CRT_EH_app_crt := -fno-exceptions
+APP_CRT_EH_app_cpp_runtime := -fexceptions
 build/app/app_crt.o build/app/app_cpp_runtime.o: build/app/%.o: $(NATIVE)/tooling/native/%.cpp
 	@mkdir -p $(dir $@)
-	$(NATIVE_CLANG) -std=c++20 -O2 -Wall -Wextra -fno-exceptions -fno-rtti -ffunction-sections -fdata-sections \
+	$(NATIVE_CLANG) -std=c++20 -O2 -Wall -Wextra $(APP_CRT_EH_$*) -fno-rtti -ffunction-sections -fdata-sections \
 		-c -o $@ $<
 
 EBOOT_OBJS = build/app/app_crt.o build/app/app_cpp_runtime.o $(PS5_CORE_OBJ) $(PS5_EMU_OBJ) $(PS5_ZLIB_OBJ) \
 	$(PS5_LIBSMB2_OBJ) $(PS5_LIBNFS_OBJ) $(PS5_LZMA7Z_OBJ) $(PS5_OUT)/helper_data.o
+# 2.10: the C++ runtime is the eboot's own, whole: libc++, libc++abi (__cxa_throw, the personality routine, the
+# type_info vtables) and libunwind (which finds the FDEs through ehframe.ld's __eh_frame_hdr_start), named before the
+# system stubs. Up to 2.9 they came after them, and libSceLibcInternal's stub won the personality routine,
+# __cxa_get_globals and the type_info / std exception vtables while __cxa_throw and the unwinder were static: the mix
+# Stella PS5 1.0 crashed with at its first throw. tools/check_imports.py refuses any C++ runtime import, any module
+# outside the allow-list and any symbol only libkernel_sys / libkernel_web has.
 build/app/snes9x-pie.elf: $(EBOOT_OBJS) $(NATIVE)/tooling/native/ps5-pie.ld $(NATIVE)/tooling/native/ehframe.ld \
-		$(NATIVE)/tooling/native/app-symbols.map $(NATIVE)/tooling/native/localize.map
+		$(NATIVE)/tooling/native/app-symbols.map $(NATIVE)/tooling/native/localize.map tools/check_imports.py
 	$(LLD) -m elf_x86_64 -pie -z max-page-size=0x4000 --hash-style=gnu \
 		-T $(NATIVE)/tooling/native/ps5-pie.ld -T $(NATIVE)/tooling/native/ehframe.ld --eh-frame-hdr \
 		--version-script $(NATIVE)/tooling/native/app-symbols.map --version-script $(NATIVE)/tooling/native/localize.map \
 		$(NETFS_WRAP_LLD) -e _start --no-dynamic-linker -o $@ $(EBOOT_OBJS) \
-		--as-needed $(APP_STUBS) -L $(SDK_LIB) \
-		$(SDK_LIB)/libc++.a $(SDK_LIB)/libc++abi.a $(SDK_LIB)/libunwind.a $(SDK_LIB)/libc.a -lpthread
+		$(SDK_LIB)/libc++.a $(SDK_LIB)/libc++abi.a $(SDK_LIB)/libunwind.a \
+		--as-needed $(APP_STUBS) -L $(SDK_LIB) $(SDK_LIB)/libc.a -lpthread
+	python3 tools/check_imports.py $@ $(SDK_LIB) || { rm -f $@; exit 1; }
 
 build/app/eboot.elf: build/app/snes9x-pie.elf $(NATIVE_TOOL)
 	$(NATIVE_TOOL) link --in $< --out $@ --stub-dir $(SDK_LIB) --module-sdk 0x02000009 \
@@ -329,7 +366,6 @@ $(APP_OUT)/sce_sys/%.dds: app/sce_sys/%.dds
 # ---------------- host ----------------
 HOST_CC ?= gcc
 HOST_CXX ?= g++
-HOST_OUT := build/host
 HOST_SAN ?= -fsanitize=address,undefined -fno-omit-frame-pointer
 # no _FORTIFY_SOURCE: it turns fread/fgets/read into __fread_chk/..., which --wrap (netfs) does not see
 HOST_OPT := -O1 -g -mavx2 -fno-strict-aliasing -U_FORTIFY_SOURCE
@@ -351,21 +387,21 @@ host: $(HOST_OUT)/snes9x-ps5-host $(HOST_OUT)/snes9x-ps5-installer $(HOST_OUT)/s
 
 $(HOST_OUT)/core/%.o: $(ROOT)/%.cpp
 	@mkdir -p $(dir $@)
-	$(HOST_CXX) -std=c++17 $(HOST_OPT) $(HOST_SAN) $(HOST_CORE_NOSAN) -include cstdint $(DEFS) $(INCS) $(WARN) -c -o $@ $<
+	$(HOST_CXX) -std=c++17 $(HOST_OPT) $(HOST_SAN) $(HOST_CORE_NOSAN) -include cstdint $(CORE_DEFS) $(INCS) $(WARN) -c -o $@ $<
 
 $(HOST_OUT)/core/%.o: $(ROOT)/%.c
 	@mkdir -p $(dir $@)
-	$(HOST_CC) $(HOST_OPT) $(HOST_SAN) $(DEFS) $(INCS) -w -c -o $@ $<
+	$(HOST_CC) $(HOST_OPT) $(HOST_SAN) $(CORE_DEFS) $(INCS) -w -c -o $@ $<
 
 $(HOST_OUT)/mbedtls/%.o: $(MBEDTLS)/library/%.c frontend/fe_mbedtls_config.h
 	@mkdir -p $(dir $@)
 	$(HOST_CC) -O2 -g1 $(MBEDTLS_FLAGS) -c -o $@ $<
 
-$(HOST_OUT)/port/%.o: %.cpp coreorbis/include-orbis/*.h coreorbis/orbis-shims/*.h frontend/*.h netfs/*.h
+$(HOST_OUT)/port/%.o: %.cpp coreorbis/include-orbis/*.h coreorbis/orbis-shims/*.h frontend/*.h netfs/*.h $(DEFS_STAMP)
 	@mkdir -p $(dir $@)
 	$(HOST_CXX) -std=c++17 $(HOST_OPT) $(HOST_SAN) $(DEFS) $(INCS) $(PORT_WARN) $(EXTRA_FLAGS) -c -o $@ $<
 
-$(HOST_OUT)/port/installer/helper_main.o: installer/installer_main.cpp coreorbis/include-orbis/*.h coreorbis/orbis-shims/*.h
+$(HOST_OUT)/port/installer/helper_main.o: installer/installer_main.cpp coreorbis/include-orbis/*.h coreorbis/orbis-shims/*.h $(DEFS_STAMP)
 	@mkdir -p $(dir $@)
 	$(HOST_CXX) -std=c++17 $(HOST_OPT) $(HOST_SAN) $(DEFS) $(INCS) $(PORT_WARN) $(EXTRA_FLAGS) -c -o $@ $<
 
@@ -394,11 +430,12 @@ HOST_APP_DEFS = -DAPP_EBOOT='"$(abspath tests/fake-eboot.bin)"' -DAPP_PARAM='"$(
 	-DAPP_LIBC='"$(abspath tests/fake-libc.prx)"'
 
 $(HOST_OUT)/install_data.o: coreorbis/orbis-shims/install_data.cpp coreorbis/orbis-shims/ProsperoInstall.h \
-		tests/fake-eboot.bin tests/fake-libc.prx app/sce_sys/param.json app/sce_sys/icon0.png app/sce_sys/pic0.dds app/sce_sys/pic1.dds
+		tests/fake-eboot.bin tests/fake-libc.prx app/sce_sys/param.json app/sce_sys/icon0.png app/sce_sys/pic0.dds app/sce_sys/pic1.dds \
+		$(DEFS_STAMP)
 	@mkdir -p $(dir $@)
 	$(HOST_CXX) -std=c++17 $(HOST_OPT) $(DEFS) $(INCS) $(PORT_WARN) $(HOST_APP_DEFS) -c -o $@ $<
 
-$(HOST_OUT)/helper_data.o: coreorbis/orbis-shims/helper_data.cpp coreorbis/orbis-shims/ProsperoJailbreak.h $(HOST_OUT)/snes9x-ps5-helper
+$(HOST_OUT)/helper_data.o: coreorbis/orbis-shims/helper_data.cpp coreorbis/orbis-shims/ProsperoJailbreak.h $(HOST_OUT)/snes9x-ps5-helper $(DEFS_STAMP)
 	@mkdir -p $(dir $@)
 	$(HOST_CXX) -std=c++17 $(HOST_OPT) $(DEFS) $(INCS) $(PORT_WARN) -DHELPER_ELF='"$(abspath $(HOST_OUT)/snes9x-ps5-helper)"' -c -o $@ $<
 
