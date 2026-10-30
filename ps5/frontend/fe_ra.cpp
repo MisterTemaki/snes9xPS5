@@ -88,6 +88,9 @@ struct State
 	std::string hash; // the game's hash, to ask for its set again once a login that came late goes through
 	double last_frame = -1000, last_idle = -1000;
 	double retry_at = 0, retry_delay = 0; // 2.11 review: the saved token tried again while the network is down
+	// 2.11 second review: the saved login, as login.txt has it (read once at start; written and deleted by the request
+	// thread, net::FileWork), so no retry or login touches the disk on this thread. The token is redacted from the logs.
+	std::string saved_user, saved_token;
 	bool drew = false; // the overlay drew something last time (the shelf redraws once more to clear it)
 	// the set came only after the game had started without it (a login that went through late): states and cheats were
 	// allowed meanwhile, so this game counts as softcore, whatever the setting (RetroAchievements: hardcore can't start
@@ -225,9 +228,26 @@ bool WriteLogin(const std::string& user, const std::string& token)
 	return true;
 }
 
+// 2.11 second review: the saved login changed: kept here, the file written by the request thread
+void SaveLogin(const std::string& user, const std::string& token)
+{
+	if (user == g.saved_user && token == g.saved_token)
+		return; // a token login gets the same token back: nothing to write
+	Wipe(g.saved_token);
+	g.saved_user = user;
+	g.saved_token = token;
+	net::FileWork([user = std::string(user), token = std::string(token)]() mutable {
+		if (!WriteLogin(user, token))
+			OrbisLog("[ra] could not save the login in %s", LoginFile().c_str());
+		Wipe(token);
+	});
+}
+
 void ForgetLogin()
 {
-	unlink(LoginFile().c_str());
+	g.saved_user.clear();
+	Wipe(g.saved_token);
+	net::FileWork([] { unlink(LoginFile().c_str()); });
 }
 
 // ---- the notifications ----------------------------------------------------------------------------------------------
@@ -276,17 +296,39 @@ void FetchBadge(const rc_client_achievement_t* ach)
 #endif
 	// 2.11 review: the cache read, the download and the cache write all happen on the request thread (fe_ranet.h); only
 	// the small PNG's decoding is left for this thread
-	net::FetchCached(url, BadgeFile(name), UserAgent(), "badge " + name, [name](const net::Answer& a) {
+	net::FetchCached(url, BadgeFile(name), UserAgent(), "badge " + name, [name, url](const net::Answer& a) {
 		fe::border::Image img;
-		if (a.outcome == net::Outcome::Http && a.http == 200 &&
-			fe::border::DecodeSmallPng(reinterpret_cast<const uint8_t*>(a.body.data()), a.body.size(), 256, &img))
+		if (a.outcome != net::Outcome::Http || a.http != 200)
+			return;
+		if (fe::border::DecodeSmallPng(reinterpret_cast<const uint8_t*>(a.body.data()), a.body.size(), 256, &img))
 			AttachBadge(name, img);
+		else if (a.from_cache)
+		{
+			// 2.11 second review: a cached file that looks like a PNG but doesn't decode is fetched again (once) and
+			// overwritten, so a bad file is never there for good
+			OrbisLog("[ra] badge %s: the cached picture doesn't decode: fetched again", name.c_str());
+			net::FetchCached(url, BadgeFile(name), UserAgent(), "badge " + name, [name](const net::Answer& b) {
+				fe::border::Image again;
+				if (b.outcome == net::Outcome::Http && b.http == 200 &&
+					fe::border::DecodeSmallPng(reinterpret_cast<const uint8_t*>(b.body.data()), b.body.size(), 256, &again))
+					AttachBadge(name, again);
+			}, true);
+		}
+		else
+			OrbisLog("[ra] badge %s: the picture doesn't decode", name.c_str());
 	});
 }
 
 bool NetworkIssue()
 {
 	return g.issue == Issue::NoHelper || g.issue == Issue::Offline || g.issue == Issue::Server;
+}
+
+// 2.11 second review: a failed token login is tried again by itself for these: no network, the server down, and a helper
+// too old (the player may send the 2.11 payload while the app runs)
+bool RetryableIssue()
+{
+	return NetworkIssue() || g.issue == Issue::OldHelper;
 }
 
 // 2.11 review: the next try of a saved token whose login failed for want of a network: 10 s, then twice as long each time,
@@ -539,12 +581,10 @@ void OnLogin(int result, const char* error_message, rc_client_t* client, void*)
 			OrbisLogRedact(user->token);
 			OrbisLogRedact(FormEncoded(user->token));
 		}
-		// the token, kept for the next start (written again only when it changed: a token login gets the same one)
-		std::string saved_user, saved_token;
-		ReadLogin(&saved_user, &saved_token);
-		if (user->token && (saved_user != user->username || saved_token != user->token) && !WriteLogin(user->username, user->token))
-			OrbisLog("[ra] could not save the login in %s", LoginFile().c_str());
-		Wipe(saved_token);
+		// the token, kept for the next start (written again only when it changed: a token login gets the same one; the
+		// file is written by the request thread)
+		if (user->token && user->username)
+			SaveLogin(user->username, user->token);
 		OrbisLog("[ra] logged in as %s (%u points, softcore %u)", user->display_name, user->score, user->score_softcore);
 		g.retry_delay = 0;
 		g.retry_at = 0;
@@ -565,8 +605,9 @@ void OnLogin(int result, const char* error_message, rc_client_t* client, void*)
 	}
 	g.login = Login::Failed;
 	OrbisLog("[ra] login failed (%d): %s", result, g.login_message.c_str());
-	// 2.11 review: no network (or no helper, or the server down): the saved token is tried again by itself, also on the shelf
-	if (g.login_with_token && NetworkIssue())
+	// 2.11 review: no network (or no helper, or the server down, or -- second review -- a helper too old): the saved token
+	// is tried again by itself, also on the shelf
+	if (g.login_with_token && RetryableIssue())
 		ScheduleRetry();
 	// a token the server refuses is no use: forgotten (the player logs in again from Settings). A network problem keeps it.
 	if (result == RC_INVALID_CREDENTIALS || result == RC_EXPIRED_TOKEN || result == RC_ACCESS_DENIED)
@@ -576,7 +617,7 @@ void OnLogin(int result, const char* error_message, rc_client_t* client, void*)
 	}
 }
 
-void BeginTokenLogin(const std::string& user, std::string& token)
+void BeginTokenLogin(const std::string& user, std::string token)
 {
 	g.login = Login::Pending;
 	g.login_with_token = true;
@@ -661,6 +702,7 @@ void Init()
 	std::string user, token;
 	if (!ReadLogin(&user, &token))
 	{
+		Wipe(token);
 		OrbisLog("[ra] no RetroAchievements login: achievements off");
 		return;
 	}
@@ -669,7 +711,12 @@ void Init()
 		Wipe(token);
 		return;
 	}
-	BeginTokenLogin(user, token);
+	OrbisLogRedact(token);
+	OrbisLogRedact(FormEncoded(token));
+	g.saved_user = user;
+	g.saved_token = token;
+	Wipe(token);
+	BeginTokenLogin(g.saved_user, g.saved_token);
 }
 
 void Shutdown()
@@ -683,13 +730,13 @@ void Pump()
 		return;
 	net::Pump();
 	const double now = Now();
-	// 2.11 review: the saved token, tried again while the network was the problem (on the shelf too)
-	if (g.login == Login::Failed && g.retry_at > 0 && now >= g.retry_at && NetworkIssue())
+	// 2.11 review: the saved token, tried again while the network was the problem (on the shelf too); second review: also
+	// after an old helper, and from memory (no file read here)
+	if (g.login == Login::Failed && g.retry_at > 0 && now >= g.retry_at && RetryableIssue())
 	{
 		g.retry_at = 0;
-		std::string user, token;
-		if (ReadLogin(&user, &token))
-			BeginTokenLogin(user, token);
+		if (!g.saved_token.empty())
+			BeginTokenLogin(g.saved_user, g.saved_token);
 	}
 	if (g.login == Login::LoggedIn && now - g.last_frame > 1.0 && now - g.last_idle >= 1.0)
 	{
@@ -709,7 +756,7 @@ bool AccountActive()
 		return false;
 	// a failed login stays "on" only while the network is to blame (it is tried again) or the helper is too old (said
 	// at each game); one the server refused is off for the session
-	return g.login != Login::Failed || NetworkIssue() || g.issue == Issue::OldHelper;
+	return g.login != Login::Failed || RetryableIssue();
 }
 
 std::string UserName()
@@ -763,6 +810,8 @@ void BeginLogin(const std::string& user, std::string& password)
 	g.login_with_token = false;
 	g.login_tried_at = Now();
 	g.issue = Issue::None;
+	g.retry_at = 0; // 2.11 second review: no saved-token retry left over from before
+	g.retry_delay = 0;
 	OrbisLog("[ra] logging in as %s with a password", user.c_str());
 	rc_client_begin_login_with_password(g.client, user.c_str(), password.c_str(), OnLogin, nullptr);
 	Wipe(password);
@@ -780,6 +829,8 @@ void Logout()
 	ForgetLogin();
 	g.login = Login::None;
 	g.issue = Issue::None;
+	g.retry_at = 0; // 2.11 second review: nothing left to try again
+	g.retry_delay = 0;
 	if (g.game != GameRa::Off)
 		g.game = GameRa::Off;
 	g.trackers.clear();
@@ -845,7 +896,7 @@ bool CanPause(int* seconds_left)
 	return false;
 }
 
-void GameStarted(const std::string& rom_path, const std::vector<uint8_t>* patched)
+void GameStarted(const std::string& rom_path, bool patch_tried, const std::vector<uint8_t>* patched)
 {
 	g.game_open = true;
 	g.game = GameRa::Off;
@@ -857,9 +908,13 @@ void GameStarted(const std::string& rom_path, const std::vector<uint8_t>* patche
 	g.progress_until = 0;
 	if (!AccountActive())
 		return; // no account, or one the server refused this session: nothing
-	if (g.login == Login::Failed)
+	// 2.11 second review: a soft patch's reader ran on the ROM (applied, or stopped half way: an IPS without its "EOF")
+	// but no copy of the bytes it left could be kept: the file is not the game that runs, so it is never hashed
+	if (patch_tried && !patched)
 	{
-		Notify(fe::T("Achievements unavailable"), Problem());
+		OrbisLog("[ra] %s: soft-patched, but the patched ROM could not be kept for its hash: no achievements", rom_path.c_str());
+		g.game = GameRa::Unknown;
+		Notify(fe::T("RetroAchievements"), fe::T("Unknown game: no achievements"));
 		return;
 	}
 	std::string hash, why;
@@ -879,9 +934,33 @@ void GameStarted(const std::string& rom_path, const std::vector<uint8_t>* patche
 	}
 	OrbisLog("[ra] %s: hash %s%s (%.0f ms)", rom_path.c_str(), hash.c_str(), patched ? " (soft-patched ROM)" : "",
 		(Now() - t0) * 1000.0);
+	// kept whatever comes next: a login that goes through later asks for this game's set again
 	g.hash = hash;
+	if (g.login == Login::Failed)
+	{
+		// 2.11 second review: the saved login failed for a reason that may be gone (no network, the server down, an old
+		// helper): tried again now, at most every 5 s, and the set asked for behind it -- rc_client waits for the login,
+		// so the game is a session as the setting says from its first frame (hardcore restrictions included)
+		if (g.login_with_token && !g.saved_token.empty() && Now() - g.login_tried_at >= 5)
+		{
+			OrbisLog("[ra] the saved login is tried again for this game");
+			g.retry_at = 0;
+			BeginTokenLogin(g.saved_user, g.saved_token);
+		}
+		else
+		{
+			g.game = GameRa::Failed;
+			Notify(fe::T("Achievements unavailable"), Problem());
+			return;
+		}
+	}
 	g.game = GameRa::Loading;
 	rc_client_begin_load_game(g.client, hash.c_str(), OnGameLoaded, nullptr);
+}
+
+bool SessionSoftcore()
+{
+	return g.session_softcore && g.game_open;
 }
 
 void GameClosed()

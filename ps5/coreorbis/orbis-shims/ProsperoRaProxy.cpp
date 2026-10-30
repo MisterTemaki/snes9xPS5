@@ -7,6 +7,7 @@
 #include "ProsperoThread.h"
 #include "fe_tlshttp.h"
 
+#include <algorithm>
 #include <cerrno>
 #include <condition_variable>
 #include <cstdio>
@@ -263,6 +264,24 @@ void SecretsOf(const std::string& post, std::string* password, std::string* toke
 		*token = Field(post, "t");
 }
 
+void Refuse(int fd, const jailbreak::Request& req, int64_t deadline_ms, const char* why)
+{
+	// the body read and dropped first (at most kRaMaxPost, until the deadline): closing with it unread would reset the
+	// connection, and the answer could be lost with it
+	char sink[4096];
+	size_t left = req.ret > 0 && uint32_t(req.ret) <= jailbreak::kRaMaxPost ? size_t(req.ret) : 0;
+	while (left > 0 && WaitFd(fd, POLLIN, deadline_ms))
+	{
+		const ssize_t n = recv(fd, sink, std::min(left, sizeof(sink)), 0);
+		if (n <= 0)
+			break;
+		left -= size_t(n);
+	}
+	const std::vector<uint8_t> none;
+	Answer(fd, jailbreak::kRaRefused, 0, none, why);
+	close(fd);
+}
+
 void Take(int fd, const jailbreak::Request& req_in, int64_t deadline_ms)
 {
 	jailbreak::Request req = req_in;
@@ -306,6 +325,8 @@ void Take(int fd, const jailbreak::Request& req_in, int64_t deadline_ms)
 	if (got != job.post.size())
 	{
 		OrbisLog("[ra] pid %d: %s cut short (%zu of %zu bytes)", req.pid, job.what.c_str(), got, job.post.size());
+		// 2.11 second review: answered all the same (a connection closed with nothing back means a 2.10 helper to the app)
+		Answer(fd, jailbreak::kRaNetwork, 0, none, "the request was cut short");
 		close(fd);
 		return;
 	}

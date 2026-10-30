@@ -42,7 +42,8 @@ enum class Login
 	None, // no account: nothing happens
 	Pending, // a login is under way
 	LoggedIn,
-	Failed, // the last login failed (LoginError says why); a saved token is tried again at the next game
+	Failed, // the last login failed (Problem() says why); for want of a network (or with an old helper) the saved token is
+	        // tried again by itself (Pump) and at a game's start
 };
 Login LoginState();
 // 2.11 review: an account that counts this session: logged in, logging in, or a login that failed for want of a network
@@ -64,13 +65,17 @@ bool HardcoreSetting();
 bool SetHardcore(bool on, std::string* refused = nullptr);
 // The restrictions apply now: hardcore on, an account, and a game whose achievements are loaded or still loading.
 bool HardcoreActive();
+// 2.11 second review: the running game is softcore although the setting is on (its set came only after it started:
+// a login that went through late); the pause menu says so.
+bool SessionSoftcore();
 // Whether the pause menu may open now (rc_client_can_pause in hardcore; always outside it); seconds to wait when not.
 bool CanPause(int* seconds_left);
 
 // ---- the game (fe_emu.cpp calls these)
-// After the ROM loaded: the hash, then the set from the server. `patched`: the ROM's bytes after a soft patch Snes9x
-// applied (memmap.cpp, S9xRomPatched), which are hashed instead of the file
-void GameStarted(const std::string& rom_path, const std::vector<uint8_t>* patched = nullptr);
+// After the ROM loaded: the hash, then the set from the server. `patch_tried`: Snes9x ran a soft patch's reader on the
+// ROM (memmap.cpp, Memory.PatchTried); `patched` then holds the bytes it left (S9xRomPatched), which are hashed instead of
+// the file -- and without them the game is unknown: a patched game is never hashed as its file.
+void GameStarted(const std::string& rom_path, bool patch_tried = false, const std::vector<uint8_t>* patched = nullptr);
 void GameClosed();
 void Frame(); // after every emulated frame
 void OnReset(); // the game was reset (rc_client_reset)

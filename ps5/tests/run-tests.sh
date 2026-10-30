@@ -2608,6 +2608,7 @@ expect "[ \$(ra_req r=login2) -ge 2 ] && grep -q 'logged in as Tester' $T/root/l
 expect "[ \$(ra_req r=achievementsets m=$RA_HASH) = 1 ] && [ \$(ra_note 'Snes9x RA Test | 0 of 4 achievements unlocked') = 1 ]" "then the game's set is loaded, in the game that was already running"
 expect "[ \$(ra_req r=awardachievement a=101) -ge 1 ] && grep -q 'Achievement 101 awarded' $T/root/logs/boot.log" "a slow answer to the unlock: tried again, the unlock arrives"
 expect "grep -q 'softcore for this game: it started without it' $T/root/logs/boot.log && [ \$(ra_req r=awardachievement a=101 h=1) = 0 ] && [ \$(ra_req r=awardachievement a=101 h=0) -ge 1 ]" "a set that came after the game started (states and cheats were allowed meanwhile): that game counts as softcore"
+expect "grep -q 'pause menu (RetroAchievements rows: yes, hardcore: on (next game))' $T/root/logs/boot.log" "and the pause menu's Hardcore row says so: On (next game)"
 ra_stop
 
 # 44m (L1): a login the server refused is off for the session: no notification at a game's start, no Achievements or
@@ -2683,6 +2684,150 @@ ra_server; ra_helper
 rc=$(rarun "$T" "0:0;$(PAUSE_DOWN 200 7);260:$CROSS;262:0;280:$CIRCLE;282:0;400:$L3R3;402:0;410:$UP;412:0;420:$CROSS;422:0" "" "$T/root/roms/RA Test.sfc")
 expect "[ $rc = 0 ] && grep -q '50 fps, PAL' $T/root/logs/boot.log && grep -q 'hardcore not turned on: snes9x.conf forces PAL' $T/root/logs/boot.log && ! grep -q 'the game is reset' $T/root/logs/boot.log" "a game forced to PAL by snes9x.conf: hardcore can't be turned on mid-game (said so), the game isn't reset"
 expect "grep -q 'ra_hardcore=0' $T/root/snes9x-ps5.ini" "and the setting stays off"
+ra_stop
+
+# --- 2.11 second review ---
+waitcount() { for i in $(seq 1 300); do [ "$(grep -c "$1" "$T/root/logs/boot.log" 2>/dev/null)" -ge "$2" ] && return 0; sleep 0.1; done; return 1; }
+OLD_HELPER_PY='
+import socket, struct, sys, time
+s = socket.socket(); s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+s.bind(("127.0.0.1", int(sys.argv[1]))); s.listen(4); s.settimeout(40)
+end = time.time() + 40
+while time.time() < end:
+    try:
+        c, _ = s.accept()
+    except OSError:
+        break
+    req = b""
+    while len(req) < 0xA10:
+        d = c.recv(0xA10 - len(req))
+        if not d: break
+        req += d
+    if len(req) == 0xA10:
+        magic, cmd, pid, ret = struct.unpack_from("<IiiI", req, 0)
+        if cmd == 5:  # the jailbreak: yes; anything else: closed without a word, as 2.10 helper does
+            out = bytearray(req); struct.pack_into("<i", out, 12, 0); out[16:18] = b"ok"; c.sendall(bytes(out))
+    c.close()
+'
+
+# 44q (second review H1): an IPS without its "EOF" (Snes9x applies it, then calls it failed) is hashed as patched all the
+# same; the same game loaded again in the same run once the patch is gone is hashed as the original (nothing left over)
+ra_setup t44q
+ra_token
+RA_PATCHED=$(python3 - "$T/root/roms/RA Test.sfc" "$T/root/roms/RA Test.ips" <<'PY'
+import hashlib, sys
+rom = bytearray(open(sys.argv[1], 'rb').read())
+at = rom.index(b'\xAD\x19\x42\x85\x10') + 4  # LDA $4219; STA $10 -> STA $12
+open(sys.argv[2], 'wb').write(b'PATCH' + at.to_bytes(3, 'big') + (1).to_bytes(2, 'big') + b'\x12')  # no "EOF"
+rom[at] = 0x12
+print(hashlib.md5(bytes(rom)).hexdigest())
+PY
+)
+ra_server; ra_helper
+( SNES9X_HOST_REALTIME=1 MAXFLIPS=1700 rarun "$T" "0:0;40:$CROSS;42:0;300:$L3R3;302:0;310:$UP;312:0;316:$UP;318:0;324:$CROSS;326:0;800:$CROSS;802:0;1100:$L3R3;1102:0;1110:$UP;1112:0;1116:$UP;1118:0;1124:$CROSS;1126:0;1400:$OPTIONS;1402:0;1410:$CROSS;1412:0" "" >"$T/rc.txt" ) &
+GAME=$!
+waitlog '\[ra\] .*RA Test.sfc: hash'
+waitcount 'first frame' 2
+rm -f "$T/root/roms/RA Test.ips"
+wait $GAME
+expect "[ \"\$(cat $T/rc.txt)\" = 0 ] && grep -q 'a soft patch was read' $T/root/logs/boot.log && [ \$(ra_req r=achievementsets m=$RA_PATCHED) = 1 ]" "an IPS without its EOF: applied, and the game hashed as patched ($RA_PATCHED)"
+expect "grep '\[ra\] .*RA Test.sfc: hash' $T/root/logs/boot.log | sed -n 2p | grep -q '$RA_HASH (' && [ \$(ra_req r=achievementsets m=$RA_HASH) = 1 ]" "the same game loaded again without the patch: hashed as the original (no patched bytes left over)"
+ra_stop
+# the patched bytes could not be copied (out of memory): the game is unknown, the file (not what runs) never hashed
+ra_setup t44q2
+ra_token
+python3 - "$T/root/roms/RA Test.sfc" "$T/root/roms/RA Test.ips" <<'PY'
+import sys
+rom = open(sys.argv[1], 'rb').read(); at = rom.index(b'\xAD\x19\x42\x85\x10') + 4
+open(sys.argv[2], 'wb').write(b'PATCH' + at.to_bytes(3, 'big') + (1).to_bytes(2, 'big') + b'\x12EOF')
+PY
+ra_server; ra_helper
+rc=$(SNES9X_HOST_PATCH_COPY_FAILS=1 rarun "$T" "0:0;100:8080;160:0;300:$L3R3;302:0;310:$UP;312:0;320:$CROSS;322:0" "" "$T/root/roms/RA Test.sfc")
+expect "[ $rc = 0 ] && [ \$(ra_req r=achievementsets) = 0 ] && [ \$(ra_note 'RetroAchievements | Unknown game: no achievements') = 1 ] && [ \$(ra_req r=awardachievement) = 0 ]" "a soft patch whose bytes could not be kept: an unknown game, the original file never hashed"
+ra_stop
+
+# 44r (second review M1a): the app started with a 2.10 helper; the player sends the 2.11 payload while it runs: the saved
+# token is tried again by itself (on the shelf) and goes through
+ra_setup t44r
+ra_token
+python3 -c "$OLD_HELPER_PY" "$SNES9X_HELPER_PORT" &
+OLDH=$!
+sleep 0.5
+( SNES9X_HOST_RA_RETRY_S=2 SNES9X_HOST_REALTIME=1 MAXFLIPS=1500 rarun "$T" "0:0;1300:$OPTIONS;1302:0;1310:$CROSS;1312:0" "" >"$T/rc.txt" ) &
+GAME=$!
+waitlog 'r=login2: an older helper'
+kill $OLDH 2>/dev/null; wait $OLDH 2>/dev/null
+ra_server; ra_helper
+waitlog 'logged in as Tester'
+wait $GAME
+expect "[ \"\$(cat $T/rc.txt)\" = 0 ] && grep -q 'r=login2: an older helper' $T/root/logs/boot.log && grep -q 'logged in as Tester' $T/root/logs/boot.log && [ \$(ra_req r=login2 token_ok=True) = 1 ]" "an older helper, then the 2.11 one: the saved token is tried again and goes through"
+ra_stop
+
+# 44s (second review M1b): booted with the server out of reach; it is back before the game starts: the game's start tries
+# the saved token at once (no wait for the next retry), and the game is a hardcore session from its first frame
+ra_setup t44s
+ra_token
+ra_helper
+( SNES9X_HOST_RA_RETRY_S=60 SNES9X_HOST_REALTIME=1 MAXFLIPS=1800 rarun "$T" "0:0;600:$CROSS;602:0;$(B_HOLD 900 960);1200:$L3R3;1202:0;1210:$UP;1212:0;1216:$UP;1218:0;1224:$CROSS;1226:0;1500:$OPTIONS;1502:0;1510:$CROSS;1512:0" "" >"$T/rc.txt" ) &
+GAME=$!
+waitlog 'login failed'
+ra_server
+wait $GAME
+expect "[ \"\$(cat $T/rc.txt)\" = 0 ] && grep -q 'the saved login is tried again for this game' $T/root/logs/boot.log && grep -q 'logged in as Tester' $T/root/logs/boot.log" "booted offline, the server back: the game's start tries the saved token again at once"
+expect "[ \$(ra_req r=achievementsets m=$RA_HASH) = 1 ] && [ \$(ra_req r=startsession g=4321 h=1) = 1 ] && [ \$(ra_req r=awardachievement a=101 h=1) = 1 ] && ! grep -q 'softcore for this game' $T/root/logs/boot.log" "the set loads behind the login: a hardcore session from the start, the unlock hardcore"
+expect "grep -q 'pause menu (RetroAchievements rows: yes, hardcore: on)' $T/root/logs/boot.log" "the pause menu's Hardcore row says On"
+ra_stop
+
+# 44t (second review L1): a 2.11 helper answers every RetroAchievements request, even one it refuses: an app it doesn't
+# know is refused with a reason (not taken for an older helper), and a body cut short is answered as a network problem
+ra_setup t44t
+ra_token
+ra_server
+SNES9X_HOST_JB_TITLE=PPSA99203 SNES9X_RA_TEST_HOST=$RA_HOST SNES9X_PS5_ROOT=$T/root ASAN_OPTIONS=detect_leaks=0 timeout 150 "$HELPER" >"$T/helper.txt" 2>&1 &
+RA_HLP=$!
+waitfor "$T/root/logs/helper.log" "listening" || sleep 1
+rc=$(rarun "$T" "0:0;200:$L3R3;202:0;210:$UP;212:0;220:$CROSS;222:0" "" "$T/root/roms/RA Test.sfc")
+expect "[ $rc = 0 ] && grep -q 'RetroAchievements request refused: not our app' $T/root/logs/helper.log && grep -q 'r=login2: refused 0.*not Snes9x PS5' $T/root/logs/boot.log && ! grep -q 'an older helper\|Update the helper' $T/root/logs/boot.log" "a request from another app: answered \"refused\", not taken for an older helper"
+ra_stop
+ra_setup t44t2
+ra_server; ra_helper
+CUT=$(python3 - "$SNES9X_HELPER_PORT" "$RA_HOST/dorequest.php" <<'PY'
+import os, socket, struct, sys
+s = socket.create_connection(("127.0.0.1", int(sys.argv[1])), timeout=20)
+req = bytearray(0xA10)
+struct.pack_into("<IiiI", req, 0, 0xDEADBEEF, 8, os.getpid(), 100)  # a body of 100 bytes announced
+url = sys.argv[2].encode(); req[16:16 + len(url)] = url
+ua = b"Snes9xPS5/test"; req[16 + 0x500:16 + 0x500 + len(ua)] = ua
+s.sendall(bytes(req) + b"r=login2&u=")  # 11 of them, then the end
+s.shutdown(socket.SHUT_WR)
+a = b""
+while len(a) < 0xA10:
+    d = s.recv(0xA10 - len(a))
+    if not d: break
+    a += d
+print(struct.unpack_from("<i", a, 12)[0] if len(a) == 0xA10 else "closed", a[16 + 0x500:].split(b"\0")[0].decode() if len(a) == 0xA10 else "")
+PY
+)
+expect "[ \"$CUT\" = '-1 the request was cut short' ]" "a body cut short: answered (kRaNetwork, \"the request was cut short\"), not just closed (got: $CUT)"
+ra_stop
+
+# 44u (second review L2): a damaged badge in the cache is never there for good: a file that isn't a PNG (the signature cut
+# short) is fetched again; one that looks like a PNG but doesn't decode is fetched again once the decoding fails
+ra_setup t44u
+ra_token
+mkdir -p "$T/root/retroachievements/badges"
+printf '\x89PNGjunk' >"$T/root/retroachievements/badges/00101.png"
+python3 - "$T/root/retroachievements/badges/00102.png" <<'PY'
+import struct, sys, zlib
+ihdr = struct.pack(">IIBBBBB", 64, 64, 8, 6, 0, 0, 0)
+chunk = struct.pack(">I", 13) + b"IHDR" + ihdr + struct.pack(">I", zlib.crc32(b"IHDR" + ihdr))
+open(sys.argv[1], "wb").write(b"\x89PNG\r\n\x1a\n" + chunk + b"\0\0\0\x10IDATnot-a-deflate-stream" + b"\0" * 8)
+PY
+ra_server; ra_helper
+rc=$(rarun "$T" "0:0;$(B_HOLD 100 130);700:$L3R3;702:0;710:$UP;712:0;720:$CROSS;722:0" "" "$T/root/roms/RA Test.sfc")
+png_ok() { python3 -c "import sys; d=open(sys.argv[1],'rb').read(); sys.exit(0 if d[:8]==b'\x89PNG\r\n\x1a\n' and d[12:16]==b'IHDR' and b'IEND' in d else 1)" "$1"; }
+expect "[ $rc = 0 ] && [ \$(ra_req get=/Badge/00101.png) = 1 ] && png_ok $T/root/retroachievements/badges/00101.png" "a cached badge that isn't a PNG: fetched again and replaced"
+expect "[ \$(ra_req r=awardachievement a=102) = 1 ] && grep -q 'badge 00102: the cached picture doesn.t decode: fetched again' $T/root/logs/boot.log && [ \$(ra_req get=/Badge/00102.png) = 1 ] && png_ok $T/root/retroachievements/badges/00102.png" "a cached badge that doesn't decode: fetched again and replaced"
 ra_stop
 
 echo

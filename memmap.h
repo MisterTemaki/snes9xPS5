@@ -216,6 +216,9 @@ bool8 Load7z(const char *, uint32 *, uint8 *, uint32);
 #endif
 // Snes9x PS5 2.11: the ROM's bytes once a soft patch (IPS/UPS/BPS) is applied, header left out (RetroAchievements hashes them)
 void S9xRomPatched(const uint8 *, int32);
+// Snes9x PS5 2.11: a soft patch's reader ran on the ROM at the last LoadROM (whatever it returned: a reader that fails half
+// way -- an IPS without its "EOF" -- has already written into ROM). Not a CMemory member, so the struct keeps its layout.
+extern bool8 S9xSoftPatchTried;
 
 enum s9xwrap_t
 {

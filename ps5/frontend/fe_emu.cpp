@@ -581,13 +581,18 @@ void S9xRomPatched(const uint8* rom, int32 size)
 {
 	try
 	{
+#ifndef __PROSPERO__
+		if (getenv("SNES9X_HOST_PATCH_COPY_FAILS")) // the host tests: the copy fails as it would out of memory
+			throw std::bad_alloc();
+#endif
 		g.patched.assign(rom, rom + (size > 0 ? size : 0));
 	}
 	catch (const std::bad_alloc&)
 	{
 		g.patched.clear();
 	}
-	OrbisLog("[emu] a soft patch was applied (%d bytes)", int(size));
+	OrbisLog("[emu] a soft patch was read (%d bytes, %s, the copy %s)", int(size), Settings.IsPatched ? "applied" : "it failed",
+		g.patched.empty() ? "failed" : "kept");
 }
 
 // The core's loader for a .7z (memmap.cpp, FileLoader): the archive's ROM (fe_7z.h: the biggest file that fits) unpacked
@@ -875,7 +880,9 @@ bool LoadGame(const std::string& path)
 	// 2.11: RetroAchievements: the ROM's hash (it reads the file again, so before realtime too), then its set is asked for
 	// in the background; with hardcore the cheats are turned off from the first frame
 	StartStep("achievements");
-	ra::GameStarted(path, Settings.IsPatched && !g.patched.empty() ? &g.patched : nullptr);
+	// 2.11 second review: whenever a patch reader ran (S9xSoftPatchTried), whatever it returned -- an IPS without its EOF
+	// is applied yet "fails" -- the game is the bytes it left; with no copy of them (out of memory) it is unknown
+	ra::GameStarted(path, S9xSoftPatchTried, S9xSoftPatchTried && !g.patched.empty() ? &g.patched : nullptr);
 	g.patched.clear();
 	g.patched.shrink_to_fit();
 	HardcoreChanged();

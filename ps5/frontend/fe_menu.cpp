@@ -712,7 +712,8 @@ PauseAction PauseMenu()
 		const bool ra_rows = ra::AccountActive();
 		const bool hardcore = ra::HardcoreActive();
 		if (!logged) // what the menu shows, once each time it opens (the host tests read it)
-			OrbisLog("[menu] pause menu (RetroAchievements rows: %s)", ra_rows ? "yes" : "no");
+			OrbisLog("[menu] pause menu (RetroAchievements rows: %s%s)", ra_rows ? "yes" : "no",
+				!ra_rows ? "" : (ra::HardcoreSetting() ? (ra::SessionSoftcore() ? ", hardcore: on (next game)" : ", hardcore: on") : ", hardcore: off"));
 		logged = true;
 		std::vector<int> ids;
 		for (int i = 0; i < I_COUNT; i++)
@@ -745,7 +746,10 @@ PauseAction PauseMenu()
 				case I_CHEATS: row = {T("Cheat manager"), hardcore ? T("Off in hardcore mode") : "", !hardcore, true}; break;
 				case I_SHORTCUTS: row = {T("Controller shortcuts"), ""}; break;
 				case I_ACHIEVEMENTS: row = {T("Achievements"), ra::GameSummary(), true, true}; break;
-				case I_HARDCORE: row = {T("Hardcore mode"), T(ra::HardcoreSetting() ? "On" : "Off")}; break;
+				case I_HARDCORE:
+					// 2.11 second review: a game whose set came late is softcore whatever the setting: said here
+					row = {T("Hardcore mode"), T(ra::HardcoreSetting() ? (ra::SessionSoftcore() ? "On (next game)" : "On") : "Off")};
+					break;
 				case I_RESET: row = {T("Reset game"), ""}; break;
 				case I_LIST: row = {T("Back to the game list"), ""}; break;
 				case I_QUIT: row = {T("Quit Snes9x"), ""}; break;

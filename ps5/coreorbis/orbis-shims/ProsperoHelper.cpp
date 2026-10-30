@@ -391,7 +391,7 @@ bool ServeHelper(void (*on_ready)())
 			if (TitleOf(req.pid) != SNES9X_TITLE_ID)
 			{
 				OrbisLog("[helper] pid %d: RetroAchievements request refused: not our app", req.pid);
-				close(c);
+				raproxy::Refuse(c, req, deadline, "not Snes9x PS5"); // answered (second review), then closed
 				continue;
 			}
 			raproxy::Take(c, req, deadline);

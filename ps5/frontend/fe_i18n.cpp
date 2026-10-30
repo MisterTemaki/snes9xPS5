@@ -629,6 +629,7 @@ const Entry kTable[] = {
 	{"Hardcore mode on: the game was reset.", "Modo hardcore activado: el juego se ha reiniciado.",
 		"Modo hardcore ligado: o jogo foi reiniciado.", "Mode hardcore activé : le jeu a été relancé.",
 		"Hardcore-Modus an: Das Spiel wurde zurückgesetzt."},
+	{"On (next game)", "Sí (próximo juego)", "Sim (próximo jogo)", "Oui (prochain jeu)", "Ein (nächstes Spiel)"},
 	{"Hardcore mode on.", "Modo hardcore activado.", "Modo hardcore ligado.", "Mode hardcore activé.", "Hardcore-Modus an."},
 	{"Hardcore mode off.", "Modo hardcore desactivado.", "Modo hardcore desligado.", "Mode hardcore désactivé.",
 		"Hardcore-Modus aus."},

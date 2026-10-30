@@ -53,6 +53,7 @@ void RetroAchievementsMenu()
 {
 	NavReader nav;
 	int sel = 0;
+	std::string refused; // why hardcore could not be turned on (until the cursor moves)
 	for (;;)
 	{
 		ra::Pump();
@@ -90,7 +91,8 @@ void RetroAchievementsMenu()
 		DrawOptionBox("RetroAchievements", rows, sel, false);
 		// under the box (DrawOptionBox centres it: 4 rows end at y 703): what is wrong, what hardcore does, what is kept
 		int y = 740;
-		const std::string problem = ra::Problem();
+		// 2.11 second review: hardcore refused (SetHardcore says why) is said in place of the account's problem
+		const std::string problem = !refused.empty() ? refused : ra::Problem();
 		if (!problem.empty())
 		{
 			DrawText(160, y, FitText(problem, 3, W - 320).c_str(), 3, kBad);
@@ -117,8 +119,14 @@ void RetroAchievementsMenu()
 			sel = (sel + 1) % I_COUNT;
 		if (n.back || n.options || (n.ok && sel == I_BACK))
 			return;
+		if (n.up || n.down)
+			refused.clear();
 		if (sel == I_HARDCORE && (n.ok || n.left || n.right))
-			ra::SetHardcore(!ra::HardcoreSetting());
+		{
+			refused.clear();
+			if (!ra::SetHardcore(!ra::HardcoreSetting(), &refused)) // `refused` says why (translated)
+				OrbisLog("[ra] Settings: hardcore refused");
+		}
 		if (n.ok && sel == I_LOGIN && login != ra::Login::Pending)
 		{
 			if (in)
@@ -165,7 +173,7 @@ void AchievementsMenu()
 		ps5video::FillRect(bx, 60, bw, H - 140, kPanel);
 		ps5video::FillRect(bx, 60, bw, 3, kAccent);
 		DrawText(bx + 40, 84, FitText(T("Achievements"), 5, bw / 2).c_str(), 5, kAccent);
-		const std::string summary = ra::GameSummary() + "  -  " + T(ra::HardcoreSetting() ? "Hardcore mode" : "Softcore mode");
+		const std::string summary = ra::GameSummary() + "  -  " + T(ra::HardcoreSetting() && !ra::SessionSoftcore() ? "Hardcore mode" : "Softcore mode");
 		DrawText(bx + bw - 40 - TextWidth(FitText(summary, 3, bw / 2).c_str(), 3), 100, FitText(summary, 3, bw / 2).c_str(), 3, kDim);
 		const std::string title = ra::GameTitle().empty() ? emu::GameName() : ra::GameTitle();
 		DrawText(bx + 40, 170, FitText(title, 3, bw - 80).c_str(), 3, kText);

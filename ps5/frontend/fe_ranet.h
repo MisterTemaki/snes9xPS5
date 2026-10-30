@@ -29,6 +29,7 @@ struct Answer
 	int http = 0;
 	std::string body;
 	std::string why; // the helper's reason, for the log
+	bool from_cache = false; // FetchCached: the bytes came from the cache file (no request made)
 };
 
 using Done = std::function<void(const Answer&)>;
@@ -41,8 +42,16 @@ void Send(const std::string& url, const std::string& post, const std::string& us
 // 2.11 review: a picture kept in a cache file: the worker reads `cache_file` if it is there; else it fetches `url` (a GET
 // through the helper) and, when a PNG comes back, saves it there (.part, then renamed). `done` gets the bytes (http 200)
 // either way. No file is touched on the main thread.
+// `refresh` (2.11 second review): the cache file isn't read (the one there didn't decode): fetched again and overwritten.
 void FetchCached(const std::string& url, const std::string& cache_file, const std::string& user_agent,
-	const std::string& what, Done done);
+	const std::string& what, Done done, bool refresh = false);
+
+// 2.11 second review: file work kept off the main thread (the saved login written or deleted). Run by the request
+// thread before its next request, in order; any left when Stop() comes are run there, so none is lost at exit.
+void FileWork(std::function<void()> work);
+
+// A cached picture's bytes look like a PNG: the 8-byte signature, then an IHDR of 1..max_side pixels each way
+bool LooksLikePng(const std::string& data, int max_side);
 
 // Main thread: runs the `done` of every request answered since the last call.
 void Pump();

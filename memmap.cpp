@@ -1341,6 +1341,8 @@ bool8 CMemory::LoadROMMem (const uint8 *source, uint32 sourceSize, const char* o
     return TRUE;
 }
 
+bool8 S9xSoftPatchTried = FALSE;
+
 bool8 CMemory::LoadROM (const char *filename)
 {
     if(!filename || !*filename)
@@ -1349,6 +1351,7 @@ bool8 CMemory::LoadROM (const char *filename)
     S9xResetSaveTimer(FALSE); // reset oops timer here so that .oops file has rom name of previous rom
 
     int32 totalFileSize;
+    S9xSoftPatchTried = FALSE; // Snes9x PS5 2.11: never the last load's
 
     do
     {
@@ -1360,8 +1363,9 @@ bool8 CMemory::LoadROM (const char *filename)
             return (FALSE);
 
         CheckForAnyPatch(filename, HeaderCount != 0, totalFileSize);
-        // Snes9x PS5 2.11: the patched bytes, as RetroAchievements hashes a patched game (before LoadROMInt de-interleaves)
-        if (Settings.IsPatched)
+        // Snes9x PS5 2.11: the patched bytes, as RetroAchievements hashes a patched game (before LoadROMInt de-interleaves);
+        // whenever a reader ran, even one that failed half way (it may have written into ROM already)
+        if (S9xSoftPatchTried)
             S9xRomPatched(ROM, totalFileSize);
     }
     while(!LoadROMInt(totalFileSize));
@@ -3946,6 +3950,7 @@ static int unzFindExtension (unzFile &file, const char *ext, bool restart, bool 
 void CMemory::CheckForAnyPatch(const char *rom_filename, bool8 header, int32 &rom_size)
 {
     Settings.IsPatched = false;
+    S9xSoftPatchTried = FALSE; // Snes9x PS5 2.11 (RetroAchievements): set before any patch reader touches ROM
 
     if (Settings.NoPatch)
         return;
@@ -3962,6 +3967,7 @@ void CMemory::CheckForAnyPatch(const char *rom_filename, bool8 header, int32 &ro
         {
             printf("Using %s patch %s", type, filename.c_str());
 
+            S9xSoftPatchTried = TRUE;
             Stream *s = new fStream(patch_file);
             ret = read_patch_func(s, offset, rom_size);
             s->closeStream();
@@ -4020,6 +4026,7 @@ void CMemory::CheckForAnyPatch(const char *rom_filename, bool8 header, int32 &ro
                 {
                     printf(" in %s", rom_filename);
 
+                    S9xSoftPatchTried = TRUE;
                     Stream *s = new unzStream(file);
                     ret = read_patch_func(s, offset, rom_size);
                     delete s;
@@ -4074,6 +4081,7 @@ void CMemory::CheckForAnyPatch(const char *rom_filename, bool8 header, int32 &ro
         if (s)
         {
             printf("Using BPS patch from msu1");
+            S9xSoftPatchTried = TRUE;
             ret = ReadBPSPatch(s, offset, rom_size);
             s->closeStream();
 

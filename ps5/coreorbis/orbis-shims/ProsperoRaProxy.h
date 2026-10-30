@@ -26,6 +26,10 @@ namespace raproxy
 // worker answers and closes it (or this does, at once, when the request is refused).
 void Take(int fd, const jailbreak::Request& req, int64_t deadline_ms);
 
+// 2.11 second review: a request the helper won't run (not our app): its body read and dropped, then answered kRaRefused
+// with `why`, and fd closed. Every request gets an answer: only a 2.10 helper closes without one.
+void Refuse(int fd, const jailbreak::Request& req, int64_t deadline_ms, const char* why);
+
 // The addresses the helper fetches: https://retroachievements.org/dorequest.php and https://media.retroachievements.org/
 // (pictures). The host build's tests add $SNES9X_RA_TEST_HOST (http://127.0.0.1:<port>), and only there.
 bool Allowed(const std::string& url);
