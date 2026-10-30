@@ -45,8 +45,7 @@ std::string RetroAchievementsValue()
 	{
 		case ra::Login::LoggedIn: return Fmt(T("%s (%u points)"), ra::UserName().c_str(), ra::Points());
 		case ra::Login::Pending: return T("Logging in...");
-		case ra::Login::Failed: return T("Not logged in");
-		default: return T("Off");
+		default: return T("Not logged in");
 	}
 }
 
@@ -74,6 +73,14 @@ void RetroAchievementsMenu()
 			case ra::Login::LoggedIn: account = Fmt(T("%s (%u points)"), ra::UserName().c_str(), ra::Points()); break;
 			case ra::Login::Pending: account = T("Logging in..."); break;
 			default: account = T("Not logged in"); break;
+		}
+		// what the screen says, in the log whenever it changes (the host tests read it; nothing secret is in it)
+		static std::string logged;
+		const std::string said = account + " | " + ra::Problem();
+		if (said != logged)
+		{
+			logged = said;
+			OrbisLog("[ra] Settings, RetroAchievements: %s", said.c_str());
 		}
 		rows[I_ACCOUNT] = {T("Account"), account, true, true};
 		rows[I_LOGIN] = {T(in ? "Log out" : "Log in"), "", login != ra::Login::Pending};

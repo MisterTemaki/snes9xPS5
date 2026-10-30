@@ -1118,6 +1118,8 @@ void HardcoreChanged()
 		OrbisLog("[emu] cheats on again (hardcore mode not in force)");
 	}
 	Settings.Transparency = fe::Config().transparency || hardcore;
+	if (hardcore && !fe::Config().transparency)
+		OrbisLog("[emu] hardcore mode: Transparency stays on");
 }
 
 void AfterMenu()
@@ -1167,10 +1169,15 @@ FrameResult RunFrame()
 	{
 		if (pressed & SCE_PAD_BUTTON_UP)
 			Osd(fe::T(SaveState(cfg.state_slot) ? "State saved to slot %d" : "Could not save slot %d"), cfg.state_slot);
-		else if ((pressed & SCE_PAD_BUTTON_DOWN) && LoadStateRefused())
-			Osd("%s", fe::T("Hardcore mode: loading states is off"));
 		else if (pressed & SCE_PAD_BUTTON_DOWN)
-			Osd(fe::T(LoadState(cfg.state_slot) ? "State loaded from slot %d" : "Slot %d is empty"), cfg.state_slot);
+		{
+			const bool refused = LoadStateRefused(); // RetroAchievements' hardcore mode (LoadState logs the refusal)
+			const bool loaded = LoadState(cfg.state_slot);
+			if (refused)
+				Osd("%s", fe::T("Hardcore mode: loading states is off"));
+			else
+				Osd(fe::T(loaded ? "State loaded from slot %d" : "Slot %d is empty"), cfg.state_slot);
+		}
 		else if (pressed & (SCE_PAD_BUTTON_LEFT | SCE_PAD_BUTTON_RIGHT))
 		{
 			cfg.state_slot = (cfg.state_slot + ((pressed & SCE_PAD_BUTTON_RIGHT) ? 1 : 9)) % 10;

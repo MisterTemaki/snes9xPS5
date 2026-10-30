@@ -128,12 +128,18 @@ class Handler(BaseHTTPRequestHandler):
                 n = state["awards"]
             if n <= int(config.get("fail_awards", 0)):
                 return self.answer(503, b"", "text/plain")
-            if q.get("h") == "1":
+            hardcore = q.get("h") == "1"
+            if hardcore:
                 state["score"] += 5
             else:
                 state["softcore"] += 5
+            # what is left for the player in this mode (0 tells rcheevos the game is mastered or completed)
+            mode = "have_hardcore" if hardcore else "have_softcore"
+            have = state.setdefault(mode, set(config.get("unlocked_hardcore", [])) | (set() if hardcore else set(config.get("unlocked", []))))
+            have.add(int(q.get("a", "0")))
+            every = {a["ID"] for g in config["games"].values() for st in g.get("Sets", []) for a in st.get("Achievements", [])}
             return self.answer(200, {"Success": True, "Score": state["score"], "SoftcoreScore": state["softcore"],
-                                     "AchievementID": int(q.get("a", "0")), "AchievementsRemaining": 1})
+                                     "AchievementID": int(q.get("a", "0")), "AchievementsRemaining": len(every - have)})
         if r == "submitlbentry":
             s = int(q.get("s", "0"))
             return self.answer(200, {"Success": True, "Response": {"Score": s, "BestScore": s,

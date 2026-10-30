@@ -596,6 +596,20 @@ test-7z: $(SEVENZIP_TEST)
 test: test-7z
 .PHONY: test-7z
 
+# 2.11: the RetroAchievements hash of a game (frontend/fe_rahash.cpp with rcheevos) in every container the app opens,
+# against RetroAchievements' documented SNES rule computed independently (tests/test_ra_hash.py)
+RA_HASH_TEST := $(HOST_OUT)/test-ra-hash
+RA_HASH_TEST_OBJ := $(patsubst %.cpp,$(HOST_OUT)/port/%.o,tests/test_ra_hash.cpp frontend/fe_rahash.cpp frontend/fe_7z.cpp) \
+	$(HOST_OUT)/core/unzip/unzip.o $(HOST_OUT)/core/unzip/ioapi.o
+$(RA_HASH_TEST): $(RA_HASH_TEST_OBJ) $(HOST_LZMA7Z_OBJ) $(HOST_RCHEEVOS_OBJ) $(HOST_ZLIB_OBJ)
+	$(HOST_CXX) $(HOST_SAN) -o $@ $^ -lpthread -lm
+
+test-ra-hash: $(RA_HASH_TEST)
+	python3 tests/test_ra_hash.py $(RA_HASH_TEST) build/host/ra-hash-work
+
+test: test-ra-hash
+.PHONY: test-ra-hash
+
 clean:
 	rm -rf build
 

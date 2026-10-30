@@ -2292,6 +2292,283 @@ if [ -n "${SHOTS:-}" ] && [ -f "$SAVED43" ]; then
 fi
 rm -rf "$T/root/roms"
 
+echo "== 44. RetroAchievements (2.11): nothing without an account; log in from Settings (password masked, sent once, never kept: only the token, owner-only); the token at the next start; the game by its hash; unlocks from the game's memory, leaderboard, list, mastery; hardcore: no state loaded, no cheats, Transparency kept, the reset when it is turned on; offline and an old helper; nothing secret in a log"
+# A local stand-in for retroachievements.org (tests/fake_ra_server.py, the answers in rcheevos's recorded format) and the
+# real helper in front of it: the app talks to the helper as on the console, the helper to the stand-in over plain HTTP
+# (SNES9X_RA_TEST_HOST, host builds only). The test ROM (make_test_rom.py ra) counts frames in work RAM $11, copies the
+# pad's high byte to $10 and writes $5A to its battery RAM's second byte: the set's achievements read those.
+stop_helpers
+RA_PORT=$((40000 + RANDOM % 5000))
+RA_HOST="http://127.0.0.1:$RA_PORT"
+RA_PASS='Pa$$w0rd!'
+RA_PASS_FORM='Pa%24%24w0rd%21'
+RA_TOKEN='tok-SECRET-0123456789'
+RA_SRV=; RA_HLP=
+L2R3=104; L2UP=110; L2DOWN=140; TRI=1000
+ra_setup() { # name -> $T with the test ROM and the stand-in's config ($RA_UNLOCKED: ids the player already has, hardcore)
+	T=$(newroot "$1")
+	python3 tests/make_test_rom.py "$T/root/roms/RA Test.sfc" ra >/dev/null
+	RA_HASH=$(python3 -c "import hashlib,sys; print(hashlib.md5(open(sys.argv[1],'rb').read()).hexdigest())" "$T/root/roms/RA Test.sfc")
+	python3 - "$RA_HASH" "$T/ra.json" "$RA_PASS" "$RA_TOKEN" "${RA_UNLOCKED:-}" <<'PY'
+import json, sys
+h, out, password, token, unlocked = sys.argv[1:6]
+ach = lambda i, t, d, p, m: {"ID": i, "Title": t, "Description": d, "Flags": 3, "Points": p, "MemAddr": m, "Author": "test",
+                            "BadgeName": "%05d" % i, "Created": 1367266583, "Modified": 1376929305}
+game = {"Success": True, "GameId": 4321, "Title": "Snes9x RA Test", "ConsoleId": 3, "ImageIconUrl": "http://127.0.0.1/Images/1.png",
+        "RichPresenceGameId": 4321, "RichPresencePatch": "Format:Number\nFormatType=VALUE\n\nDisplay:\nFrame @Number(0xH0011)\n",
+        "Sets": [{"AchievementSetId": 99, "GameId": 4321, "Title": None, "Type": "core", "ImageIconUrl": "http://127.0.0.1/Images/1.png",
+                  "Achievements": [ach(101, "Press B", "Hold B on the first controller", 5, "0xH0010=128"),
+                                   ach(102, "Battery check", "The game wrote its battery RAM; 200 frames went by", 10, "0xH020001=90_0xH0011=200"),
+                                   ach(103, "Hold on", "Hold B for 100 frames", 25, "M:0xH0010=128.100."),
+                                   ach(104, "Secret room", "Only a cheat gets here", 50, "0xH0012=66")],
+                  "Leaderboards": [{"ID": 201, "Title": "Quick B", "Description": "The frame counter when B is let go",
+                                    "Mem": "STA:0xH0010=128::CAN:0=1::SUB:0xH0010=0::VAL:0xH0011", "Format": "VALUE"}]}]}
+json.dump({"user": "Tester", "password": password, "token": token, "expired_token": "tok-EXPIRED-000",
+           "games": {h: game}, "unlocked_hardcore": [int(x) for x in unlocked.split()]}, open(out, "w"))
+PY
+}
+ra_token() { mkdir -p "$T/root/retroachievements" && printf 'user=Tester\ntoken=%s\n' "${1:-$RA_TOKEN}" >"$T/root/retroachievements/login.txt"; }
+ra_server() {
+	python3 tests/fake_ra_server.py $RA_PORT "$T/ra.json" "$T/ra-requests.jsonl" >>"$T/ra-server.txt" 2>&1 &
+	RA_SRV=$!
+	for i in $(seq 1 40); do grep -q "fake RetroAchievements" "$T/ra-server.txt" 2>/dev/null && break; sleep 0.1; done
+}
+ra_helper() {
+	SNES9X_HOST_LOG_SECRETS=${LOGSECRETS:-} SNES9X_RA_TEST_HOST=$RA_HOST SNES9X_PS5_ROOT=$T/root ASAN_OPTIONS=detect_leaks=0 timeout 150 "$HELPER" >"$T/helper.txt" 2>&1 &
+	RA_HLP=$!
+	waitfor "$T/root/logs/helper.log" "listening" || sleep 1
+}
+ra_stop() { [ -n "$RA_SRV" ] && kill $RA_SRV 2>/dev/null; [ -n "$RA_HLP" ] && kill $RA_HLP 2>/dev/null; wait $RA_SRV $RA_HLP 2>/dev/null; RA_SRV=; RA_HLP=; stop_helpers; }
+rarun() { SNES9X_RA_HOST=$RA_HOST SNES9X_HOST_RA_CLOCK=${RA_CLOCK:-1} SNES9X_HOST_LOG_SECRETS=${LOGSECRETS:-} run "$@"; }
+ra_req() { # key=value... -> how many requests the stand-in got with all of them
+	python3 - "$T/ra-requests.jsonl" "$@" <<'PY'
+import json, sys
+want = [a.split("=", 1) for a in sys.argv[2:]]
+n = 0
+try:
+    for line in open(sys.argv[1]):
+        e = json.loads(line)
+        n += all(str(e.get(k)).lower() == v.lower() for k, v in want)
+except FileNotFoundError:
+    pass
+print(n)
+PY
+}
+ra_note() { grep -c "\[ra\] notification: $1" "$T/root/logs/boot.log"; } # notifications whose text starts so
+no_secret() { # files... -> none holds the password or the token, in any form
+	! grep -q -F -e "$RA_PASS" -e "$RA_PASS_FORM" -e "$RA_TOKEN" "$@" 2>/dev/null
+}
+ra_shot() { [ -n "${SHOTS:-}" ] && [ -f "$1" ] && mkdir -p "$SHOTS" && python3 -c "import sys; from PIL import Image; Image.open(sys.argv[1]).save(sys.argv[2])" "$1" "$SHOTS/$2" && echo "  (screen saved: $SHOTS/$2)"; true; }
+B_HOLD() { echo "$1:$CROSS;$2:0"; } # SNES B (Cross) held from flip $1 to $2
+PAUSE_DOWN() { local f=$1 n=$2 out="$1:$L3R3;$(($1 + 2)):0"; f=$((f + 20)); for i in $(seq 1 $n); do out="$out;$f:$DOWN;$((f + 2)):0"; f=$((f + 4)); done; echo "$out"; }
+
+# 44a: no account -> nothing happens: no request, no thread, the menus as in 2.10
+ra_setup t44a
+ra_server; ra_helper
+rc=$(rarun "$T" "0:0;60:$L2UP;62:0;80:$L2DOWN;82:0;100:$L3R3;102:0;110:$UP;112:0;120:$CROSS;122:0" "105" "$T/root/roms/RA Test.sfc")
+expect "[ $rc = 0 ]" "no account: exit code 0 (got $rc)"
+expect "grep -q 'no RetroAchievements login: achievements off' $T/root/logs/boot.log" "no account: achievements off at start"
+expect "[ \$(ra_req) = 0 ] && ! grep -q '\[ra\] RetroAchievements requests' $T/root/logs/helper.log && ! grep -q '\[ra\] r=' $T/root/logs/boot.log" "no account: no request made, the helper started no thread for them"
+expect "[ ! -e $T/root/retroachievements/login.txt ] && grep -q 'load state 0 .*: ok' $T/root/logs/boot.log" "no account: a state loads as before (no hardcore without an account)"
+expect "grep -q 'ra_hardcore=1' $T/root/snes9x-ps5.ini" "hardcore mode is on by default (as RetroAchievements asks)"
+ra_stop
+
+# 44b: log in from Settings with the on-screen keyboard; then the row says who
+ra_setup t44b
+ra_server; LOGSECRETS=1 ra_helper
+PAD=$(printf 'frame 70\npress TRIANGLE\nframe 110\npress UP 2\nwait 30\npress CROSS\nframe 190\npress DOWN\npress CROSS\nframe 230\ntype Tester\npress OPTIONS\nframe 350\ntype %s\nframe 640\npress OPTIONS\nframe 760\npress CIRCLE\nframe 820\npress CIRCLE\nframe 860\npress OPTIONS\nframe 870\npress CROSS\n' "$RA_PASS" | python3 tests/osk_pad.py 2>/dev/null)
+rc=$(LOGSECRETS=1 rarun "$T" "$PAD" "130,180,625,740,800")
+expect "[ $rc = 0 ]" "login: exit code 0 (got $rc)"
+expect "[ \$(ra_req r=login2 u=Tester password_ok=True) = 1 ]" "login: the password went to the server once, right, as login2"
+expect "grep -q \"^token=$RA_TOKEN\$\" $T/root/retroachievements/login.txt && grep -q '^user=Tester$' $T/root/retroachievements/login.txt" "login: the server's token saved in retroachievements/login.txt"
+expect "[ \$(stat -c %a $T/root/retroachievements/login.txt) = 600 ] && [ \$(stat -c %a $T/root/retroachievements) = 700 ]" "login: the file is the owner's only (600, folder 700)"
+expect "! grep -r -q -F -e '$RA_PASS' -e '$RA_PASS_FORM' $T/root $T/out.txt $T/helper.txt" "login: the password is written nowhere (files, logs, output)"
+expect "no_secret $T/root/logs/boot.log $T/root/logs/helper.log $T/out.txt $T/helper.txt" "login: the token is in no log"
+expect "grep -q '(test) body: r=login2&u=Tester&p=\[redacted\]' $T/root/logs/boot.log && grep -q '(test) body of r=login2: r=login2&u=Tester&p=\[redacted\]' $T/root/logs/helper.log" "redaction: a body logged on purpose shows [redacted] in place of the password, in the app's log and the helper's"
+expect "grep -q 'Settings, RetroAchievements: Not logged in' $T/root/logs/boot.log && grep -q 'Settings, RetroAchievements: Tester (1234 points)' $T/root/logs/boot.log" "login: the screen said Not logged in, then Tester (1234 points)"
+expect "[ \$(ra_req 'ua=Snes9xPS5/$VER (PlayStation 5) Snes9x/1.63 rcheevos/12.5') -ge 1 ]" "the User-Agent: Snes9xPS5/$VER (PlayStation 5) Snes9x/1.63 rcheevos/12.5"
+ra_shot "$T/dump/flip00130.ppm" ra-1-settings-logged-out.png
+ra_shot "$T/dump/flip00180.ppm" ra-2-screen-logged-out.png
+ra_shot "$T/dump/flip00625.ppm" ra-3-keyboard-password-masked.png
+ra_shot "$T/dump/flip00740.ppm" ra-4-screen-logged-in.png
+ra_shot "$T/dump/flip00800.ppm" ra-5-settings-logged-in.png
+ra_stop
+
+# 44c: a wrong password: said so, nothing saved
+ra_setup t44c
+ra_server; ra_helper
+PAD=$(printf 'frame 70\npress TRIANGLE\nframe 110\npress UP 2\npress CROSS\nframe 190\npress DOWN\npress CROSS\nframe 230\ntype Tester\npress OPTIONS\nframe 350\ntype wrong\nframe 500\npress OPTIONS\nframe 600\npress CIRCLE\nframe 640\npress CIRCLE\nframe 680\npress OPTIONS\nframe 690\npress CROSS\n' | python3 tests/osk_pad.py 2>/dev/null)
+rc=$(rarun "$T" "$PAD" "")
+expect "[ $rc = 0 ] && [ \$(ra_req r=login2 password_ok=False) = 1 ]" "a wrong password: sent, refused by the server"
+expect "grep -q 'Settings, RetroAchievements: Not logged in | Wrong user name or password.' $T/root/logs/boot.log && [ ! -e $T/root/retroachievements/login.txt ]" "a wrong password: the screen says so, nothing saved"
+ra_stop
+
+# 44d: the token at start; the game by its hash; unlocks from the game's memory, the leaderboard, rich presence, the badge
+ra_setup t44d
+ra_token
+ra_server; ra_helper
+rc=$(RA_CLOCK=60 rarun "$T" "0:0;$(B_HOLD 100 160);$(PAUSE_DOWN 330 6);380:$CROSS;382:0;440:$CIRCLE;442:0;470:$CIRCLE;472:0;520:$L3R3;522:0;530:$UP;532:0;540:$CROSS;542:0" "150,360,420" "$T/root/roms/RA Test.sfc")
+expect "[ $rc = 0 ]" "a game: exit code 0 (got $rc)"
+expect "[ \$(ra_req r=login2 token_ok=True) = 1 ] && grep -q 'logging in as Tester with the saved token' $T/root/logs/boot.log" "the saved token logs in at start, quietly"
+expect "[ \$(ra_req r=achievementsets m=$RA_HASH) = 1 ] && [ \$(ra_req r=startsession g=4321 h=1) = 1 ]" "the game identified by its hash ($RA_HASH), its set loaded, a hardcore session started"
+expect "[ \$(ra_note 'Snes9x RA Test | 0 of 4 achievements unlocked | Hardcore mode') = 1 ]" "at the start: one notification, 0 of 4 achievements unlocked, Hardcore mode"
+expect "[ \$(ra_req r=awardachievement a=101 h=1) = 1 ] && [ \$(ra_note 'Press B | Hold B on the first controller | 5 points') = 1 ]" "B held -> work RAM \$10 = \$80 -> Press B unlocked (hardcore) and shown"
+expect "[ \$(ra_req r=awardachievement a=102 h=1) = 1 ]" "200 frames + the battery RAM's \$5A (cartridge RAM, RA address \$020001) -> Battery check unlocked"
+expect "[ \$(ra_req r=awardachievement a=104) = 0 ] && [ \$(ra_req r=awardachievement a=103) = 0 ]" "the others stay locked (no cheat; B not held 100 frames)"
+expect "[ \$(ra_note 'Leaderboard attempt started | Quick B') = 1 ] && [ \$(ra_req r=submitlbentry i=201) = 1 ] && [ \$(ra_note 'Quick B | Your rank: 1 of 1') = 1 ]" "the leaderboard: started with B, submitted when B was let go, the rank shown"
+expect "[ \$(ra_req r=ping g=4321) -ge 1 ] && python3 -c \"import json,sys; sys.exit(0 if any(json.loads(l).get('m','').startswith('Frame ') for l in open('$T/ra-requests.jsonl')) else 1)\"" "rich presence in the pings (Frame N, from work RAM \$11)"
+expect "[ \$(ra_req get=/Badge/00101.png) = 1 ] && [ -s $T/root/retroachievements/badges/00101.png ]" "the badge fetched through the helper and kept (retroachievements/badges)"
+expect "$CHECK $T/dump/flip00150.ppm 960 300 0 255 0 >/dev/null" "the game runs under the notifications (green while B is held)"
+expect "! $CHECK $T/dump/flip00150.ppm 400 1000 0 255 0 >/dev/null 2>&1 && ! $CHECK $T/dump/flip00150.ppm 400 1000 255 0 0 >/dev/null 2>&1" "a notification box over the picture's bottom left"
+expect "grep -q 'Unloading game 4321' $T/root/logs/boot.log" "the game unloaded from RetroAchievements when it closed"
+expect "no_secret $T/root/logs/boot.log $T/root/logs/helper.log $T/out.txt $T/helper.txt" "the token is in no log"
+expect "! grep -q 'runtime error\|AddressSanitizer' $T/out.txt $T/helper.txt" "no sanitizer reports"
+ra_shot "$T/dump/flip00150.ppm" ra-6-unlock-toast.png
+ra_shot "$T/dump/flip00360.ppm" ra-7-pause-menu-hardcore.png
+ra_shot "$T/dump/flip00420.ppm" ra-8-achievements-list.png
+ra_stop
+
+# 44e: mastery: the server says 3 of 4 are unlocked; B unlocks the last one
+RA_UNLOCKED="102 103 104" ra_setup t44e
+ra_token
+ra_server; ra_helper
+rc=$(rarun "$T" "0:0;$(B_HOLD 100 130);400:$L3R3;402:0;410:$UP;412:0;420:$CROSS;422:0" "" "$T/root/roms/RA Test.sfc")
+expect "[ $rc = 0 ] && [ \$(ra_note 'Snes9x RA Test | 3 of 4 achievements unlocked') = 1 ]" "mastery: the start says 3 of 4"
+expect "[ \$(ra_req r=awardachievement a=101 h=1) = 1 ] && [ \$(ra_note 'Game mastered! | Snes9x RA Test') = 1 ]" "mastery: the last one unlocked -> Game mastered!"
+ra_stop
+
+# 44f: hardcore: a cheat added while the game runs (the file written as an FTP upload, as in group 33) would unlock
+# Secret room ($7E0012 = $42): it never reaches the game. No state loads; the cheat list stays shut.
+waitlog() { for i in $(seq 1 300); do grep -q "$1" "$T/root/logs/boot.log" 2>/dev/null && return 0; sleep 0.1; done; return 1; }
+secret_cheat() { mkdir -p "$T/root/cheats" && printf 'cheat\n  name: Secret\n  code: 7E0012=42\n  enable\n\n' >"$T/new.cht" && mv "$T/new.cht" "$T/root/cheats/RA Test.cht"; }
+ra_setup t44f
+ra_token
+echo "transparency=0" >>"$T/root/snes9x-ps5.ini"
+ra_server; ra_helper
+( SNES9X_HOST_REALTIME=1 MAXFLIPS=2000 rarun "$T" "0:0;60:$L2UP;62:0;90:$L2DOWN;92:0;120:$L2R3;123:0;600:$L3R3;602:0;610:$DOWN;612:0;614:$DOWN;616:0;620:$CROSS;622:0;640:$UP;642:0;644:$UP;646:0;648:$UP;650:0;660:$CROSS;662:0" "" "$T/root/roms/RA Test.sfc" >"$T/rc.txt" ) &
+GAME=$!
+waitlog 'achievements loaded'
+waitlog '\[emu\] frame 240'
+secret_cheat
+waitlog 'reloaded: 1 cheat groups'
+wait $GAME
+expect "[ \"\$(cat $T/rc.txt)\" = 0 ] && grep -q 'hardcore mode: cheats off' $T/root/logs/boot.log && grep -q 'reloaded: 1 cheat groups' $T/root/logs/boot.log" "hardcore: the cheats are off; a cheat added while the game runs is read (and kept in the list)"
+expect "[ \$(ra_req r=awardachievement a=104) = 0 ]" "hardcore: that cheat (\$7E0012 = \$42) never reached the game: Secret room stays locked"
+expect "grep -q 'save state 0 .*: ok' $T/root/logs/boot.log && grep -q 'load state 0: refused, hardcore mode' $T/root/logs/boot.log && grep -q '\[osd\] Hardcore mode: loading states is off' $T/root/logs/boot.log" "hardcore: saving a state works, L2 + Down loads nothing and says why"
+expect "grep -q '\[osd\] Hardcore mode: cheats are off' $T/root/logs/boot.log" "hardcore: the cheat list's shortcut says cheats are off"
+expect "! grep -q 'load state 0 <-' $T/root/logs/boot.log" "hardcore: the pause menu's Load state loaded nothing either"
+expect "[ -s '$T/root/states/RA Test.000.ra' ]" "a state saved with RetroAchievements' progress beside it (.ra)"
+expect "grep -q 'hardcore mode: Transparency stays on' $T/root/logs/boot.log" "hardcore: Transparency stays on though the settings file says off (RetroAchievements forbids it off)"
+ra_stop
+# the same in softcore: the cheat reaches the game (Secret room unlocked, as softcore), and states load
+ra_setup t44f2
+ra_token
+echo "ra_hardcore=0" >>"$T/root/snes9x-ps5.ini"
+ra_server; ra_helper
+( SNES9X_HOST_REALTIME=1 MAXFLIPS=2000 rarun "$T" "0:0;60:$L2UP;62:0;90:$L2DOWN;92:0;600:$L3R3;602:0;610:$UP;612:0;620:$CROSS;622:0" "" "$T/root/roms/RA Test.sfc" >"$T/rc.txt" ) &
+GAME=$!
+waitlog 'achievements loaded'
+waitlog '\[emu\] frame 240'
+secret_cheat
+waitlog 'reloaded: 1 cheat groups'
+wait $GAME
+expect "[ \"\$(cat $T/rc.txt)\" = 0 ] && [ \$(ra_req r=startsession h=0) = 1 ] && [ \$(ra_req r=awardachievement a=104 h=0) = 1 ]" "softcore: the same cheat reaches the game: Secret room unlocked as softcore"
+expect "grep -q 'load state 0 <- .*: ok' $T/root/logs/boot.log && grep -q 'progress restored from the state' $T/root/logs/boot.log" "softcore: a state loads, with its RetroAchievements progress"
+ra_stop
+# hardcore turned on in a game: the game is reset; off again: no reset; states load again
+ra_setup t44f3
+ra_token
+echo "ra_hardcore=0" >>"$T/root/snes9x-ps5.ini"
+ra_server; ra_helper
+# pause -> Hardcore mode (8th row) on; resume; L2+Down refused; pause -> off; L2+Down loads
+HC="$(PAUSE_DOWN 200 7);260:$CROSS;262:0;280:$CIRCLE;282:0"
+HC2="$(PAUSE_DOWN 400 7);460:$CROSS;462:0;480:$CIRCLE;482:0"
+rc=$(rarun "$T" "0:0;60:$L2UP;62:0;$HC;300:$L2DOWN;302:0;$HC2;500:$L2DOWN;502:0;600:$L3R3;602:0;610:$UP;612:0;620:$CROSS;622:0" "250" "$T/root/roms/RA Test.sfc")
+expect "[ $rc = 0 ] && grep -q 'hardcore on: the game is reset' $T/root/logs/boot.log" "hardcore turned on in a game: the game is reset (RetroAchievements' rule)"
+expect "grep -q 'load state 0: refused, hardcore mode' $T/root/logs/boot.log" "then no state loads"
+expect "grep -q '\[ra\] hardcore off' $T/root/logs/boot.log && [ \$(grep -c 'the game is reset' $T/root/logs/boot.log) = 1 ] && grep -q 'load state 0 <- .*: ok' $T/root/logs/boot.log" "turned off again: no reset, and a state loads"
+expect "grep -q 'ra_hardcore=0' $T/root/snes9x-ps5.ini" "the setting kept"
+ra_stop
+
+# 44g: no server (no network): the game plays, one notification says achievements are unavailable
+ra_setup t44g
+ra_token
+ra_helper
+rc=$(rarun "$T" "0:0;$(B_HOLD 100 130);150:$L2UP;152:0;170:$L2DOWN;172:0;300:$L3R3;302:0;310:$UP;312:0;320:$CROSS;322:0" "200" "$T/root/roms/RA Test.sfc")
+expect "[ $rc = 0 ] && $CHECK $T/dump/flip00200.ppm 960 540 255 0 0 >/dev/null" "offline: the game plays (exit 0, the picture at flip 200)"
+expect "[ \$(ra_note 'Achievements unavailable | No connection to RetroAchievements') = 1 ] && [ \$(grep -c '\[ra\] notification' $T/root/logs/boot.log) = 1 ]" "offline: one notification, achievements unavailable (no connection)"
+expect "grep -q 'load state 0 <- .*: ok' $T/root/logs/boot.log && [ -s $T/root/retroachievements/login.txt ]" "offline: no hardcore restriction without achievements; the token kept for later"
+ra_stop
+# the server goes away during the game: the unlock waits (rc_client retries) and goes through when it is back
+ra_setup t44g2
+ra_token
+ra_server; ra_helper
+( SNES9X_HOST_REALTIME=1 MAXFLIPS=3000 RA_CLOCK=8 rarun "$T" "0:0;$(B_HOLD 300 330);1500:$L3R3;1502:0;1510:$UP;1512:0;1520:$CROSS;1522:0" "" "$T/root/roms/RA Test.sfc" >"$T/rc.txt" ) &
+GAME=$!
+waitlog 'achievements loaded'
+kill $RA_SRV 2>/dev/null; wait $RA_SRV 2>/dev/null; RA_SRV=
+waitlog 'notification: RetroAchievements | Offline: unlocks will be sent'
+expect "grep -q 'Offline: unlocks will be sent when the connection is back' $T/root/logs/boot.log" "the server gone: the unlock waits, and a notification says so"
+ra_server
+waitlog 'notification: RetroAchievements | Back online'
+wait $GAME
+expect "[ \"\$(cat $T/rc.txt)\" = 0 ] && [ \$(ra_req r=awardachievement a=101) = 1 ] && grep -q 'Back online: the unlocks were sent' $T/root/logs/boot.log" "the server back: the unlock sent once, and said so"
+ra_stop
+
+# 44h: an older helper (2.10's: it doesn't know the request): said plainly, the game plays
+ra_setup t44h
+ra_token
+python3 - "$SNES9X_HELPER_PORT" <<'PY' &
+import socket, struct, sys, time
+s = socket.socket(); s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+s.bind(('127.0.0.1', int(sys.argv[1]))); s.listen(4); s.settimeout(40)
+end = time.time() + 40
+while time.time() < end:
+    try:
+        c, _ = s.accept()
+    except OSError:
+        break
+    req = b''
+    while len(req) < 0xA10:
+        d = c.recv(0xA10 - len(req))
+        if not d: break
+        req += d
+    if len(req) == 0xA10:
+        magic, cmd, pid, ret = struct.unpack_from('<IiiI', req, 0)
+        if cmd == 5:  # the jailbreak: yes; anything else: closed without a word, as 2.10's helper does
+            out = bytearray(req); struct.pack_into('<i', out, 12, 0); out[16:18] = b'ok'; c.sendall(bytes(out))
+    c.close()
+PY
+OLDH=$!
+sleep 0.5
+rc=$(rarun "$T" "0:0;200:$L3R3;202:0;210:$UP;212:0;220:$CROSS;222:0" "150" "$T/root/roms/RA Test.sfc")
+kill $OLDH 2>/dev/null; wait $OLDH 2>/dev/null
+expect "[ $rc = 0 ] && $CHECK $T/dump/flip00150.ppm 960 540 255 0 0 >/dev/null" "an older helper: the game plays"
+expect "grep -q 'r=login2: an older helper' $T/root/logs/boot.log && [ \$(ra_note \"Achievements unavailable | Update the helper: send the Snes9xPS5-v$VER.elf payload.\") = 1 ]" "an older helper: the notification says to send the $VER payload"
+stop_helpers
+
+# 44i: an expired token: forgotten, and Settings says to log in again (no dialog at start)
+ra_setup t44i
+ra_token tok-EXPIRED-000
+ra_server; ra_helper
+rc=$(rarun "$T" "0:0;100:$TRI;102:0;140:$UP;142:0;144:$UP;146:0;150:$CROSS;152:0;200:$CIRCLE;202:0;240:$CIRCLE;242:0;280:$OPTIONS;282:0;290:$CROSS;292:0" "")
+expect "[ $rc = 0 ] && [ \$(ra_req r=login2 token_expired=True) = 1 ] && [ ! -e $T/root/retroachievements/login.txt ]" "an expired token: refused by the server, the saved login deleted"
+expect "grep -q 'Settings, RetroAchievements: Not logged in | Your login has expired: log in again.' $T/root/logs/boot.log" "Settings, RetroAchievements says the login has expired"
+ra_stop
+
+# 44j: a zipped ROM is hashed by the ROM inside; the screens in Spanish are translated
+ra_setup t44j
+ra_token
+python3 -c "import zipfile,sys; z=zipfile.ZipFile(sys.argv[1],'w',zipfile.ZIP_DEFLATED); z.write(sys.argv[2],'RA Test.sfc'); z.close()" "$T/root/roms/RA Test.zip" "$T/root/roms/RA Test.sfc"
+rm -f "$T/root/roms/RA Test.sfc"
+echo "language=1" >>"$T/root/snes9x-ps5.ini"
+ra_server; ra_helper
+rc=$(SNES9X_HOST_I18N_MISSING=$T/missing.txt rarun "$T" "0:0;$(B_HOLD 100 130);$(PAUSE_DOWN 300 6);340:$CROSS;342:0;380:$CIRCLE;382:0;400:$CIRCLE;402:0;420:$L3R3;422:0;430:$UP;432:0;440:$CROSS;442:0" "" "$T/root/roms/RA Test.zip")
+expect "[ $rc = 0 ] && [ \$(ra_req r=achievementsets m=$RA_HASH) = 1 ] && [ \$(ra_req r=awardachievement a=101) = 1 ]" "a .zip: identified by the ROM inside (the same hash), and it unlocks"
+expect "grep -q 'notification: Snes9x RA Test | 0 de 4 logros desbloqueados | Modo hardcore' $T/root/logs/boot.log" "Spanish: the start notification translated"
+expect "[ ! -s $T/missing.txt ] || ! grep -q -i 'achiev\|hardcore\|login\|helper\|leaderboard\|RetroAchievements' $T/missing.txt" "Spanish: no RetroAchievements text shown untranslated"
+ra_stop
+
 echo
 echo "passed $PASS, failed $FAIL  (work dir $WORK)"
 [ $FAIL = 0 ]
