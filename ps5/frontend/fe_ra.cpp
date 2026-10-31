@@ -465,6 +465,9 @@ void ServerCall(const rc_api_request_t* request, rc_client_server_callback_t cal
 				r.http_status_code = RC_API_SERVER_RESPONSE_CLIENT_ERROR;
 				break;
 			case net::Outcome::Refused:
+				// 2.11 fourth review: not a network problem (an earlier one is over: the helper answered), so nothing
+				// refused is retried as if it were
+				g.issue = Issue::None;
 				r.http_status_code = RC_API_SERVER_RESPONSE_CLIENT_ERROR;
 				break;
 			case net::Outcome::NoHelper:

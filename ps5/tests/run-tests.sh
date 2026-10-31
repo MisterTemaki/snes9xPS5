@@ -2849,20 +2849,21 @@ GAME=$!
 waitlog 'logged in as Tester'
 kill $RA_SRV 2>/dev/null; wait $RA_SRV 2>/dev/null; RA_SRV=
 waitlog 'achievements could not be loaded'
+waitcount 'set is asked for again in' 2 # (fourth review: the first retry fails too, so its failure isn't said again)
 ra_server
 wait $GAME
-expect "[ \"\$(cat $T/rc.txt)\" = 0 ] && grep -q 'the game.s set is asked for again in' $T/root/logs/boot.log && grep -q 'its request had failed; softcore for this game' $T/root/logs/boot.log && [ \$(ra_req r=achievementsets m=$RA_HASH) = 1 ] && [ \$(ra_note 'Snes9x RA Test | 0 of 4 achievements unlocked') = 1 ]" "logged in, the game's set lost to the network: asked for again by itself once the server is back"
+expect "[ \"\$(cat $T/rc.txt)\" = 0 ] && [ \$(grep -c 'the game.s set is asked for again in' $T/root/logs/boot.log) -ge 2 ] && grep -q 'its request had failed; softcore for this game' $T/root/logs/boot.log && [ \$(ra_req r=achievementsets m=$RA_HASH) = 1 ] && [ \$(ra_note 'Snes9x RA Test | 0 of 4 achievements unlocked') = 1 ]" "logged in, the game's set lost to the network: asked for again by itself once the server is back"
 expect "[ \$(ra_req r=awardachievement a=101 h=0) -ge 1 ] && [ \$(ra_req r=awardachievement a=101 h=1) = 0 ] && [ \$(ra_note 'Achievements unavailable') = 1 ]" "that game counts as softcore; \"unavailable\" said once, not at each retry"
 ra_stop
 
 # 44w (M2): no saved-token retry starts while the player types a login: the saved login failed (no server), the server is
-# back once Settings is open, the retry (4 s after the failure) falls due while the keyboard is open; the password login
-# then goes through, alone
+# back once Settings is open, the retry (8 s after the failure) falls due while the keyboard is open (about 3.5 s to 11.5 s
+# after it); the password login then goes through, alone
 ra_setup t44w
 ra_token
 ra_helper
 PAD=$(printf 'frame 70\npress TRIANGLE\nframe 110\npress UP 2\nwait 30\npress CROSS\nframe 190\npress DOWN\npress CROSS\nframe 230\ntype Tester\npress OPTIONS\nframe 350\ntype %s\nframe 640\npress OPTIONS\nframe 760\npress CIRCLE\nframe 820\npress CIRCLE\nframe 860\npress OPTIONS\nframe 870\npress CROSS\n' "$RA_PASS" | python3 tests/osk_pad.py 2>/dev/null)
-( SNES9X_HOST_RA_RETRY_S=4 SNES9X_HOST_REALTIME=1 MAXFLIPS=1200 rarun "$T" "$PAD" "" >"$T/rc.txt" ) &
+( SNES9X_HOST_RA_RETRY_S=8 SNES9X_HOST_REALTIME=1 MAXFLIPS=1200 rarun "$T" "$PAD" "" >"$T/rc.txt" ) &
 GAME=$!
 waitlog 'Settings, RetroAchievements:'
 ra_server
