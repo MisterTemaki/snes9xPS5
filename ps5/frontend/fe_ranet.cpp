@@ -33,7 +33,11 @@ struct Job
 std::mutex g_mu;
 std::condition_variable g_cv;
 std::deque<std::unique_ptr<Job>> g_todo, g_done;
-std::deque<std::function<void()>> g_files; // FileWork, before the next request
+// 2.11 third review: FileWork has its own thread, so a file is never kept waiting behind a request (up to the helper's
+// timeout)
+std::deque<std::function<void()>> g_files;
+std::condition_variable g_files_cv;
+std::unique_ptr<ps5::BigThread> g_file_thread;
 std::unique_ptr<ps5::BigThread> g_thread;
 bool g_stop = false;
 std::atomic<int> g_socket{-1};
@@ -85,27 +89,13 @@ void Worker()
 	for (;;)
 	{
 		std::unique_ptr<Job> job;
-		std::function<void()> file;
 		{
 			std::unique_lock<std::mutex> lock(g_mu);
-			g_cv.wait(lock, [] { return g_stop || !g_todo.empty() || !g_files.empty(); });
+			g_cv.wait(lock, [] { return g_stop || !g_todo.empty(); });
 			if (g_stop)
 				return;
-			if (!g_files.empty())
-			{
-				file = std::move(g_files.front());
-				g_files.pop_front();
-			}
-			else
-			{
-				job = std::move(g_todo.front());
-				g_todo.pop_front();
-			}
-		}
-		if (file)
-		{
-			file();
-			continue;
+			job = std::move(g_todo.front());
+			g_todo.pop_front();
 		}
 		const double t0 = Now();
 		if (!job->cache.empty() && !job->refresh && ReadCache(job->cache, &job->answer.body))
@@ -218,23 +208,40 @@ bool LooksLikePng(const std::string& d, int max_side)
 	return be32(8) == 13 && w >= 1 && h >= 1 && w <= uint32_t(max_side) && h <= uint32_t(max_side);
 }
 
+void FileWorker()
+{
+	for (;;)
+	{
+		std::function<void()> work;
+		{
+			std::unique_lock<std::mutex> lock(g_mu);
+			g_files_cv.wait(lock, [] { return g_stop || !g_files.empty(); });
+			if (g_stop)
+				return; // what is left runs in Stop()
+			work = std::move(g_files.front());
+			g_files.pop_front();
+		}
+		work();
+	}
+}
+
 void FileWork(std::function<void()> work)
 {
 	std::unique_lock<std::mutex> lock(g_mu);
 	g_stop = false;
-	if (!g_thread)
+	if (!g_file_thread)
 	{
-		g_thread.reset(new ps5::BigThread(Worker, 256 * 1024));
-		if (!g_thread->joinable())
+		g_file_thread.reset(new ps5::BigThread(FileWorker, 64 * 1024));
+		if (!g_file_thread->joinable())
 		{
-			g_thread.reset();
+			g_file_thread.reset();
 			lock.unlock();
 			work(); // no thread: done here rather than not at all
 			return;
 		}
 	}
 	g_files.push_back(std::move(work));
-	g_cv.notify_one();
+	g_files_cv.notify_one();
 }
 
 void Pump()
@@ -268,10 +275,12 @@ void Stop()
 		files.swap(g_files);
 	}
 	g_cv.notify_all();
+	g_files_cv.notify_all();
 	const int fd = g_socket.load();
 	if (fd >= 0)
 		shutdown(fd, SHUT_RDWR); // the request under way ends now, not after the helper's timeout
 	g_thread.reset(); // joins
+	g_file_thread.reset(); // joins (after the file it may be writing)
 	g_in_flight = 0;
 	for (auto& f : files)
 		f(); // the saved login written (or deleted) even when the app closes right after

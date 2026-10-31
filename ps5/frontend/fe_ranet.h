@@ -46,8 +46,9 @@ void Send(const std::string& url, const std::string& post, const std::string& us
 void FetchCached(const std::string& url, const std::string& cache_file, const std::string& user_agent,
 	const std::string& what, Done done, bool refresh = false);
 
-// 2.11 second review: file work kept off the main thread (the saved login written or deleted). Run by the request
-// thread before its next request, in order; any left when Stop() comes are run there, so none is lost at exit.
+// 2.11 second review: file work kept off the main thread (the saved login written or deleted). Run in order by a thread
+// of its own (third review: never behind a request still waiting for the server); any left when Stop() comes are run
+// there, so none is lost at exit.
 void FileWork(std::function<void()> work);
 
 // A cached picture's bytes look like a PNG: the 8-byte signature, then an IHDR of 1..max_side pixels each way

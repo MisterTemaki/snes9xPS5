@@ -24,7 +24,7 @@ archive is unpacked by the port, `ps5/frontend/fe_7z.cpp`).
 > **RetroAchievements have not been run on a PS5, nor against the real retroachievements.org**: they were tested on
 > Linux against a local stand-in of RetroAchievements' server (see [RetroAchievements](#retroachievements)). 2.7's
 > network shares and borders, 2.8's Smooth picture and 2.9's `.7z` games have **not been run on a PS5 yet**. It
-> builds with the ps5-payload-dev SDK and passes 597 host tests (one, the sound-queue timing, depends on the test
+> builds with the ps5-payload-dev SDK and passes 602 host tests (one, the sound-queue timing, depends on the test
 > machine's load), which run the same code on Linux with the PS5 calls simulated, plus the network-share, search and
 > other unit and loopback tests. If something fails, turn on Settings, Debug logs: the logs in `/data/snes9x/logs/` say where.
 
@@ -479,9 +479,10 @@ in the game, shown on your profile) to SNES games. Snes9x PS5 uses RetroAchievem
    itself at start, quietly. If that login no longer works (a changed password, an expired login), nothing pops up and
    nothing changes in the games (as without an account): Settings, RetroAchievements says what is wrong and offers **Log
    in** again. If it failed only because the network (or the server) was down, or the helper was an older one, it is
-   tried again by itself, every 10 s at first, then less often (at most every 5 minutes), on the shelf and in games; and
-   starting a game tries it again at once, before the game's first frame (so the game is a normal session, hardcore
-   included, when the login goes through).
+   tried again by itself, every 10 s at first, then less often (at most every 5 minutes), on the shelf and in games (not
+   while you type a login on the keyboard); and starting a game tries it again at once, before the game's first frame,
+   unless the last try was less than 5 s before (so the game is a normal session, hardcore included, when the login goes
+   through).
 5. **Log out** on the same screen deletes the saved login.
 
 Without an account nothing changes: the menus are 2.10's, and the app sends nothing to RetroAchievements.
@@ -521,8 +522,9 @@ Without an account nothing changes: the menus are 2.10's, and the app sends noth
 - **Turning hardcore on during a game resets the game** (RetroAchievements doesn't allow switching in the middle of a
   session). Turning it off is allowed at any time.
 - The restrictions apply only while the game has achievements or leaderboards: for an unknown game, a game without a set,
-  or with no connection, states and cheats work as usual. If the connection comes back during such a game and its
-  achievements load then, that game counts as **softcore** until it is closed (states and cheats were allowed before; the
+  or with no connection, states and cheats work as usual. A game whose achievements couldn't be had for want of a
+  connection asks for them again by itself (every 10 s at first, at most every 5 minutes). If the connection comes back
+  during such a game and its achievements load then, that game counts as **softcore** until it is closed (states and cheats were allowed before; the
   pause menu's Hardcore row says *On (next game)*); turning hardcore on in the pause menu resets it into a hardcore
   session.
 - **Important: hardcore unlocks need RetroAchievements' approval of the emulator.** RetroAchievements' server turns
@@ -832,7 +834,7 @@ make ps5 -j$(nproc)              # build/ps5/Snes9xPS5.elf (installer + helper, 
 make send PS5_HOST=192.168.0.10  # sends it to elfldr (port 9021)
 make dist                        # build/dist/Snes9xPS5-v<version>.elf, the release zip, the source zip
 make app                         # only build/app/PPSA99922/, to copy by hand
-make test                        # Linux builds (app, installer, helper) + 597 tests (ASan/UBSan) and the unit tests
+make test                        # Linux builds (app, installer, helper) + 602 tests (ASan/UBSan) and the unit tests
 ```
 
 The build has three stages:

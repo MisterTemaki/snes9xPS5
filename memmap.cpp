@@ -1341,6 +1341,9 @@ bool8 CMemory::LoadROMMem (const uint8 *source, uint32 sourceSize, const char* o
     return TRUE;
 }
 
+// Snes9x PS5 2.11 (memmap.h). Only LoadROM hands the patched bytes over (S9xRomPatched). LoadROMMem applies no patch;
+// LoadMultiCart runs CheckForAnyPatch for each cart (each call resets this flag) but hands nothing over -- neither is
+// used by the port today, so a multi-cart load's RetroAchievements hash would not see its patches.
 bool8 S9xSoftPatchTried = FALSE;
 
 bool8 CMemory::LoadROM (const char *filename)

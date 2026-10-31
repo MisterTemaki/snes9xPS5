@@ -53,7 +53,7 @@ void RetroAchievementsMenu()
 {
 	NavReader nav;
 	int sel = 0;
-	std::string refused; // why hardcore could not be turned on (until the cursor moves)
+	std::string refused; // why hardcore could not be turned on, or a login not started (until the cursor moves)
 	for (;;)
 	{
 		ra::Pump();
@@ -133,16 +133,19 @@ void RetroAchievementsMenu()
 				ra::Logout();
 			else
 			{
+				// 2.11 third review: no saved-token retry starts while the player types (EditText keeps pumping)
+				ra::LoginKeyboard(true);
 				std::string user = g_last_user;
 				if (EditText(T("RetroAchievements user name"), user, false, 64) && !user.empty())
 				{
 					g_last_user = user;
 					std::string password;
 					if (EditText(T("RetroAchievements password"), password, true, 128) && !password.empty())
-						ra::BeginLogin(user, password); // wipes it
+						ra::BeginLogin(user, password, &refused); // wipes it; refused while another login runs
 					for (char& c : password)
 						*(volatile char*)&c = 0;
 				}
+				ra::LoginKeyboard(false);
 			}
 			nav = NavReader();
 		}

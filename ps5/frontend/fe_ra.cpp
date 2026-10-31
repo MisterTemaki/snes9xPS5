@@ -26,6 +26,7 @@
 #include <unistd.h>
 
 #include <algorithm>
+#include <atomic>
 #include <cstdarg>
 #include <cstdio>
 #include <cstdlib>
@@ -88,8 +89,12 @@ struct State
 	std::string hash; // the game's hash, to ask for its set again once a login that came late goes through
 	double last_frame = -1000, last_idle = -1000;
 	double retry_at = 0, retry_delay = 0; // 2.11 review: the saved token tried again while the network is down
-	// 2.11 second review: the saved login, as login.txt has it (read once at start; written and deleted by the request
-	// thread, net::FileWork), so no retry or login touches the disk on this thread. The token is redacted from the logs.
+	// 2.11 third review: the running game's set asked for again (logged in, its request failed for want of a network)
+	double set_retry_at = 0, set_retry_delay = 0;
+	bool set_retrying = false; // the set's request in flight is such a retry (its failure is only logged)
+	bool login_ui_open = false; // the login keyboard is open: no saved-token retry starts meanwhile
+	// 2.11 second review: the saved login, as login.txt has it (read once at start; written and deleted off this thread,
+	// net::FileWork), so no retry or login touches the disk on this thread. The token is redacted from the logs.
 	std::string saved_user, saved_token;
 	bool drew = false; // the overlay drew something last time (the shelf redraws once more to clear it)
 	// the set came only after the game had started without it (a login that went through late): states and cheats were
@@ -228,17 +233,24 @@ bool WriteLogin(const std::string& user, const std::string& token)
 	return true;
 }
 
-// 2.11 second review: the saved login changed: kept here, the file written by the request thread
+// 2.11 third review: set by the file thread when writing login.txt failed, so the next login writes it again
+std::atomic<bool> g_login_unsaved{false};
+
+// 2.11 second review: the saved login changed: kept here, the file written off this thread (net::FileWork)
 void SaveLogin(const std::string& user, const std::string& token)
 {
-	if (user == g.saved_user && token == g.saved_token)
-		return; // a token login gets the same token back: nothing to write
+	if (user == g.saved_user && token == g.saved_token && !g_login_unsaved.load())
+		return; // a token login gets the same token back: nothing to write (unless the last write failed)
 	Wipe(g.saved_token);
 	g.saved_user = user;
 	g.saved_token = token;
+	g_login_unsaved = false;
 	net::FileWork([user = std::string(user), token = std::string(token)]() mutable {
 		if (!WriteLogin(user, token))
-			OrbisLog("[ra] could not save the login in %s", LoginFile().c_str());
+		{
+			g_login_unsaved = true;
+			OrbisLog("[ra] could not save the login in %s: written again at the next login", LoginFile().c_str());
+		}
 		Wipe(token);
 	});
 }
@@ -343,6 +355,19 @@ void ScheduleRetry()
 	g.retry_delay = g.retry_delay <= 0 ? first : std::min(300.0, g.retry_delay * 2);
 	g.retry_at = Now() + g.retry_delay;
 	OrbisLog("[ra] the saved login is tried again in %.0f s", g.retry_delay);
+}
+
+// 2.11 third review: the same backoff for the running game's set, when its request failed for want of a network
+void ScheduleSetRetry()
+{
+	double first = 10;
+#ifndef __PROSPERO__
+	if (const char* e = getenv("SNES9X_HOST_RA_RETRY_S"))
+		first = atof(e) > 0 ? atof(e) : first;
+#endif
+	g.set_retry_delay = g.set_retry_delay <= 0 ? first : std::min(300.0, g.set_retry_delay * 2);
+	g.set_retry_at = Now() + g.set_retry_delay;
+	OrbisLog("[ra] the game's set is asked for again in %.0f s", g.set_retry_delay);
 }
 
 std::string IssueText(Issue issue)
@@ -560,6 +585,23 @@ void OnEvent(const rc_client_event_t* e, rc_client_t*)
 
 void OnGameLoaded(int result, const char* error_message, rc_client_t* client, void*);
 
+// 2.11 review: the running game's set, asked for again once it can be had (a login that went through late; third review:
+// a set request that failed for want of a network). States and cheats were allowed while it was missing, so the game
+// counts as softcore until it closes (RetroAchievements: hardcore can't start in the middle of a session); turning
+// hardcore on resets it into a real hardcore session.
+void LoadSetLate(const char* why)
+{
+	OrbisLog("[ra] the running game's set is asked for again (%s; softcore for this game: it started without it)", why);
+	if (rc_client_get_hardcore_enabled(g.client))
+	{
+		g.session_softcore = true;
+		rc_client_set_hardcore_enabled(g.client, 0);
+	}
+	g.game = GameRa::Loading;
+	rc_client_begin_load_game(g.client, g.hash.c_str(), OnGameLoaded, nullptr);
+	emu::HardcoreChanged();
+}
+
 void OnLogin(int result, const char* error_message, rc_client_t* client, void*)
 {
 	if (!g.password_sent.empty())
@@ -582,7 +624,7 @@ void OnLogin(int result, const char* error_message, rc_client_t* client, void*)
 			OrbisLogRedact(FormEncoded(user->token));
 		}
 		// the token, kept for the next start (written again only when it changed: a token login gets the same one; the
-		// file is written by the request thread)
+		// file is written off this thread)
 		if (user->token && user->username)
 			SaveLogin(user->username, user->token);
 		OrbisLog("[ra] logged in as %s (%u points, softcore %u)", user->display_name, user->score, user->score_softcore);
@@ -591,15 +633,9 @@ void OnLogin(int result, const char* error_message, rc_client_t* client, void*)
 		// 2.11 review: a game that started while the login could not go through gets its set now
 		if (g.game_open && g.game == GameRa::Failed && !g.hash.empty())
 		{
-			OrbisLog("[ra] the running game's set is asked for again (softcore for this game: it started without it)");
-			if (rc_client_get_hardcore_enabled(client))
-			{
-				g.session_softcore = true;
-				rc_client_set_hardcore_enabled(client, 0);
-			}
-			g.game = GameRa::Loading;
-			rc_client_begin_load_game(client, g.hash.c_str(), OnGameLoaded, nullptr);
-			emu::HardcoreChanged();
+			g.set_retry_at = 0;
+			g.set_retrying = false;
+			LoadSetLate("the login went through");
 		}
 		return;
 	}
@@ -633,8 +669,12 @@ void OnGameLoaded(int result, const char* error_message, rc_client_t* client, vo
 {
 	if (!g.game_open || result == RC_ABORTED)
 		return;
+	const bool retry = g.set_retrying;
+	g.set_retrying = false;
 	if (result == RC_OK)
 	{
+		g.set_retry_at = 0;
+		g.set_retry_delay = 0;
 		const bool things = rc_client_has_achievements(client) || rc_client_has_leaderboards(client);
 		g.game = things ? GameRa::Active : GameRa::NoSet;
 		const rc_client_game_t* game = rc_client_get_game_info(client);
@@ -660,9 +700,14 @@ void OnGameLoaded(int result, const char* error_message, rc_client_t* client, vo
 		g.game = GameRa::Failed;
 		const std::string why = IssueText(g.issue);
 		OrbisLog("[ra] the game's achievements could not be loaded (%d): %s", result, error_message ? error_message : "");
-		// 2.11 review: a login the server refused is off for the session (Settings says why), so nothing is said here
-		if (AccountActive())
+		// 2.11 review: a login the server refused is off for the session (Settings says why), so nothing is said here;
+		// third review: nor again for each failed retry of the set
+		if (AccountActive() && !retry)
 			Notify(fe::T("Achievements unavailable"), why.empty() ? std::string(error_message ? error_message : "") : why);
+		// 2.11 third review: logged in, but the set's request failed for want of a network: asked for again by itself (a
+		// failed login is the login's retry's business: its success asks for the set)
+		if (g.login == Login::LoggedIn && RetryableIssue())
+			ScheduleSetRetry();
 	}
 	emu::HardcoreChanged(); // the restrictions may be lifted (an unknown game, nothing to unlock, no network)
 }
@@ -732,7 +777,15 @@ void Pump()
 	const double now = Now();
 	// 2.11 review: the saved token, tried again while the network was the problem (on the shelf too); second review: also
 	// after an old helper, and from memory (no file read here)
-	if (g.login == Login::Failed && g.retry_at > 0 && now >= g.retry_at && RetryableIssue())
+	// 2.11 third review: logged in, the running game's set failed for want of a network: asked for again
+	if (g.login == Login::LoggedIn && g.game_open && g.game == GameRa::Failed && !g.hash.empty() && g.set_retry_at > 0 &&
+		now >= g.set_retry_at)
+	{
+		g.set_retry_at = 0;
+		g.set_retrying = true;
+		LoadSetLate("its request had failed");
+	}
+	if (g.login == Login::Failed && g.retry_at > 0 && now >= g.retry_at && RetryableIssue() && !g.login_ui_open)
 	{
 		g.retry_at = 0;
 		if (!g.saved_token.empty())
@@ -793,12 +846,22 @@ std::string Problem()
 	return "";
 }
 
-void BeginLogin(const std::string& user, std::string& password)
+bool BeginLogin(const std::string& user, std::string& password, std::string* refused)
 {
 	if (!EnsureClient())
 	{
 		Wipe(password);
-		return;
+		return false;
+	}
+	if (g.login == Login::Pending)
+	{
+		// 2.11 third review: rc_client refuses a second login while one is under way ("Login already in progress"), and
+		// logging out to abort it would let its answer, when it comes, be taken for the new one's: refused, nothing changed
+		OrbisLog("[ra] password login refused: a login is already under way");
+		Wipe(password);
+		if (refused)
+			*refused = fe::T("A login is already under way: try again in a moment.");
+		return false;
 	}
 	if (g.login == Login::LoggedIn)
 		rc_client_logout(g.client);
@@ -815,6 +878,15 @@ void BeginLogin(const std::string& user, std::string& password)
 	OrbisLog("[ra] logging in as %s with a password", user.c_str());
 	rc_client_begin_login_with_password(g.client, user.c_str(), password.c_str(), OnLogin, nullptr);
 	Wipe(password);
+	return true;
+}
+
+void LoginKeyboard(bool open)
+{
+	if (g.login_ui_open == open)
+		return;
+	g.login_ui_open = open;
+	OrbisLog("[ra] login keyboard %s", open ? "open: the saved login is not tried again meanwhile" : "closed");
 }
 
 void Logout()
@@ -902,6 +974,9 @@ void GameStarted(const std::string& rom_path, bool patch_tried, const std::vecto
 	g.game = GameRa::Off;
 	g.rom = rom_path;
 	g.hash.clear();
+	g.set_retry_at = 0;
+	g.set_retry_delay = 0;
+	g.set_retrying = false;
 	// (notifications still waiting -- an unlock sent from the shelf -- stay; the game's own indicators start empty)
 	g.trackers.clear();
 	g.challenges.clear();
@@ -970,6 +1045,9 @@ void GameClosed()
 	g.game_open = false;
 	g.game = GameRa::Off;
 	g.hash.clear();
+	g.set_retry_at = 0; // 2.11 third review: no set to ask for any more
+	g.set_retry_delay = 0;
+	g.set_retrying = false;
 	if (g.session_softcore && g.client)
 		rc_client_set_hardcore_enabled(g.client, fe::Config().ra_hardcore ? 1 : 0);
 	g.session_softcore = false;

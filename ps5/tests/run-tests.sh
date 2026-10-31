@@ -2769,8 +2769,13 @@ ra_stop
 # the saved token at once (no wait for the next retry), and the game is a hardcore session from its first frame
 ra_setup t44s
 ra_token
+# (third review L3: the game-start login answers 3 s late; a state saved and loaded meanwhile: the load is refused)
+python3 - "$T/ra.json" <<'PY'
+import json, sys
+c = json.load(open(sys.argv[1])); c["delay_first"] = {"login2": 3}; json.dump(c, open(sys.argv[1], "w"))
+PY
 ra_helper
-( SNES9X_HOST_RA_RETRY_S=60 SNES9X_HOST_REALTIME=1 MAXFLIPS=1800 rarun "$T" "0:0;600:$CROSS;602:0;$(B_HOLD 900 960);1200:$L3R3;1202:0;1210:$UP;1212:0;1216:$UP;1218:0;1224:$CROSS;1226:0;1500:$OPTIONS;1502:0;1510:$CROSS;1512:0" "" >"$T/rc.txt" ) &
+( SNES9X_HOST_RA_RETRY_S=60 SNES9X_HOST_REALTIME=1 MAXFLIPS=1800 rarun "$T" "0:0;600:$CROSS;602:0;640:$L2UP;642:0;680:$L2DOWN;682:0;$(B_HOLD 900 960);1200:$L3R3;1202:0;1210:$UP;1212:0;1216:$UP;1218:0;1224:$CROSS;1226:0;1500:$OPTIONS;1502:0;1510:$CROSS;1512:0" "" >"$T/rc.txt" ) &
 GAME=$!
 waitlog 'login failed'
 ra_server
@@ -2778,6 +2783,7 @@ wait $GAME
 expect "[ \"\$(cat $T/rc.txt)\" = 0 ] && grep -q 'the saved login is tried again for this game' $T/root/logs/boot.log && grep -q 'logged in as Tester' $T/root/logs/boot.log" "booted offline, the server back: the game's start tries the saved token again at once"
 expect "[ \$(ra_req r=achievementsets m=$RA_HASH) = 1 ] && [ \$(ra_req r=startsession g=4321 h=1) = 1 ] && [ \$(ra_req r=awardachievement a=101 h=1) = 1 ] && ! grep -q 'softcore for this game' $T/root/logs/boot.log" "the set loads behind the login: a hardcore session from the start, the unlock hardcore"
 expect "grep -q 'pause menu (RetroAchievements rows: yes, hardcore: on)' $T/root/logs/boot.log" "the pause menu's Hardcore row says On"
+expect "awk '/the saved login is tried again for this game/{p=1} /logged in as Tester/{p=0} p' $T/root/logs/boot.log | grep -q 'load state 0: refused, hardcore mode'" "while that login is still under way, the hardcore rules already hold: a state load is refused"
 ra_stop
 
 # 44t (second review L1): a 2.11 helper answers every RetroAchievements request, even one it refuses: an app it doesn't
@@ -2828,8 +2834,41 @@ PY
 ra_server; ra_helper
 rc=$(rarun "$T" "0:0;$(B_HOLD 100 130);700:$L3R3;702:0;710:$UP;712:0;720:$CROSS;722:0" "" "$T/root/roms/RA Test.sfc")
 png_ok() { python3 -c "import sys; d=open(sys.argv[1],'rb').read(); sys.exit(0 if d[:8]==b'\x89PNG\r\n\x1a\n' and d[12:16]==b'IHDR' and b'IEND' in d else 1)" "$1"; }
-expect "[ $rc = 0 ] && [ \$(ra_req get=/Badge/00101.png) = 1 ] && png_ok $T/root/retroachievements/badges/00101.png" "a cached badge that isn't a PNG: fetched again and replaced"
+expect "[ $rc = 0 ] && [ \$(ra_req get=/Badge/00101.png) = 1 ] && png_ok $T/root/retroachievements/badges/00101.png && grep -q 'the cached .*00101.png is not a picture: fetched again' $T/root/logs/boot.log && ! grep -q 'badge 00101: the cached picture doesn.t decode' $T/root/logs/boot.log" "a cached badge that isn't a PNG: not used (no decoding tried), fetched again and replaced"
 expect "[ \$(ra_req r=awardachievement a=102) = 1 ] && grep -q 'badge 00102: the cached picture doesn.t decode: fetched again' $T/root/logs/boot.log && [ \$(ra_req get=/Badge/00102.png) = 1 ] && png_ok $T/root/retroachievements/badges/00102.png" "a cached badge that doesn't decode: fetched again and replaced"
+ra_stop
+
+# --- 2.11 third review ---
+# 44v (M1): logged in at the start; the server lost before the game starts, so its set can't be had; the server back:
+# the set is asked for again by itself, and that game counts as softcore (states and cheats were allowed meanwhile)
+ra_setup t44v
+ra_token
+ra_server; ra_helper
+( SNES9X_HOST_RA_RETRY_S=2 SNES9X_HOST_REALTIME=1 MAXFLIPS=1800 rarun "$T" "0:0;300:$CROSS;302:0;$(B_HOLD 1100 1160);1400:$L3R3;1402:0;1410:$UP;1412:0;1416:$UP;1418:0;1424:$CROSS;1426:0;1600:$OPTIONS;1602:0;1610:$CROSS;1612:0" "" >"$T/rc.txt" ) &
+GAME=$!
+waitlog 'logged in as Tester'
+kill $RA_SRV 2>/dev/null; wait $RA_SRV 2>/dev/null; RA_SRV=
+waitlog 'achievements could not be loaded'
+ra_server
+wait $GAME
+expect "[ \"\$(cat $T/rc.txt)\" = 0 ] && grep -q 'the game.s set is asked for again in' $T/root/logs/boot.log && grep -q 'its request had failed; softcore for this game' $T/root/logs/boot.log && [ \$(ra_req r=achievementsets m=$RA_HASH) = 1 ] && [ \$(ra_note 'Snes9x RA Test | 0 of 4 achievements unlocked') = 1 ]" "logged in, the game's set lost to the network: asked for again by itself once the server is back"
+expect "[ \$(ra_req r=awardachievement a=101 h=0) -ge 1 ] && [ \$(ra_req r=awardachievement a=101 h=1) = 0 ] && [ \$(ra_note 'Achievements unavailable') = 1 ]" "that game counts as softcore; \"unavailable\" said once, not at each retry"
+ra_stop
+
+# 44w (M2): no saved-token retry starts while the player types a login: the saved login failed (no server), the server is
+# back once Settings is open, the retry (4 s after the failure) falls due while the keyboard is open; the password login
+# then goes through, alone
+ra_setup t44w
+ra_token
+ra_helper
+PAD=$(printf 'frame 70\npress TRIANGLE\nframe 110\npress UP 2\nwait 30\npress CROSS\nframe 190\npress DOWN\npress CROSS\nframe 230\ntype Tester\npress OPTIONS\nframe 350\ntype %s\nframe 640\npress OPTIONS\nframe 760\npress CIRCLE\nframe 820\npress CIRCLE\nframe 860\npress OPTIONS\nframe 870\npress CROSS\n' "$RA_PASS" | python3 tests/osk_pad.py 2>/dev/null)
+( SNES9X_HOST_RA_RETRY_S=4 SNES9X_HOST_REALTIME=1 MAXFLIPS=1200 rarun "$T" "$PAD" "" >"$T/rc.txt" ) &
+GAME=$!
+waitlog 'Settings, RetroAchievements:'
+ra_server
+wait $GAME
+expect "[ \"\$(cat $T/rc.txt)\" = 0 ] && grep -q 'login keyboard open' $T/root/logs/boot.log && [ \$(awk '/login keyboard open/{p=1} /login keyboard closed/{p=0} p' $T/root/logs/boot.log | grep -c 'with the saved token') = 0 ]" "the login keyboard open: no saved-token login starts while the player types"
+expect "grep -q 'logging in as Tester with a password' $T/root/logs/boot.log && [ \$(ra_req r=login2 u=Tester password_ok=True) = 1 ] && grep -q 'Settings, RetroAchievements: Tester (1234 points)' $T/root/logs/boot.log && ! grep -q 'password login refused' $T/root/logs/boot.log" "then the password login goes through, alone"
 ra_stop
 
 echo

@@ -55,7 +55,12 @@ uint32_t Points(); // the hardcore score, or the softcore one with hardcore off
 // Why the account isn't logged in (or what went wrong with the network), translated; "" when all is well.
 std::string Problem();
 // Starts a login with a password, which is sent once (through the helper) and never kept: `password` is wiped.
-void BeginLogin(const std::string& user, std::string& password);
+// 2.11 third review: false (and `refused` says why, translated) while another login is still under way: rc_client takes
+// one at a time, and the two answers would mix.
+bool BeginLogin(const std::string& user, std::string& password, std::string* refused = nullptr);
+// 2.11 third review: the login keyboard (Settings, RetroAchievements, Log in) is open: no saved-token retry starts while
+// the player types (it would be under way when the password is sent). Called with true when it opens, false after.
+void LoginKeyboard(bool open);
 void Logout();
 
 // ---- hardcore mode
@@ -73,7 +78,7 @@ bool CanPause(int* seconds_left);
 
 // ---- the game (fe_emu.cpp calls these)
 // After the ROM loaded: the hash, then the set from the server. `patch_tried`: Snes9x ran a soft patch's reader on the
-// ROM (memmap.cpp, Memory.PatchTried); `patched` then holds the bytes it left (S9xRomPatched), which are hashed instead of
+// ROM (memmap.cpp, S9xSoftPatchTried); `patched` then holds the bytes it left (S9xRomPatched), which are hashed instead of
 // the file -- and without them the game is unknown: a patched game is never hashed as its file.
 void GameStarted(const std::string& rom_path, bool patch_tried = false, const std::vector<uint8_t>* patched = nullptr);
 void GameClosed();
