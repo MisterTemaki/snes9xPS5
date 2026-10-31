@@ -2602,13 +2602,15 @@ import json, sys
 c = json.load(open(sys.argv[1])); c["delay_first"] = {"login2": 3, "awardachievement": 3}; json.dump(c, open(sys.argv[1], "w"))
 PY
 ra_server; ra_helper
-rc=$(SNES9X_HOST_RA_TIMEOUT=1 SNES9X_HOST_RA_RETRY_S=2 SNES9X_HOST_REALTIME=1 MAXFLIPS=2400 rarun "$T" "0:0;$(B_HOLD 700 760);1200:$L3R3;1202:0;1210:$UP;1212:0;1220:$CROSS;1222:0" "" "$T/root/roms/RA Test.sfc")
+rc=$(SNES9X_HOST_RA_TIMEOUT=1 SNES9X_HOST_RA_RETRY_S=2 SNES9X_HOST_REALTIME=1 MAXFLIPS=2400 rarun "$T" "0:0;$(B_HOLD 700 760);1200:$L3R3;1202:0;1210:$UP;1212:0;1220:$CROSS;1222:0" "1207" "$T/root/roms/RA Test.sfc")
 expect "[ $rc = 0 ] && ! grep -q 'an older helper\|Update the helper' $T/root/logs/boot.log" "a slow server: never taken for an older helper"
 expect "[ \$(ra_req r=login2) -ge 2 ] && grep -q 'logged in as Tester' $T/root/logs/boot.log && [ -s $T/root/retroachievements/login.txt ]" "a slow server: the token login is tried again by itself and goes through"
 expect "[ \$(ra_req r=achievementsets m=$RA_HASH) = 1 ] && [ \$(ra_note 'Snes9x RA Test | 0 of 4 achievements unlocked') = 1 ]" "then the game's set is loaded, in the game that was already running"
 expect "[ \$(ra_req r=awardachievement a=101) -ge 1 ] && grep -q 'Achievement 101 awarded' $T/root/logs/boot.log" "a slow answer to the unlock: tried again, the unlock arrives"
 expect "grep -q 'softcore for this game: it started without it' $T/root/logs/boot.log && [ \$(ra_req r=awardachievement a=101 h=1) = 0 ] && [ \$(ra_req r=awardachievement a=101 h=0) -ge 1 ]" "a set that came after the game started (states and cheats were allowed meanwhile): that game counts as softcore"
 expect "grep -q 'pause menu (RetroAchievements rows: yes, hardcore: on (next game))' $T/root/logs/boot.log" "and the pause menu's Hardcore row says so: On (next game)"
+ra_shot "$T/dump/flip01207.ppm" ra-10-pause-menu-next-game.png
+rm -f "$T"/dump/*.ppm
 ra_stop
 
 # 44m (L1): a login the server refused is off for the session: no notification at a game's start, no Achievements or

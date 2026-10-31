@@ -24,7 +24,7 @@ archive is unpacked by the port, `ps5/frontend/fe_7z.cpp`).
 > **RetroAchievements have not been run on a PS5, nor against the real retroachievements.org**: they were tested on
 > Linux against a local stand-in of RetroAchievements' server (see [RetroAchievements](#retroachievements)). 2.7's
 > network shares and borders, 2.8's Smooth picture and 2.9's `.7z` games have **not been run on a PS5 yet**. It
-> builds with the ps5-payload-dev SDK and passes 585 host tests (one, the sound-queue timing, depends on the test
+> builds with the ps5-payload-dev SDK and passes 597 host tests (one, the sound-queue timing, depends on the test
 > machine's load), which run the same code on Linux with the PS5 calls simulated, plus the network-share, search and
 > other unit and loopback tests. If something fails, turn on Settings, Debug logs: the logs in `/data/snes9x/logs/` say where.
 
@@ -478,8 +478,10 @@ in the game, shown on your profile) to SNES games. Snes9x PS5 uses RetroAchievem
 4. The screen says **Logged in as** *name* **(points)**; the Settings row says the same. Next time the app logs in by
    itself at start, quietly. If that login no longer works (a changed password, an expired login), nothing pops up and
    nothing changes in the games (as without an account): Settings, RetroAchievements says what is wrong and offers **Log
-   in** again. If it failed only because the network (or the server) was down, it is tried again by itself, every 10 s at
-   first, then less often (at most every 5 minutes), on the shelf and in games.
+   in** again. If it failed only because the network (or the server) was down, or the helper was an older one, it is
+   tried again by itself, every 10 s at first, then less often (at most every 5 minutes), on the shelf and in games; and
+   starting a game tries it again at once, before the game's first frame (so the game is a normal session, hardcore
+   included, when the login goes through).
 5. **Log out** on the same screen deletes the saved login.
 
 Without an account nothing changes: the menus are 2.10's, and the app sends nothing to RetroAchievements.
@@ -490,14 +492,15 @@ Without an account nothing changes: the menus are 2.10's, and the app sends noth
   file without a copier header; for a `.zip`, `.7z` or `.gz` the ROM inside it, so a zipped ROM is the same game as the
   loose one; ROMs on a network share and MSU-1 ROMs too) and asks for the game's achievements.
 - **Soft patches:** when Snes9x applies an IPS, UPS or BPS patch at load (a patch beside the ROM, in `/data/snes9x/patches`
-  or inside its zip), the patched game is hashed, as RetroArch does: a translation or hack gets its own entry on
-  RetroAchievements if it has one, and is otherwise an unknown game. A patch never plays under the original game's
-  achievements.
+  or inside its zip, or an MSU-1 pack's patch), the patched game is hashed, as RetroArch does: a translation or hack gets
+  its own entry on RetroAchievements if it has one, and is otherwise an unknown game. This holds for a patch Snes9x
+  applies only in part (an IPS without its end marker) too, and if the patched game can't be copied for its hash (no
+  memory) the game is simply unknown. A patch never plays under the original game's achievements.
 - A small box at the bottom left of the picture says **N of M achievements unlocked** and whether hardcore is on, or **No
   achievements for this game**, or **Unknown game: no achievements** (a ROM RetroAchievements doesn't know: a hack, a bad
   dump, a different revision).
 - Each unlock shows its title, description, points and badge (the badge picture is downloaded once and kept in
-  `retroachievements/badges/`). Leaderboard attempts (started, failed, submitted, your rank), a mastered game, and the
+  `retroachievements/badges/`; a damaged file there is downloaded again). Leaderboard attempts (started, failed, submitted, your rank), a mastered game, and the
   live leaderboard value and challenge markers (top right) show the same way. The boxes never pause or slow the game and go
   away by themselves after a few seconds.
 - **Pause menu > Achievements**: every achievement of the game, locked or unlocked, with its description, points and,
@@ -519,8 +522,9 @@ Without an account nothing changes: the menus are 2.10's, and the app sends noth
   session). Turning it off is allowed at any time.
 - The restrictions apply only while the game has achievements or leaderboards: for an unknown game, a game without a set,
   or with no connection, states and cheats work as usual. If the connection comes back during such a game and its
-  achievements load then, that game counts as **softcore** until it is closed (states and cheats were allowed before);
-  turning hardcore on in the pause menu resets it into a hardcore session.
+  achievements load then, that game counts as **softcore** until it is closed (states and cheats were allowed before; the
+  pause menu's Hardcore row says *On (next game)*); turning hardcore on in the pause menu resets it into a hardcore
+  session.
 - **Important: hardcore unlocks need RetroAchievements' approval of the emulator.** RetroAchievements' server turns
   hardcore unlocks from an emulator it doesn't recognise (by its User-Agent, here `Snes9xPS5/2.11 (PlayStation 5)
   Snes9x/1.63 rcheevos/12.5`) into softcore unlocks, and may show a "Warning: Unsupported Emulator" notice at game start.
@@ -544,7 +548,8 @@ Without an account nothing changes: the menus are 2.10's, and the app sends noth
   unlocks in memory only: one still waiting when the app closes is lost (the achievement unlocks again the next time its
   conditions are met).
 - **An older helper** (2.10's, still running from your autoload): it doesn't know these requests, and the app says so:
-  "Update the helper: send the Snes9xPS5-v2.11.elf payload." Put the 2.11 ELF in your autoload.
+  "Update the helper: send the Snes9xPS5-v2.11.elf payload." Put the 2.11 ELF in your autoload. If you send it while the
+  app runs, the login is tried again by itself (as above): no need to restart the app.
 
 **What has been tested:** the whole chain on Linux, the real helper in front of a local stand-in of RetroAchievements'
 server that answers in the format rcheevos's own tests record (login with a password and with the token, a wrong password,
@@ -827,7 +832,7 @@ make ps5 -j$(nproc)              # build/ps5/Snes9xPS5.elf (installer + helper, 
 make send PS5_HOST=192.168.0.10  # sends it to elfldr (port 9021)
 make dist                        # build/dist/Snes9xPS5-v<version>.elf, the release zip, the source zip
 make app                         # only build/app/PPSA99922/, to copy by hand
-make test                        # Linux builds (app, installer, helper) + 585 tests (ASan/UBSan) and the unit tests
+make test                        # Linux builds (app, installer, helper) + 597 tests (ASan/UBSan) and the unit tests
 ```
 
 The build has three stages:
