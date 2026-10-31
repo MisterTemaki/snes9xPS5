@@ -20,9 +20,12 @@ archive is unpacked by the port, `ps5/frontend/fe_7z.cpp`).
 
 > **Status (2.11):** 2.6 runs on the console: the app opens from its icon, the shelf, the controller, video and sound
 > work, and games play. 2.10 was run on a PS5 before release: the shelf opened from its saved list (3,250 games on
-> a USB drive), the exceptions check passed, the search worked, a game played, and the update check ran. 2.11's
-> **RetroAchievements have not been run on a PS5, nor against the real retroachievements.org**: they were tested on
-> Linux against a local stand-in of RetroAchievements' server (see [RetroAchievements](#retroachievements)). 2.7's
+> a USB drive), the exceptions check passed, the search worked, a game played, and the update check ran. 2.11 was
+> run on a PS5 before release: the payload installed it, the app opened, the exceptions check passed, and the
+> RetroAchievements login went through the helper to the real retroachievements.org (a wrong user name was refused
+> with its message, the right one logged in). **Achievements in a game (the set loading, unlocks, the list, hardcore)
+> have not been confirmed on a console yet**: they were tested on Linux against a local stand-in of RetroAchievements'
+> server (see [RetroAchievements](#retroachievements)). 2.7's
 > network shares and borders, 2.8's Smooth picture and 2.9's `.7z` games have **not been run on a PS5 yet**. It
 > builds with the ps5-payload-dev SDK and passes 602 host tests (one, the sound-queue timing, depends on the test
 > machine's load), which run the same code on Linux with the PS5 calls simulated, plus the network-share, search and
@@ -64,8 +67,8 @@ client library, rcheevos 12.5.0: log in from Settings, RetroAchievements; games 
 achievements unlock as you play, with small notifications over the game, leaderboards, rich presence and an
 Achievements list in the pause menu. Hardcore mode is on by default (no loading of states, no cheats). Without an account
 nothing changes and nothing is sent. **Send the 2.11 payload once** (`Snes9xPS5-v2.11.elf`): the helper makes the
-requests, and a 2.10 helper doesn't know them. Not yet tried on a PS5 or against the real server: see
-[RetroAchievements](#retroachievements), and its note on hardcore mode.
+requests, and a 2.10 helper doesn't know them. On a PS5 the login was tried against the real server; achievements in a
+game not yet: see [RetroAchievements](#retroachievements), and its note on hardcore mode.
 
 **2.10:** **Search by name on the shelf**: **Circle** opens the on-screen keyboard; type part of a game's name and the
 shelf shows only the games that match (capitals and accents don't matter: `pokemon` finds *Pokémon*; the file name
@@ -557,8 +560,9 @@ Without an account nothing changes: the menus are 2.10's, and the app sends noth
 server that answers in the format rcheevos's own tests record (login with a password and with the token, a wrong password,
 an expired token, the game's set, unlocks from the game's memory, a leaderboard, rich presence, mastery, hardcore's rules,
 no network, the server lost and back, an older helper, the logs), and the hash of headered, unheadered, zipped, 7-Zip and
-gzip ROMs against RetroAchievements' rule. **Not tested:** the real retroachievements.org (its TLS, its answers with a
-real account and real game sets) and anything on a PS5.
+gzip ROMs against RetroAchievements' rule. **On a PS5** (2.11, before release): the login through the helper to the real
+retroachievements.org (its TLS, a wrong user name refused, a real account logged in). **Not tested yet:** real game sets,
+unlocks, leaderboards and hardcore on a console.
 
 ## CRT shaders
 
